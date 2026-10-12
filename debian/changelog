@@ -1,3 +1,17 @@
+octoshield (1.0.0) unstable; urgency=medium
+
+  * Release the native GNOME application and Whiptail command-line interface
+    with shared firewall, USB authorization, network, service, sudo, security
+    update, AppArmor, and desktop protection controls.
+  * Require reviewed changes and administrator authorization for system actions;
+    retain private configuration recovery records and optional event monitoring.
+  * Provide Ubuntu 24.04 and 26.04 Debian packages, system light/dark appearance,
+    application metadata, release screenshots, and optional signed APT updates.
+  * Preserve administrator-selected protections during package upgrades and
+    removal; installing OctoShield does not automatically enable hardening.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Mon, 12 Oct 2026 13:32:57 +0000
+
 octoshield (0.2.0) unstable; urgency=medium
 
   * Add native GNOME desktop controls alongside the existing terminal interface.

@@ -33,7 +33,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "0.2.0"
+#define OCTOSHIELD_VERSION "1.0.0"
 #endif
 
 typedef struct App App;
