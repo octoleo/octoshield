@@ -96,24 +96,53 @@ CONFIG
 }
 
 controls::apply_services() {
-    local unit load_state unit_state active_state
+    local unit load_state unit_state active_state index
     local -a units=(
         ssh.service ssh.socket avahi-daemon.service avahi-daemon.socket
         cups.service cups.socket cups.path cups-browsed.service
         bluetooth.service smbd.service nmbd.service gnome-remote-desktop.service
     )
+    local -a targets=() unit_states=() active_states=()
     core::require_root || return 1
     controls::local_console || return 1
-    core::log 'Stop and persistently mask installed SSH, Avahi, CUPS printing, Bluetooth, Samba, and system GNOME remote-desktop services/sockets.'
-    core::log 'Bluetooth keyboards/mice will disconnect. Use the built-in or a trusted wired keyboard. Per-user sharing is managed separately in Desktop settings.'
-    core::confirm 'Disable these local services? Printing, Bluetooth and inbound SSH will stop.' || return 1
+    # Finish discovery before asking for consent or changing any unit. In
+    # particular, socket/path activation partners must appear in the review.
     for unit in "${units[@]}"; do
         load_state=$(systemctl show --property=LoadState --value "$unit") || return 1
         [[ $load_state == not-found ]] && continue
+        if [[ $load_state != loaded && $load_state != masked ]]; then
+            core::die "Cannot safely inspect $unit: unexpected load state. No services were changed."
+            return 1
+        fi
         unit_state=$(systemctl show --property=UnitFileState --value "$unit") || return 1
         active_state=$(systemctl show --property=ActiveState --value "$unit") || return 1
-        core::record "service-before: $unit enabled=$unit_state active=$active_state" || return 1
+        if [[ ! $unit_state =~ ^[a-z][a-z-]{0,63}$ || ! $active_state =~ ^[a-z][a-z-]{0,63}$ ]]; then
+            core::die "Cannot safely inspect $unit: missing or invalid original state. No services were changed."
+            return 1
+        fi
+        targets+=("$unit")
+        unit_states+=("$unit_state")
+        active_states+=("$active_state")
+    done
+    if ((${#targets[@]} == 0)); then
+        core::log 'No installed sharing services or activation units from the conference policy were found. Nothing to change.'
+        return 0
+    fi
+    core::log 'The following installed units will be stopped and persistently masked. Their current states are:'
+    for index in "${!targets[@]}"; do
+        core::log "  ${targets[index]} enabled=${unit_states[index]} active=${active_states[index]}"
+    done
+    core::log 'Masking prevents these units from being started until they are unmasked. Related printing, Bluetooth and inbound SSH access may stop.'
+    core::log 'Bluetooth keyboards/mice will disconnect if Bluetooth is listed. Use the built-in or a trusted wired keyboard. Per-user sharing is managed separately in Desktop settings.'
+    core::confirm 'Stop and persistently mask exactly the units listed above?' || return 1
+    # Save every approved original before the first policy mutation. Never
+    # rediscover or add targets after consent, even if other units appear.
+    for index in "${!targets[@]}"; do
+        unit=${targets[index]}
+        core::record "service-before: $unit enabled=${unit_states[index]} active=${active_states[index]}" || return 1
         core::backup "/etc/systemd/system/$unit" || return 1
+    done
+    for unit in "${targets[@]}"; do
         systemctl mask --now "$unit" || return 1
     done
     core::record 'services: installed conference sharing services masked; see service-before entries for recovery' || return 1

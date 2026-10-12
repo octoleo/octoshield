@@ -12,6 +12,7 @@ setup() {
     : >"$CALLS"
     unset SSH_CLIENT SSH_CONNECTION SSH_TTY
     export FAIL=''
+    export SERVICE_UNITS='ssh.service'
     export PROFILES=$'11111111-1111-1111-1111-111111111111:802-11-wireless\n22222222-2222-2222-2222-222222222222:802-3-ethernet'
 
     fake() {
@@ -44,8 +45,13 @@ setup() {
     systemctl() {
         fake systemctl "$@" || return 1
         case "$*" in
-            'show --property=LoadState --value ssh.service') printf 'loaded\n' ;;
-            'show --property=LoadState --value '*) printf 'not-found\n' ;;
+            'show --property=LoadState --value '*)
+                if [[ " $SERVICE_UNITS " == *" $4 "* ]]; then
+                    printf 'loaded\n'
+                else
+                    printf 'not-found\n'
+                fi
+                ;;
             'show --property=UnitFileState --value '*) printf 'enabled\n' ;;
             'show --property=ActiveState --value '*) printf 'active\n' ;;
         esac
@@ -182,6 +188,95 @@ setup() {
     grep -Fx 'record service-before: ssh.service enabled=enabled active=active' "$CALLS"
     [ "$(grep '^systemctl mask' "$CALLS")" = 'systemctl mask --now ssh.service' ]
     grep -Fx 'backup /etc/systemd/system/ssh.service' "$CALLS"
+}
+
+@test 'service review lists all installed service socket and path targets before confirmation' {
+    SERVICE_UNITS='ssh.service ssh.socket avahi-daemon.service avahi-daemon.socket cups.service cups.socket cups.path'
+    core::log() { fake log "$@"; }
+    run controls::apply_services
+    [ "$status" -eq 0 ]
+    local unit
+    for unit in $SERVICE_UNITS; do
+        grep -Fx "log   $unit enabled=enabled active=active" "$CALLS"
+        grep -Fx "record service-before: $unit enabled=enabled active=active" "$CALLS"
+        grep -Fx "systemctl mask --now $unit" "$CALLS"
+    done
+    [ "$(grep -c '^systemctl mask' "$CALLS")" -eq 7 ]
+    # The complete state inspection and review precede consent. Every backup
+    # is complete before the first stop/mask, rather than interleaved with it.
+    awk '
+        /^confirm$/ { consent = 1 }
+        /^systemctl show / || /^log   / { if (consent) exit 1 }
+        /^backup / { if (!consent || mutated) exit 1; backups++ }
+        /^systemctl mask / { if (!consent || backups != 7) exit 1; mutated = 1 }
+        END { if (!consent || !mutated) exit 1 }
+    ' "$CALLS"
+}
+
+@test 'declining the exact service review performs no backup record or mutation' {
+    SERVICE_UNITS='ssh.service ssh.socket cups.path'
+    FAIL=confirm
+    run controls::apply_services
+    [ "$status" -ne 0 ]
+    [[ $output == *'ssh.socket enabled=enabled active=active'* ]]
+    [[ $output == *'cups.path enabled=enabled active=active'* ]]
+    [ "$(tail -n 1 "$CALLS")" = confirm ]
+    run grep -E '^(backup|record|systemctl mask)' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'a late service preflight failure prevents consent and all mutations' {
+    SERVICE_UNITS='ssh.service ssh.socket cups.service cups.socket cups.path'
+    FAIL='systemctl show --property=ActiveState --value cups.path'
+    run controls::apply_services
+    [ "$status" -ne 0 ]
+    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'service discovery rejects an incomplete original state before consent' {
+    systemctl() {
+        fake systemctl "$@" || return 1
+        case "$*" in
+            'show --property=LoadState --value ssh.service') printf 'loaded\n' ;;
+            'show --property=UnitFileState --value ssh.service') printf '\n' ;;
+            'show --property=ActiveState --value ssh.service') printf 'active\n' ;;
+        esac
+    }
+    run controls::apply_services
+    [ "$status" -ne 0 ]
+    [[ $output == *'missing or invalid original state'* ]]
+    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'service control does not add newly available units after consent' {
+    core::confirm() {
+        fake confirm || return 1
+        SERVICE_UNITS+=' bluetooth.service'
+    }
+    run controls::apply_services
+    [ "$status" -eq 0 ]
+    [ "$(grep '^systemctl mask' "$CALLS")" = 'systemctl mask --now ssh.service' ]
+    awk '/^confirm$/ { consent = 1 } /^systemctl show / { if (consent) exit 1 }' "$CALLS"
+}
+
+@test 'service control has no mutation or consent when no policy targets are installed' {
+    SERVICE_UNITS=''
+    run controls::apply_services
+    [ "$status" -eq 0 ]
+    [[ $output == *'Nothing to change.'* ]]
+    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'a later service backup failure prevents every stop and mask' {
+    SERVICE_UNITS='ssh.service ssh.socket'
+    FAIL='backup /etc/systemd/system/ssh.socket'
+    run controls::apply_services
+    [ "$status" -ne 0 ]
+    run grep -E '^(systemctl mask|record services:)' "$CALLS"
+    [ "$status" -eq 1 ]
 }
 
 @test 'service masking failure is never recorded as success' {
