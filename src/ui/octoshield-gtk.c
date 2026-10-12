@@ -972,7 +972,7 @@ static void build_usb(App *app)
     GtkWidget *group = group_new(page, "Inspect the connected hardware", "The device list appears in Operation details. Use the numeric ID from that current list.");
     group_add(group, action_row(app, "usb-list", "Refresh", "view-refresh-symbolic"));
     group_add(group, action_row(app, "usb-policy", "Review policy", "security-high-symbolic"));
-    group = group_new(page, "Authorize or block one device", "An unknown device remains blocked until you explicitly approve it through administrator authentication.");
+    group = group_new(page, "Authorize or block one device", "Enable USB authorization first, then use administrator authentication to approve or block a connected device.");
     GtkWidget *device = input_row(group, "Numeric device ID");
     adw_entry_row_set_input_purpose(ADW_ENTRY_ROW(device), GTK_INPUT_PURPOSE_DIGITS);
     GtkWidget *permanent = gtk_switch_new();
