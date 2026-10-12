@@ -21,6 +21,7 @@ Run ordinary tests from the repository root without root privileges. Temporary f
 | `make sanitize` | Run monitor C tests with AddressSanitizer/UndefinedBehaviorSanitizer |
 | `make gui` | Compile the native GTK4/libadwaita application |
 | `make ui-test` / `make test-gui` | Compile the GUI and exercise its protocol parser, argument validation, and GUI/CLI capability parity |
+| `make ui-display-test` | Run native window, exact review, and asynchronous subprocess regression tests under D-Bus/Xvfb |
 | `make package` | Build the Debian package using `dpkg-buildpackage` |
 | `make install DESTDIR=...` | Stage package files in the supplied directory; not a host installer |
 
@@ -31,7 +32,7 @@ The backend suite covers declined confirmations, failed backups/packages/native 
 ```bash
 sudo apt-get install pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev \
     xvfb xauth dbus-daemon
-make gui ui-test
+make gui ui-test ui-display-test
 
 dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo \
     build/octoshield-gtk --smoke-test
@@ -63,7 +64,7 @@ Use a disposable Ubuntu Desktop installation or VM with a recoverable console fi
 1. **Package/application:** install the matching `.deb` with APT, find the OctoShield icon, open its native window as the GNOME user, and verify `/usr/bin/octoshield`. Confirm installation applies no protections, an administrator dialog appears for system actions, and user settings remain unprivileged. Compare equivalent GUI/CLI operations.
 2. **Standalone/coexistence:** install the CLI on a system without desktop packages and check its terminal menus. On a disposable desktop with both installation types, inspect command resolution and effective monitor units; package upgrades/removal must not delete the standalone program or native protection settings.
 3. **Firewall:** inspect IPv4/IPv6 UFW policy. From an authorized second host, test a deliberately opened local service and verify unsolicited access is blocked. Confirm normal outbound traffic works. Test Docker-published ports independently; do not assume UFW covers them.
-4. **USB:** enroll only known devices. Reconnect the trusted keyboard, mouse, dock and internal peripherals. Insert an expendable unfamiliar storage device and test HID/network-adapter classes where available; verify they remain unauthorized. Test temporary/permanent approval, reconnect, port movement, current blocking, and permanent rule revocation in both interfaces.
+4. **USB:** enroll only known devices. Reconnect the trusted keyboard, mouse, dock and internal peripherals. Insert an expendable unfamiliar storage device and test HID/network-adapter classes where available; verify they remain unauthorized. Test temporary/permanent approval, reconnect, port movement, and current blocking in both interfaces; verify the documented manual revocation procedure separately.
 5. **Startup/recovery:** reboot, suspend/resume, change docks, and exercise the documented USB recovery boot. Verify interrupted enrollment is reported as incomplete and does not silently trust a newly attached device. Decline a GUI confirmation and inspect recorded partial changes.
 6. **Networking:** verify existing Wi-Fi profiles do not autoconnect after manual disconnect/reboot. Reconnect and inspect effective MAC/discovery settings. Check IPv6, enterprise Wi-Fi certificate validation, captive portals, and any required VPN. Choose new-profile autoconnect explicitly.
 7. **Desktop/authentication:** check five-minute idle lock, immediate lock on blanking, lack of automount, and available RDP/VNC controls. Restore the saved baseline. Test fresh sudo prompts and inspect passwordless grants/overrides; verify the GUI password action opens GNOME Accounts.

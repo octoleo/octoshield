@@ -128,6 +128,16 @@ static void test_window(void)
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-overview.png");
 }
 
+static void test_accounts_entry(void)
+{
+    /* Match the upstream GNOME 46/50 Users desktop entry without launching a
+     * password UI or forwarding user-supplied arguments. */
+    g_assert_cmpstr(accounts_argv[0], ==, "/usr/bin/gnome-control-center");
+    g_assert_cmpstr(accounts_argv[1], ==, "system");
+    g_assert_cmpstr(accounts_argv[2], ==, "users");
+    g_assert_null(accounts_argv[3]);
+}
+
 static void test_success(void)
 {
     launch_fixture("success");
@@ -186,6 +196,7 @@ int main(int argc, char **argv)
     g_assert_true(g_application_register(G_APPLICATION(test_app.application), NULL, &error));
     activate(G_APPLICATION(test_app.application), &test_app);
     g_test_add_func("/ui/window/all-pages", test_window);
+    g_test_add_func("/ui/window/accounts-panel-entry", test_accounts_entry);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);
