@@ -1,0 +1,47 @@
+Source: octoshield
+Section: admin
+Priority: optional
+Maintainer: OctoLeo <octoleo@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ bats,
+ desktop-file-utils,
+ jq,
+ libadwaita-1-dev (>= 1.4),
+ libgtk-4-dev (>= 4.12),
+ libjson-glib-dev,
+ libxml2-utils,
+ pkg-config
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/octoleo/octoshield
+Vcs-Git: https://github.com/octoleo/octoshield.git
+Vcs-Browser: https://github.com/octoleo/octoshield
+
+Package: octoshield
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ bash (>= 5.1),
+ ca-certificates,
+ curl,
+ jq,
+ libglib2.0-bin,
+ libnotify-bin,
+ pkexec,
+ whiptail
+Recommends:
+ gnome-control-center,
+ network-manager,
+ sudo | sudo-rs
+Description: Ubuntu laptop protection with a native GNOME interface
+ OctoShield provides a native GTK desktop application and a Bash command-line
+ interface for configuring established Ubuntu security mechanisms. It helps
+ review firewall policy, USB authorization, desktop locking, security updates,
+ application confinement, and security-event notifications.
+ .
+ Each privileged change requires an explicit action and authentication. Package
+ installation does not enable security controls or enroll USB devices. The
+ desktop application runs as the logged-in user and delegates narrowly scoped
+ operations to a fixed PolicyKit-authorized helper.

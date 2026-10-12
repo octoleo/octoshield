@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
+        if [ -e /usr/local/bin/octoshield ]; then
+            printf '%s\n' \
+                'OctoShield: a standalone CLI exists at /usr/local/bin/octoshield.' \
+                'The desktop application uses this package. Use /usr/bin/octoshield for its CLI.' \
+                'Review the README migration instructions before removing the standalone installation.' >&2
+        fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

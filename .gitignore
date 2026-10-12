@@ -1,5 +1,12 @@
 /build/
 /tests/tmp/
+/dist/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/octoshield/
+/debian/octoshield.debhelper.log
+/debian/octoshield.substvars
 *.gcda
 *.gcno
 *.gcov

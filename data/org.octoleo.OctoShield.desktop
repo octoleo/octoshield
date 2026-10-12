@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OctoShield
+GenericName=Laptop Security
+Comment=Review and configure Ubuntu laptop protections
+Exec=octoshield-gtk
+Icon=org.octoleo.OctoShield
+Terminal=false
+Categories=System;Security;GTK;
+Keywords=Security;Firewall;USB;Protection;Ubuntu;
+StartupNotify=true
+DBusActivatable=false
