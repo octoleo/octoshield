@@ -2,7 +2,7 @@
 # Tests never call host firewall, service, package, or network operations.
 # SPDX-License-Identifier: Apache-2.0
 # Bats invokes setup and mocked commands indirectly; source path is relative to this test.
-# shellcheck disable=SC1091,SC2317,SC2030,SC2031
+# shellcheck disable=SC1091,SC2317,SC2329,SC2030,SC2031
 
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/controls.sh"

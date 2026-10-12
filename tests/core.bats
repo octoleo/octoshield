@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: Apache-2.0
 # Bats isolates each test and invokes these command mocks indirectly.
-# shellcheck disable=SC2030,SC2031,SC2317
+# shellcheck disable=SC2030,SC2031,SC2317,SC2329
 
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"

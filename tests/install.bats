@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Tests use an isolated fake prefix; they never install packages or alter the host.
 # Bats recreates setup variables for every test; assignments are intentionally local.
-# shellcheck disable=SC1091,SC2317,SC2030,SC2031
+# shellcheck disable=SC1091,SC2317,SC2329,SC2030,SC2031
 
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/install.sh"

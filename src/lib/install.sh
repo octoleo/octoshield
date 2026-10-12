@@ -96,7 +96,7 @@ install::run() (
         return 1
     }
     # Roll back the old program if either promotion fails or installation is interrupted.
-    # shellcheck disable=SC2317 # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap below.
     install::cleanup() {
         if ((succeeded == 0)); then
             if [[ -d $previous ]]; then
