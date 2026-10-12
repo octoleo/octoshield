@@ -80,14 +80,18 @@ monitor::apply() {
     core::require_root || return 1
     core::confirm 'Enable the background security-event collector and install the desktop notification unit? It reads firewall, sudo/SSH and USBGuard audit events and exposes only alert counters to desktop users. You will enable notifications separately in your own desktop session.' || return 1
     [[ -x $OCTOSHIELD_ROOT/bin/octoshield-monitor ]] || {
-        core::die 'The compiled monitor is missing; reinstall Octoshield.'
+        core::die 'The compiled monitor is missing; reinstall OctoShield.'
         return 1
     }
-    core::install_packages jq libnotify-bin || return 1
-    core::write_file /etc/systemd/system/octoshield-monitor.service 0644 \
-        <"$OCTOSHIELD_ROOT/systemd/octoshield-monitor.service" || return 1
-    core::write_file /etc/systemd/user/octoshield-notify.service 0644 \
-        <"$OCTOSHIELD_ROOT/systemd/octoshield-notify.service" || return 1
+    core::install_packages jq || return 1
+    if [[ $OCTOSHIELD_ROOT == /usr/lib/octoshield ]]; then
+        monitor::migrate_units || return 1
+    else
+        core::write_file /etc/systemd/system/octoshield-monitor.service 0644 \
+            <"$OCTOSHIELD_ROOT/systemd/octoshield-monitor.service" || return 1
+        core::write_file /etc/systemd/user/octoshield-notify.service 0644 \
+            <"$OCTOSHIELD_ROOT/systemd/octoshield-notify.service" || return 1
+    fi
     systemctl daemon-reload || return 1
     systemctl enable --now octoshield-monitor.service || return 1
     core::record 'MONITOR enabled'
@@ -97,6 +101,10 @@ monitor::apply() {
 monitor::enable_desktop() {
     [[ $EUID -ne 0 ]] || {
         core::die 'Run this from your normal GNOME terminal without sudo.'
+        return 1
+    }
+    command -v notify-send >/dev/null || {
+        core::die 'Install optional desktop notifications first: sudo apt install libnotify-bin'
         return 1
     }
     systemctl --user daemon-reload || return 1
@@ -114,4 +122,50 @@ monitor::disable_desktop() {
 monitor::status() {
     systemctl --no-pager --full status octoshield-monitor.service || :
     if [[ $EUID -ne 0 ]]; then systemctl --user --no-pager --full status octoshield-notify.service || :; fi
+}
+
+monitor::logs() {
+    core::require_root || return 1
+    journalctl --no-pager --lines=200 --unit=octoshield-monitor.service --output=short-iso
+}
+
+monitor::disable() {
+    core::require_root || return 1
+    core::confirm 'Disable the OctoShield background event collector? Security controls remain active; desktop alert counters will stop updating.' || return 1
+    systemctl disable --now octoshield-monitor.service || return 1
+    core::record 'MONITOR disabled'
+}
+
+# Source installs used /etc units. Remove only an exact legacy OctoShield unit
+# when explicitly enabling the packaged monitor; preserve administrator edits.
+monitor::migrate_unit() {
+    [[ $# -eq 2 ]] || return 1
+    local path=$1 expected_file=$2 normalized expected
+    core::require_root || return 1
+    [[ -e $path || -L $path ]] || return 0
+    [[ -f $path && ! -L $path ]] || {
+        core::die "Review the existing unit override before enabling: $path"
+        return 1
+    }
+    [[ -f $expected_file && ! -L $expected_file ]] || {
+        core::die "The packaged unit is missing or invalid: $expected_file"
+        return 1
+    }
+    normalized=$(sed -e 's@/usr/local/@/usr/@g' -e 's/Octoshield/OctoShield/g' "$path") || return 1
+    expected=$(cat "$expected_file") || return 1
+    [[ $normalized == "$expected" ]] || {
+        core::die "An administrator-modified unit overrides the package: $path. Review it using the recovery guide."
+        return 1
+    }
+    core::backup "$path" || return 1
+    rm -- "$path" || return 1
+    core::record "MONITOR migrated $path to the packaged unit"
+}
+
+monitor::migrate_units() {
+    # Paths are built in. The private helper never accepts a path from its GUI.
+    monitor::migrate_unit /etc/systemd/system/octoshield-monitor.service \
+        "$OCTOSHIELD_ROOT/systemd/octoshield-monitor.service" || return 1
+    monitor::migrate_unit /etc/systemd/user/octoshield-notify.service \
+        "$OCTOSHIELD_ROOT/systemd/octoshield-notify.service"
 }

@@ -254,7 +254,7 @@ mock_bootstrap_download() {
     [[ $output == *'Usage: octoshield'* ]]
     run bash "$BATS_TEST_TMPDIR/standalone" --version
     [ "$status" -eq 0 ]
-    [ "$output" = 'Octoshield 0.1.0' ]
+    [ "$output" = 'OctoShield 0.2.0' ]
 }
 
 @test 'standalone bootstrap rejects unsupported arguments without network activity' {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Octoshield security event monitor
+Description=OctoShield security event monitor
 After=systemd-journald.service
 StartLimitIntervalSec=60
 StartLimitBurst=5

@@ -1,5 +1,5 @@
 [Unit]
-Description=Octoshield desktop security notifications
+Description=OctoShield desktop security notifications
 PartOf=graphical-session.target
 After=graphical-session.target
 

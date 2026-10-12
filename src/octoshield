@@ -10,11 +10,11 @@ if ((EUID == 0)); then
     export PATH
 fi
 
-readonly OCTOSHIELD_VERSION=0.1.0
+readonly OCTOSHIELD_VERSION=0.2.0
 
 bootstrap::help() {
     cat <<'HELP'
-Octoshield 0.1.0 — Ubuntu laptop protection
+OctoShield 0.2.0 — Ubuntu laptop protection
 
 Usage: octoshield [setup|status|install|backups|--help|--version]
 
@@ -34,6 +34,7 @@ bootstrap::run() (
     local -a files=(
         src/octoshield src/lib/core.sh src/lib/controls.sh src/lib/usb.sh
         src/lib/desktop.sh src/lib/monitor.sh src/lib/install.sh src/lib/cli.sh
+        src/lib/office.sh src/lib/api.sh src/lib/user_api.sh
         src/monitor.c src/notify.sh systemd/octoshield-monitor.service
         systemd/octoshield-notify.service README.md LICENSE docs/recovery.md
     )
@@ -52,7 +53,7 @@ bootstrap::run() (
         -H 'Accept: application/vnd.github.sha' \
         'https://api.github.com/repos/octoleo/octoshield/commits/main'); then
         printf '%s\n' \
-            'Cannot download Octoshield. Check connectivity and repository visibility.' \
+            'Cannot download OctoShield. Check connectivity and repository visibility.' \
             'For a private repository, authenticate GitHub CLI and use:' \
             '  gh repo clone octoleo/octoshield' \
             '  cd octoshield && bash src/octoshield install' >&2
@@ -74,13 +75,13 @@ bootstrap::run() (
             "https://raw.githubusercontent.com/octoleo/octoshield/$commit/$path" \
             --output "$temporary/$path" || return 1
     done
-    printf 'Downloaded Octoshield commit %s. Starting installation.\n' "$commit" >&2
+    printf 'Downloaded OctoShield commit %s. Starting installation.\n' "$commit" >&2
     /usr/bin/bash "$temporary/src/octoshield" install
 )
 
 case "${1:-}" in
     --version)
-        printf 'Octoshield %s\n' "$OCTOSHIELD_VERSION"
+        printf 'OctoShield %s\n' "$OCTOSHIELD_VERSION"
         exit 0
         ;;
 esac
@@ -90,7 +91,7 @@ octoshield_self=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || octoshield_sel
 octoshield_candidate=${octoshield_self%/*}
 if [[ -n $octoshield_self && -f $octoshield_candidate/lib/core.sh ]]; then
     readonly OCTOSHIELD_ROOT=${octoshield_candidate%/*}
-    for octoshield_module in core controls usb desktop monitor install cli; do
+    for octoshield_module in core controls usb desktop monitor install office cli api user_api; do
         # shellcheck source=/dev/null
         source "$OCTOSHIELD_ROOT/src/lib/$octoshield_module.sh"
     done
