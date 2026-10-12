@@ -1,13 +1,13 @@
 # Contributing
 
-OctoShield is part of the OctoLeo shell-tool suite. Keep the implementation small, explicit, and auditable: Bash orchestrates native Ubuntu controls; C implements the GTK4/libadwaita frontend and bounded event aggregation. The GNOME application and terminal interface share the control functions. Keep desktop dependencies out of the standalone CLI installation.
+OctoShield is maintained by [Vast Development Method](https://www.vdm.io) as part of the Octoleo suite. Keep the implementation small, explicit, and auditable: Bash orchestrates native Ubuntu controls; C implements the GTK4/libadwaita frontend and bounded event aggregation. The GNOME application and terminal interface share the control functions. Keep desktop dependencies out of the standalone CLI installation.
 
 ## Workflow
 
 Create a focused branch, make reviewable commits, and open a draft pull request early. Explain the concrete behavior, privilege boundary, configuration changes, recovery path, and tests. Mark it ready only after automated checks pass and any untested hardware behavior is stated clearly.
 
 ```bash
-sudo apt-get install build-essential bats shellcheck shfmt jq
+sudo apt-get install build-essential bats shellcheck shfmt jq apt-utils gnupg appstream python3
 make check
 ```
 
@@ -28,5 +28,6 @@ The CLI/backend gate deliberately does not require GUI development libraries. Fo
 - Test meaningful failure paths as well as success. Mock native mutations; a unit test must not change the host firewall, services, user settings, or USB policy.
 - Keep C inputs bounded, handle partial reads/writes and errors, use monotonic time for intervals, and retain strict compiler warnings and sanitizer coverage.
 - Update README/recovery instructions alongside behavior changes. Describe effective behavior and known gaps precisely.
+- Use `OctoShield` for the display name, `octoshield` for the command/package, and `io.vdm.OctoShield` for desktop metadata. Keep screenshots representative of the application and label demonstration data. Never add credentials or invented contact details. See [distribution and release preparation](docs/distribution.md) before changing release automation.
 
 Contributions are licensed under the repository's Apache-2.0 license. Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
