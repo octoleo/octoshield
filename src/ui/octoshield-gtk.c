@@ -71,6 +71,13 @@ static const Action actions[] = {
     {"recovery", "Read recovery guide", "Inspect the installed recovery and backup instructions.", NULL, FALSE, FALSE, {"recovery", NULL}}
 };
 
+/* GNOME 46 and 50 ship this exact invocation in their Users desktop entry:
+ * panels/system/users/gnome-users-panel.desktop.in. Users is a System subpage,
+ * not the removed pre-46 user-accounts panel. Keep the executable path fixed. */
+static const char *const accounts_argv[] = {
+    "/usr/bin/gnome-control-center", "system", "users", NULL
+};
+
 typedef enum {
     INPUT_USB_ALLOW,
     INPUT_USB_BLOCK,
@@ -786,8 +793,7 @@ static void accounts_clicked(GtkButton *button, gpointer data)
     (void)button;
     App *app = data;
     g_autoptr(GError) error = NULL;
-    GSubprocess *process = g_subprocess_new(G_SUBPROCESS_FLAGS_NONE, &error,
-                                          "/usr/bin/gnome-control-center", "user-accounts", NULL);
+    GSubprocess *process = g_subprocess_newv(accounts_argv, G_SUBPROCESS_FLAGS_NONE, &error);
     if (process == NULL)
         show_error(app, "Unable to open GNOME Accounts", error->message);
     else
