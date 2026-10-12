@@ -66,7 +66,7 @@ To stop repository updates without removing the app or its protections, set `Ena
 
 ## Consent and system changes
 
-Package installation installs program files and dependencies and starts the background status observer. It does not apply hardening, enroll USB devices, select a security profile, or enable security-event collection automatically. Choose controls after opening the app. The observer reports existing state and processes only previously authorized managed firewall exception deadlines under the operation lock.
+Package installation installs program files and dependencies and starts the background status observer. It does not apply hardening, enroll USB devices, select a security profile, or enable security-event collection automatically. Choose controls after opening the app. The observer reports existing state and cleans up previously authorized expired firewall rules under the operation lock; kernel time matching enforces finite deadlines independently.
 
 - The desktop runs without administrator privileges. A fixed PolicyKit helper authenticates system actions; GNOME preferences and notifications remain in the user's session.
 - Each protection explains its impact. Disruptive changes require explicit confirmation, including the existing-rule reset for UFW and physical review of the USB enrollment set.

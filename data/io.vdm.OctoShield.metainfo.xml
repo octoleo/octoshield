@@ -108,7 +108,9 @@
           <li>Switch Conference, Public, Office and Home profiles globally or
           per control; create custom profiles and restore captured baselines.</li>
           <li>Configure scoped IPv4/IPv6 firewall exceptions and expiry while
-          retaining outgoing access and avoiding firewall resets on switching.</li>
+          retaining outgoing access and avoiding firewall resets on switching.
+          Timed rules stop granting new connections at their kernel-enforced UTC
+          deadline or an earlier reload/reboot.</li>
           <li>Remember USB approvals for the effective profile, reevaluate
           connected devices on switching and revoke remembered trust.</li>
           <li>Inspect additional container, Thunderbolt/USB4, Secure Boot and

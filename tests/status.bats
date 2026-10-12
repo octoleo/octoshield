@@ -30,6 +30,25 @@ setup() {
     usb::devices_json() { printf '[]\n'; }
 }
 
+@test 'background status uses the canonical CLI version without a second version constant' {
+    unset OCTOSHIELD_VERSION
+    run status::version
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(bash "$BATS_TEST_DIRNAME/../scripts/version.sh")" ]
+}
+
+@test 'passive container inspection never activates a stopped Docker service' {
+    status::unit() { printf 'inactive\n'; }
+    status::run() {
+        printf 'must not connect to Docker\n' >"$BATS_TEST_TMPDIR/activated"
+        return 1
+    }
+    run status::containers
+    [ "$status" -eq 0 ]
+    [ "$(jq -r .state <<<"$output")" = unknown ]
+    [ ! -e "$BATS_TEST_TMPDIR/activated" ]
+}
+
 fixture() {
     status::collect >"$STATUS_DIRECTORY/status.json"
     chmod 0644 "$STATUS_DIRECTORY/status.json"

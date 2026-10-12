@@ -290,6 +290,12 @@ status::thunderbolt() {
 
 status::containers() {
     local ports
+    # Connecting to a socket-activated Docker daemon can start containers. A
+    # passive inspection must not activate a stopped container service.
+    if [[ $(status::unit docker.service) != active ]]; then
+        status::result unknown 'The system Docker service is not running. Other container runtimes and rootless containers are not verified.'
+        return
+    fi
     if [[ ! -S /run/docker.sock && ! -S /var/run/docker.sock ]]; then
         status::result unknown 'No local system Docker socket was found. Rootless containers and other runtimes are not verified.'
         return
@@ -388,8 +394,19 @@ status::pending_devices() {
     jq -ce '[.[] | select((.id | type == "number" and . >= 1 and . <= 4294967295 and floor == .) and (.state | IN("blocked","rejected"))) | {id,state,label:"USB device"}] | .[0:256]' <<<"$devices" 2>/dev/null || printf '[]\n'
 }
 
+status::version() {
+    local version=${OCTOSHIELD_VERSION:-} source_file
+    if [[ -z $version ]]; then
+        source_file=${BASH_SOURCE[0]%/lib/status.sh}/octoshield
+        version=$(sed -n 's/^readonly OCTOSHIELD_VERSION=//p' "$source_file") || return 1
+    fi
+    [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+    printf '%s\n' "$version"
+}
+
 status::collect() {
-    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile
+    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile version
+    version=$(status::version) || return 1
     profiles=$(status::profile_snapshot) || return 1
     for name in firewall usb network services monitor updates apparmor sudo; do
         observed=$(status::control "$name") || return 1
@@ -416,7 +433,7 @@ status::collect() {
     pending=$(jq -er --argjson devices "$devices" '[($devices | length),(.usb.pending | if type == "number" and . >= 0 and . <= 65535 and floor == . then . else 0 end)] | max' <<<"$controls") || pending=0
     usb_profile=$(jq -er .usb.profile <<<"$controls") || return 1
     checked=$(date +%s) || return 1
-    jq -cn --arg version "${OCTOSHIELD_VERSION:-1.1.0}" --argjson checked "$checked" \
+    jq -cn --arg version "$version" --argjson checked "$checked" \
         --argjson controls "$controls" --argjson exposures "$exposures" --argjson profiles "$profiles" \
         --argjson network "$network" --argjson pending "$pending" --argjson devices "$devices" --arg usb_profile "$usb_profile" \
         '{schema:1,version:$version,checked_at:$checked,controls:$controls,exposures:$exposures,profiles:$profiles,network:$network,usb:{pending:$pending,devices:$devices,profile:$usb_profile}}'

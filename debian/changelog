@@ -4,7 +4,8 @@ octoshield (1.1.0) unstable; urgency=medium
     global switching, individual control overrides and explicit restoration.
   * Show verified live protection status, profile mismatches and unavailable
     observations through shared native desktop and Whiptail interfaces.
-  * Manage scoped IPv4/IPv6 firewall exceptions with optional expiry; retain
+  * Manage scoped IPv4/IPv6 firewall exceptions with kernel-enforced UTC
+    expiry; prevent temporary grants reopening from disk after reboot, retain
     outgoing access and switch active policies without resetting UFW.
   * Scope USB approvals to the effective profile, reevaluate attached devices,
     expire temporary trust on switching and provide explicit trust revocation.
