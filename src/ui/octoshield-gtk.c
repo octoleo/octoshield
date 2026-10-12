@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* OctoShield's unprivileged GNOME frontend. Privilege and policy stay in the
  * allowlisted helper; this process renders plain text and exchanges decisions. */
+/* Keep API/deprecation checks anchored to the supported Ubuntu 24.04 baseline
+ * when compiling the same source with newer Ubuntu desktop libraries. */
+#define ADW_VERSION_MIN_REQUIRED ADW_VERSION_1_4
+#define ADW_VERSION_MAX_ALLOWED ADW_VERSION_1_5
+#define GDK_VERSION_MIN_REQUIRED GDK_VERSION_4_12
+#define GDK_VERSION_MAX_ALLOWED GDK_VERSION_4_14
 #include "protocol.h"
 
 /* GTK's installed cleanup macros include an extra file-scope semicolon on
