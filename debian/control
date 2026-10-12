@@ -23,12 +23,14 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+ adwaita-icon-theme,
  bash (>= 5.1),
  ca-certificates,
  curl,
  jq,
  libglib2.0-bin,
  libnotify-bin,
+ librsvg2-common,
  pkexec,
  whiptail
 Recommends:

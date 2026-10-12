@@ -829,7 +829,7 @@ static void build_protections(App *app)
     GtkWidget *page = page_new(app, "protections", "Protections", "Choose the controls that fit this laptop. Impact details are shown before each change.");
     GtkWidget *group = group_new(page, "System protection", "These operations use the system's administrator authentication dialog.");
     static const char *ids[] = {"firewall", "usb-policy", "network", "services", "sudo", "updates", "apparmor", "monitor"};
-    static const char *icons[] = {"network-workgroup-symbolic", "drive-removable-media-symbolic", "network-wireless-symbolic", "preferences-system-symbolic", "dialog-password-symbolic", "software-update-available-symbolic", "security-high-symbolic", "utilities-system-monitor-symbolic"};
+    static const char *icons[] = {"network-workgroup-symbolic", "drive-removable-media-symbolic", "network-wireless-symbolic", "preferences-system-symbolic", "dialog-password-symbolic", "software-update-available-symbolic", "security-high-symbolic", "network-transmit-receive-symbolic"};
     for (gsize i = 0; i < G_N_ELEMENTS(ids); i++)
         group_add(group, action_row(app, ids[i], "Review", icons[i]));
     group = group_new(page, "Your GNOME session", "Desktop settings are changed as your normal user and have their own private baseline.");
@@ -888,7 +888,7 @@ static void build_monitoring(App *app)
 {
     GtkWidget *page = page_new(app, "monitoring", "Security monitoring", "See meaningful activity from existing system security events, with restrained notifications in your GNOME session.");
     GtkWidget *group = group_new(page, "System event collector", "Collects repeated firewall blocks, trusted authentication failures and USBGuard denials. Passive network sniffing cannot reliably be detected from the laptop.");
-    group_add(group, action_row(app, "monitor", "Enable…", "utilities-system-monitor-symbolic"));
+    group_add(group, action_row(app, "monitor", "Enable…", "network-transmit-receive-symbolic"));
     group_add(group, action_row(app, "monitor-status", "Inspect", "dialog-information-symbolic"));
     group_add(group, action_row(app, "monitor-logs", "View", "text-x-generic-symbolic"));
     group_add(group, action_row(app, "monitor-disable", "Disable…", "media-playback-stop-symbolic"));
@@ -940,7 +940,7 @@ static GtkWidget *build_sidebar(App *app)
         {"protections", "Protections", "security-high-symbolic"},
         {"usb", "USB devices", "drive-removable-media-symbolic"},
         {"office", "Office access", "network-workgroup-symbolic"},
-        {"monitoring", "Monitoring", "utilities-system-monitor-symbolic"},
+        {"monitoring", "Monitoring", "network-transmit-receive-symbolic"},
         {"recovery", "Recovery", "edit-undo-symbolic"}
     };
     for (gsize i = 0; i < G_N_ELEMENTS(navigation); i++) {
