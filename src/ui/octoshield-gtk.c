@@ -3,6 +3,7 @@
  * allowlisted helper; this process renders plain text and exchanges decisions. */
 /* Keep API/deprecation checks anchored to the supported Ubuntu 24.04 baseline
  * when compiling the same source with newer Ubuntu desktop libraries. */
+#define _GNU_SOURCE
 #define ADW_VERSION_MIN_REQUIRED ADW_VERSION_1_4
 #define ADW_VERSION_MAX_ALLOWED ADW_VERSION_1_5
 #define GDK_VERSION_MIN_REQUIRED GDK_VERSION_4_12
@@ -21,8 +22,12 @@
 #pragma GCC diagnostic pop
 #endif
 #include <gio/gio.h>
+#include <json-glib/json-glib.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_PROTOCOL_LINE (64U * 1024U)
@@ -33,7 +38,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.0.0"
+#define OCTOSHIELD_VERSION "1.1.0"
 #endif
 
 typedef struct App App;
@@ -123,7 +128,7 @@ static const Action actions[] = {
     {"desktop-apply", "Protect GNOME session", "Five-minute idle lock; removable-media and sharing controls.", "Set a five-minute idle timeout and immediate locking, disable media automount and autorun, and disable available per-user GNOME RDP/VNC controls. Your original settings are backed up privately.", FALSE, TRUE, {"desktop", "apply", NULL}},
     {"desktop-restore", "Restore GNOME settings", "Restore your recorded original desktop preferences.", "Restore the desktop settings recorded before OctoShield first changed them. Screen locking or desktop sharing may become less restrictive. System firewall and USB policy remain separate.", FALSE, TRUE, {"desktop", "restore", NULL}},
     {"desktop-status", "Inspect GNOME settings", "Read the current controls in your own desktop session.", NULL, FALSE, FALSE, {"desktop", "status", NULL}},
-    {"usb-list", "Refresh device list", "Show USBGuard device IDs, rules and authorization state.", NULL, TRUE, FALSE, {"usb", "list", NULL}},
+    {"usb-list", "Refresh device list", "Show USBGuard device IDs, rules and authorization state.", NULL, TRUE, FALSE, {"usb", "devices", NULL}},
     {"monitor-status", "System monitor status", "Inspect the privileged collector's service state.", NULL, TRUE, FALSE, {"monitor", "status", NULL}},
     {"monitor-logs", "Recent monitor events", "Read recent collector service output.", NULL, TRUE, FALSE, {"monitor", "logs", NULL}},
     {"monitor-disable", "Disable system monitoring", "Stop collecting new security-event notifications.", "Stop the OctoShield system monitor. Existing firewall, USB and other preventive controls remain configured, but monitoring will stop reporting new events.", TRUE, TRUE, {"monitor", "disable", NULL}},
@@ -132,6 +137,7 @@ static const Action actions[] = {
     {"notify-status", "Desktop notification status", "Inspect this user's notification service.", NULL, FALSE, FALSE, {"monitor", "status", NULL}},
     {"backups", "List configuration backups", "Show recorded system changes and recovery transactions.", NULL, TRUE, FALSE, {"backups", NULL}},
     {"recovery", "Read recovery guide", "Inspect the installed recovery and backup instructions.", NULL, FALSE, FALSE, {"recovery", NULL}}
+    ,{"update-check", "Check for OctoShield updates", "Check the official GitHub release for a newer Debian package.", NULL, FALSE, FALSE, {"updates", "check", NULL}}
 };
 
 /* GNOME 46 and 50 ship this exact invocation in their Users desktop entry:
@@ -144,6 +150,7 @@ static const char *const accounts_argv[] = {
 typedef enum {
     INPUT_USB_ALLOW,
     INPUT_USB_BLOCK,
+    INPUT_USB_FORGET,
     INPUT_OFFICE_FIREWALL,
     INPUT_OFFICE_NETWORK,
     INPUT_OFFICE_SERVICE,
@@ -185,6 +192,7 @@ struct Operation {
     Reader err;
     gchar *title;
     GString *review;
+    GString *data_output;
     gchar *deferred_confirmation;
     guint64 last_prompt_id;
     guint64 current_prompt_id;
@@ -199,6 +207,8 @@ struct Operation {
     gboolean answer_pending;
     gboolean input_closed;
     gboolean review_truncated;
+    gboolean data_seen;
+    gboolean data_truncated;
 };
 
 struct App {
@@ -220,6 +230,29 @@ struct App {
     AdwMessageDialog *confirmation;
     AdwMessageDialog *preview;
     Operation *operation;
+    GPtrArray *status_rows;
+    GPtrArray *profile_selectors;
+    GPtrArray *profile_ids;
+    GtkLabel *overview_title;
+    GtkLabel *overview_summary;
+    GtkLabel *checked_label;
+    GtkLabel *usb_pending;
+    GtkLabel *overview_usb;
+    GtkLabel *profile_details;
+    GtkLabel *update_status;
+    GtkLinkButton *update_link;
+    GtkDropDown *global_profile;
+    GtkDropDown *edit_profile;
+    GtkDropDown *usb_devices;
+    GtkEditable *usb_device_id;
+    GPtrArray *usb_ids;
+    GHashTable *setting_choices;
+    gchar *active_profile;
+    guint refresh_timer;
+    gint64 status_not_before;
+    gboolean cache_valid;
+    gboolean usb_inventory;
+    gboolean refresh_session_service;
     gboolean smoke_test;
 };
 
@@ -227,6 +260,8 @@ static void operation_maybe_finish(Operation *operation);
 static void update_actions(App *app);
 static void read_next(Reader *reader);
 static void show_confirmation(Operation *operation, guint64 id, const char *text);
+static gboolean refresh_status(gpointer data);
+static void handle_data_log(App *app, const char *text);
 
 static const char *brand_resource(App *app)
 {
@@ -256,6 +291,16 @@ static GtkWidget *brand_widget(App *app, int width, int height)
 
 static void branding_clear(App *app)
 {
+    if (app->refresh_timer != 0) {
+        g_source_remove(app->refresh_timer);
+        app->refresh_timer = 0;
+    }
+    g_clear_pointer(&app->status_rows, g_ptr_array_unref);
+    g_clear_pointer(&app->profile_selectors, g_ptr_array_unref);
+    g_clear_pointer(&app->profile_ids, g_ptr_array_unref);
+    g_clear_pointer(&app->usb_ids, g_ptr_array_unref);
+    g_clear_pointer(&app->setting_choices, g_hash_table_unref);
+    g_clear_pointer(&app->active_profile, g_free);
     if (app->theme_handler != 0) {
         g_signal_handler_disconnect(app->style_manager, app->theme_handler);
         app->theme_handler = 0;
@@ -420,10 +465,10 @@ static void show_confirmation(Operation *operation, guint64 id, const char *text
     operation->waiting_confirmation = TRUE;
     operation->current_prompt_id = id;
     gtk_label_set_text(app->activity, "Review required — the helper is waiting for your decision");
-    GtkWidget *dialog = adw_message_dialog_new(app->window, "Review this change", "The helper has paused. Review the captured policy and the request below before continuing.");
+    GtkWidget *dialog = adw_message_dialog_new(app->window, "Confirm this change", "Check the proposed settings and their effect before applying them.");
     g_autofree gchar *review = g_strconcat(operation->review->str, "\nREQUEST\n", text, NULL);
     adw_message_dialog_set_extra_child(ADW_MESSAGE_DIALOG(dialog), plain_text_scroller(review));
-    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "decline", "Decline", "accept", "Continue", NULL);
+    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "decline", "Cancel", "accept", "Apply change", NULL);
     adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "accept", ADW_RESPONSE_SUGGESTED);
     adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "decline");
     adw_message_dialog_set_close_response(ADW_MESSAGE_DIALOG(dialog), "decline");
@@ -459,6 +504,15 @@ static void handle_line(Reader *reader)
     switch (event.type) {
     case OCTOSHIELD_EVENT_LOG:
         append_log(operation->app, event.text);
+        if (operation->data_output != NULL && !operation->data_truncated) {
+            /* These three read-only commands emit JSON only. api::flush can
+             * split either at a newline or after 4096 characters. JSON's raw
+             * newlines are token whitespace, so concatenating preserves both
+             * pretty-printed output and compact records split mid-string. */
+            if (operation->data_output->len + strlen(event.text) < MAX_REVIEW_BYTES)
+                g_string_append(operation->data_output, event.text);
+            else operation->data_truncated = TRUE;
+        }
         break;
     case OCTOSHIELD_EVENT_CONFIRM:
         if (event.id <= operation->last_prompt_id || operation->waiting_confirmation ||
@@ -560,6 +614,10 @@ static void operation_maybe_finish(Operation *operation)
     App *app = operation->app;
     gboolean success = operation->exit_success && operation->done_seen &&
                        operation->reported_success && !operation->protocol_failed;
+    if (success && operation->data_output != NULL && !operation->data_truncated)
+        handle_data_log(app, operation->data_output->str);
+    if (success && operation->data_output != NULL && !operation->data_seen)
+        append_log(app, "The structured result could not be displayed safely. The textual operation details remain available; no previous view has been treated as a new result.");
     operation->waiting_confirmation = FALSE;
     if (app->confirmation != NULL) {
         AdwMessageDialog *dialog = app->confirmation;
@@ -585,11 +643,14 @@ static void operation_maybe_finish(Operation *operation)
     g_byte_array_unref(operation->err.line);
     g_object_unref(operation->process);
     g_string_free(operation->review, TRUE);
+    if (operation->data_output != NULL) g_string_free(operation->data_output, TRUE);
     g_free(operation->deferred_confirmation);
     g_free(operation->answer);
+    if (!g_str_equal(operation->title, "Refresh device list")) app->usb_inventory = FALSE;
     g_free(operation->title);
     g_free(operation);
     update_actions(app);
+    refresh_status(app);
 }
 
 static void request_free(Request *request)
@@ -624,11 +685,27 @@ static void launch_request(Request *request)
     operation->answers = g_subprocess_get_stdin_pipe(process);
     operation->title = g_strdup(request->title);
     operation->review = g_string_new(NULL);
+    if (g_str_equal(request->title, "Inspect profile configuration") ||
+        g_str_equal(request->title, "Refresh device list") ||
+        g_str_equal(request->title, "Check for OctoShield updates"))
+        operation->data_output = g_string_new(NULL);
     operation->out = (Reader){operation, g_subprocess_get_stdout_pipe(process), g_byte_array_new(), TRUE, FALSE, FALSE};
     operation->err = (Reader){operation, g_subprocess_get_stderr_pipe(process), g_byte_array_new(), FALSE, FALSE, FALSE};
     app->operation = operation;
+    if (request->changes && g_str_equal(request->argv[0], "/usr/bin/pkexec"))
+        app->status_not_before = g_get_real_time() / G_USEC_PER_SEC;
+    if (g_str_equal(request->title, "Inspect profile configuration")) {
+        gtk_label_set_text(app->profile_details, "Loading the selected profile configuration…");
+        GHashTableIter iter;
+        gpointer value;
+        g_hash_table_iter_init(&iter, app->setting_choices);
+        while (g_hash_table_iter_next(&iter, NULL, &value))
+            gtk_drop_down_set_selected(value, GTK_INVALID_LIST_POSITION);
+    }
     gtk_text_buffer_set_text(app->log, "", 0);
     append_log(app, request->title);
+    if (request->impact != NULL)
+        append_log(app, request->impact);
     append_log(app, "Review this output and every requested confirmation. Closing this window does not interrupt a running system change.");
     gtk_expander_set_expanded(app->details, TRUE);
     gtk_label_set_text(app->activity, "Working — administrator authentication may be requested…");
@@ -673,12 +750,14 @@ static void start_action(App *app, const char *title, const char *impact, gboole
     request->impact = g_strdup(impact);
     request->argv = argv;
     request->changes = changes;
-    if (!changes) {
+    /* Privileged helpers present their actual plan before mutation. A second
+     * generic desktop confirmation adds no evidence and obscures that plan. */
+    if (!changes || privileged) {
         launch_request(request);
         return;
     }
     GtkWidget *dialog = adw_message_dialog_new(app->window, title, impact);
-    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "cancel", "Cancel", "continue", "Review and continue", NULL);
+    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "cancel", "Cancel", "continue", "Apply", NULL);
     adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "continue", ADW_RESPONSE_SUGGESTED);
     adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "cancel");
     adw_message_dialog_set_close_response(ADW_MESSAGE_DIALOG(dialog), "cancel");
@@ -726,6 +805,11 @@ static void input_action_clicked(GtkButton *button, gpointer data)
         args[0] = "usb"; args[1] = "block"; args[2] = first; count = 3;
         title = "Block USB device";
         impact = g_strdup_printf("Block USB device %s. If it is a keyboard, mouse, network adapter or mounted storage, access can stop immediately. Safely unmount storage before blocking it.", first);
+        break;
+    case INPUT_USB_FORGET:
+        args[0] = "usb"; args[1] = "forget"; args[2] = first; count = 3;
+        title = "Forget USB approval in this profile";
+        impact = g_strdup_printf("Remove remembered permission for device %s from the effective USB profile and reevaluate the connected device.", first);
         break;
     case INPUT_OFFICE_FIREWALL:
         args[0] = "office"; args[1] = "firewall"; args[2] = first; args[3] = second; count = 4;
@@ -926,38 +1010,553 @@ static void about_clicked(GtkButton *button, gpointer data)
     gtk_window_present(GTK_WINDOW(about_window(data)));
 }
 
+typedef struct {
+    const char *section;
+    const char *key;
+    AdwActionRow *row;
+    GtkLabel *badge;
+    GtkImage *icon;
+} StatusRow;
+
+typedef enum {
+    PROFILE_APPLY, PROFILE_RESTORE, PROFILE_CREATE, PROFILE_DELETE,
+    PROFILE_SHOW, PROFILE_SET, PROFILE_RULE_ADD, PROFILE_RULE_REMOVE, PROFILE_ENROLL
+} ProfileCommand;
+
+typedef struct {
+    App *app;
+    ProfileCommand command;
+    const char *control;
+    const char *key;
+    GtkDropDown *profile;
+    GtkDropDown *choice;
+    GtkEditable *fields[5];
+} ProfileBinding;
+
+static JsonObject *object_member(JsonObject *object, const char *name)
+{
+    JsonNode *node = object != NULL ? json_object_get_member(object, name) : NULL;
+    return node != NULL && JSON_NODE_HOLDS_OBJECT(node) ? json_node_get_object(node) : NULL;
+}
+
+static const char *string_member(JsonObject *object, const char *name, const char *fallback)
+{
+    JsonNode *node = object != NULL ? json_object_get_member(object, name) : NULL;
+    return node != NULL && JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_STRING ? json_node_get_string(node) : fallback;
+}
+
+static JsonArray *array_member(JsonObject *object, const char *name)
+{
+    JsonNode *node = object != NULL ? json_object_get_member(object, name) : NULL;
+    return node != NULL && JSON_NODE_HOLDS_ARRAY(node) ? json_node_get_array(node) : NULL;
+}
+
+static const char *selected_profile(App *app, GtkDropDown *selector)
+{
+    guint index = gtk_drop_down_get_selected(selector);
+    return index < app->profile_ids->len ? g_ptr_array_index(app->profile_ids, index) : NULL;
+}
+
+static GtkWidget *profile_selector(App *app)
+{
+    GtkStringList *model = gtk_string_list_new(NULL);
+    for (guint i = 0; i < app->profile_ids->len; i++)
+        gtk_string_list_append(model, g_ptr_array_index(app->profile_ids, i));
+    GtkWidget *selector = gtk_drop_down_new(G_LIST_MODEL(model), NULL);
+    gtk_widget_set_size_request(selector, 125, -1);
+    g_ptr_array_add(app->profile_selectors, selector);
+    g_ptr_array_add(app->operation_widgets, selector);
+    return selector;
+}
+
+static void profile_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    ProfileBinding *binding = data;
+    App *app = binding->app;
+    const char *profile = binding->profile != NULL ? selected_profile(app, binding->profile) : NULL;
+    const char *args[8] = {"profile", NULL};
+    const char *title = "Apply profile";
+    const char *impact = "The helper will show the exact changes and ask before applying them. Profile changes can disconnect devices and network services.";
+    gsize count = 0;
+    gboolean changes = TRUE;
+    if (binding->profile != NULL && profile == NULL)
+        return;
+    switch (binding->command) {
+    case PROFILE_APPLY:
+        args[1] = "apply"; args[2] = profile; count = 3;
+        if (binding->control != NULL) { args[3] = binding->control; count = 4; }
+        break;
+    case PROFILE_RESTORE:
+        args[1] = "restore"; count = 2; title = "Restore previous system settings";
+        if (binding->control != NULL) { args[2] = binding->control; count = 3; }
+        break;
+    case PROFILE_CREATE:
+        args[1] = "create"; args[2] = gtk_editable_get_text(binding->fields[0]); args[3] = profile; count = 4;
+        title = "Create a profile"; impact = "Copy this profile's settings to a new name. Apply the new profile when you are ready.";
+        break;
+    case PROFILE_DELETE:
+        args[1] = "delete"; args[2] = profile; count = 3; title = "Delete this profile";
+        break;
+    case PROFILE_SHOW:
+        args[1] = "show"; args[2] = profile; count = 3; title = "Inspect profile configuration"; changes = FALSE;
+        break;
+    case PROFILE_SET: {
+        static const char *const service_values[] = {"enabled", "disabled", "baseline"};
+        static const char *const boolean_values[] = {"true", "false"};
+        guint index = gtk_drop_down_get_selected(binding->choice);
+        gboolean service = g_str_has_prefix(binding->key, "services.");
+        if (index >= (service ? 3U : 2U)) return;
+        args[1] = "set"; args[2] = profile; args[3] = binding->key;
+        args[4] = service ? service_values[index] : boolean_values[index]; count = 5;
+        title = "Save profile setting"; impact = "This edits the saved profile. Use Apply to activate its new settings.";
+        break;
+    }
+    case PROFILE_RULE_ADD:
+        args[1] = "rule-add"; args[2] = profile; args[3] = gtk_editable_get_text(binding->fields[0]);
+        args[4] = gtk_drop_down_get_selected(binding->choice) == 0 ? "tcp" : "udp";
+        args[5] = gtk_editable_get_text(binding->fields[1]); args[6] = gtk_editable_get_text(binding->fields[2]);
+        args[7] = gtk_editable_get_text(binding->fields[3]); count = 8;
+        title = "Save firewall exception"; impact = "Save this incoming exception in the selected profile. Apply that firewall profile to activate it. A source of any permits every source; prefer a specific trusted address or subnet.";
+        break;
+    case PROFILE_RULE_REMOVE:
+        args[1] = "rule-remove"; args[2] = profile; args[3] = gtk_editable_get_text(binding->fields[0]); count = 4;
+        title = "Remove firewall exception"; impact = "Remove the saved exception. Apply this firewall profile to update the active rules.";
+        break;
+    case PROFILE_ENROLL:
+        args[0] = "usb"; args[1] = "enroll"; args[2] = profile; count = 3;
+        title = "Prepare trusted USB devices for this profile";
+        impact = "Disconnect untrusted devices. Review every connected device before remembering the set for this profile.";
+        break;
+    }
+    start_action(app, title, impact, TRUE, changes, count, args);
+}
+
+static GtkWidget *profile_button(App *app, const char *label, ProfileCommand command,
+                                 GtkDropDown *profile, const char *control, const char *key,
+                                 GtkDropDown *choice, GtkWidget **fields)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    ProfileBinding *binding = g_new0(ProfileBinding, 1);
+    binding->app = app; binding->command = command; binding->profile = profile;
+    binding->control = control; binding->key = key; binding->choice = choice;
+    for (guint i = 0; fields != NULL && i < 5 && fields[i] != NULL; i++)
+        binding->fields[i] = GTK_EDITABLE(fields[i]);
+    g_object_set_data_full(G_OBJECT(button), "profile-binding", binding, g_free);
+    g_signal_connect(button, "clicked", G_CALLBACK(profile_clicked), binding);
+    g_ptr_array_add(app->operation_widgets, button);
+    return button;
+}
+
+static GtkWidget *status_row(App *app, const char *section, const char *key, const char *title)
+{
+    StatusRow *binding = g_new0(StatusRow, 1);
+    binding->section = section; binding->key = key;
+    binding->row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(binding->row), title);
+    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(binding->row), FALSE);
+    adw_action_row_set_subtitle(binding->row, "Waiting for a current system observation");
+    adw_action_row_set_subtitle_lines(binding->row, 3);
+    binding->badge = GTK_LABEL(gtk_label_new("Unknown"));
+    binding->icon = GTK_IMAGE(gtk_image_new_from_icon_name("dialog-question-symbolic"));
+    adw_action_row_add_prefix(binding->row, GTK_WIDGET(binding->icon));
+    adw_action_row_add_suffix(binding->row, GTK_WIDGET(binding->badge));
+    g_ptr_array_add(app->status_rows, binding);
+    return GTK_WIDGET(binding->row);
+}
+
+static void update_status_row(StatusRow *row, JsonObject *root)
+{
+    JsonObject *data = object_member(object_member(root, row->section), row->key);
+    const char *state = string_member(data, "state", "unknown");
+    JsonObject *profile_state = object_member(root, "profiles");
+    JsonNode *available = profile_state != NULL ? json_object_get_member(profile_state, "available") : NULL;
+    const char *result = string_member(object_member(object_member(object_member(root, "profiles"), "results"), row->key), "status", "");
+    if (g_str_equal(row->section, "controls") && (g_str_equal(result, "failed") || g_str_equal(result, "pending") || g_str_equal(result, "applying")))
+        state = "partial";
+    if (available != NULL && JSON_NODE_HOLDS_VALUE(available) && json_node_get_value_type(available) == G_TYPE_BOOLEAN && !json_node_get_boolean(available))
+        state = "unknown";
+    const char *label = "Unknown";
+    const char *icon = "dialog-question-symbolic";
+    const char *css = "dim-label";
+    if (g_str_equal(state, "active")) { label = "Active"; icon = "emblem-ok-symbolic"; css = "success"; }
+    else if (g_str_equal(state, "inactive")) { label = "Inactive"; icon = "media-playback-stop-symbolic"; css = "warning"; }
+    else if (g_str_equal(state, "partial")) { label = "Needs attention"; icon = "dialog-warning-symbolic"; css = "warning"; }
+    else if (g_str_equal(state, "unsupported")) { label = "Not available"; icon = "dialog-information-symbolic"; }
+    gtk_label_set_text(row->badge, label);
+    gtk_image_set_from_icon_name(row->icon, icon);
+    static const char *const classes[] = {"dim-label", "success", "warning"};
+    for (gsize i = 0; i < G_N_ELEMENTS(classes); i++) {
+        gtk_widget_remove_css_class(GTK_WIDGET(row->badge), classes[i]);
+        gtk_widget_remove_css_class(GTK_WIDGET(row->icon), classes[i]);
+    }
+    gtk_widget_add_css_class(GTK_WIDGET(row->badge), css);
+    gtk_widget_add_css_class(GTK_WIDGET(row->icon), css);
+    const char *summary = string_member(data, "summary", "No recent verified observation. Check the status service or run an inspection.");
+    g_autofree gchar *safe = octoshield_text_sanitize(summary, -1);
+    JsonObject *profiles = object_member(root, "profiles");
+    const char *assignment = g_str_equal(row->section, "controls") ? string_member(object_member(profiles, "assignments"), row->key, NULL) : NULL;
+    const char *override = g_str_equal(row->section, "controls") ? string_member(object_member(profiles, "overrides"), row->key, NULL) : NULL;
+    g_autofree gchar *subtitle = assignment != NULL ? g_strdup_printf("%s%s · %s", assignment, override != NULL ? " (override)" : "", safe) : g_strdup(safe);
+    adw_action_row_set_subtitle(row->row, subtitle);
+}
+
+static void update_catalog(App *app, JsonArray *catalog)
+{
+    if (catalog == NULL || json_array_get_length(catalog) == 0 || json_array_get_length(catalog) > 128)
+        return;
+    g_autoptr(GPtrArray) ids = g_ptr_array_new_with_free_func(g_free);
+    g_autoptr(GPtrArray) names = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; i < json_array_get_length(catalog); i++) {
+        JsonNode *node = json_array_get_element(catalog, i);
+        if (!JSON_NODE_HOLDS_OBJECT(node)) return;
+        JsonObject *item = json_node_get_object(node);
+        const char *id = string_member(item, "id", "");
+        if (!g_regex_match_simple("^[a-z][a-z0-9-]{0,31}$", id, 0, 0)) return;
+        g_ptr_array_add(ids, g_strdup(id));
+        g_ptr_array_add(names, octoshield_text_sanitize(string_member(item, "name", id), -1));
+    }
+    gboolean changed = ids->len != app->profile_ids->len;
+    for (guint i = 0; !changed && i < ids->len; i++)
+        changed = !g_str_equal(g_ptr_array_index(ids, i), g_ptr_array_index(app->profile_ids, i));
+    if (!changed) return;
+    for (guint i = 0; i < app->profile_selectors->len; i++) {
+        GtkDropDown *selector = g_ptr_array_index(app->profile_selectors, i);
+        const char *selected = selected_profile(app, selector);
+        guint selected_index = 0;
+        GtkStringList *model = gtk_string_list_new(NULL);
+        for (guint j = 0; j < ids->len; j++) {
+            gtk_string_list_append(model, g_ptr_array_index(names, j));
+            if (g_strcmp0(selected, g_ptr_array_index(ids, j)) == 0) selected_index = j;
+        }
+        gtk_drop_down_set_model(selector, G_LIST_MODEL(model));
+        gtk_drop_down_set_selected(selector, selected_index);
+        g_object_unref(model);
+    }
+    g_ptr_array_unref(app->profile_ids);
+    app->profile_ids = g_steal_pointer(&ids);
+}
+
+static void show_usb_devices(App *app, JsonArray *devices)
+{
+    if (app->usb_devices == NULL || devices == NULL || json_array_get_length(devices) > 512) return;
+    GtkStringList *model = gtk_string_list_new(NULL);
+    g_ptr_array_set_size(app->usb_ids, 0);
+    for (guint i = 0; i < json_array_get_length(devices); i++) {
+        JsonNode *node = json_array_get_element(devices, i);
+        if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node)) continue;
+        JsonObject *device = json_node_get_object(node);
+        JsonNode *id_node = json_object_get_member(device, "id");
+        if (id_node == NULL || !JSON_NODE_HOLDS_VALUE(id_node) || json_node_get_value_type(id_node) != G_TYPE_INT64) continue;
+        gint64 id = json_node_get_int(id_node);
+        if (id < 1 || id > G_GINT64_CONSTANT(4294967294)) continue;
+        g_autofree gchar *id_text = g_strdup_printf("%" G_GINT64_FORMAT, id);
+        g_autofree gchar *label = g_strdup_printf("%s · %s · %s", id_text, string_member(device, "state", "unknown"), string_member(device, "name", string_member(device, "label", "USB device")));
+        g_autofree gchar *safe = octoshield_text_sanitize(label, -1);
+        gtk_string_list_append(model, safe);
+        g_ptr_array_add(app->usb_ids, g_strdup(id_text));
+    }
+    gtk_drop_down_set_model(app->usb_devices, G_LIST_MODEL(model));
+    gtk_drop_down_set_selected(app->usb_devices, GTK_INVALID_LIST_POSITION);
+    g_object_unref(model);
+}
+
+static void render_status(App *app, JsonObject *root)
+{
+    if (app->status_rows == NULL) return;
+    app->cache_valid = root != NULL;
+    for (guint i = 0; i < app->status_rows->len; i++)
+        update_status_row(g_ptr_array_index(app->status_rows, i), root);
+    JsonObject *profiles = object_member(root, "profiles");
+    update_catalog(app, array_member(profiles, "catalog"));
+    const char *active = string_member(profiles, "active", "Not selected");
+    g_free(app->active_profile);
+    app->active_profile = g_strdup(active);
+    JsonObject *overrides = object_member(profiles, "overrides");
+    gboolean mixed = overrides != NULL && json_object_get_size(overrides) > 0;
+    gboolean incomplete = FALSE;
+    JsonObject *results = object_member(profiles, "results");
+    if (results != NULL) {
+        g_autoptr(GList) keys = json_object_get_members(results);
+        for (GList *key = keys; key != NULL; key = key->next) {
+            const char *result = string_member(object_member(results, key->data), "status", "unknown");
+            incomplete |= g_str_equal(result, "failed") || g_str_equal(result, "pending") || g_str_equal(result, "applying");
+        }
+    }
+    g_autofree gchar *title = root == NULL ? g_strdup("Current status unavailable") : g_strdup_printf("%s%s%s", active, mixed ? " · individual overrides" : "", incomplete ? " · changes incomplete" : "");
+    gtk_label_set_text(app->overview_title, title);
+    gtk_label_set_text(app->overview_summary, root == NULL ? "No recent system observation. Protection remains unknown until verified." :
+                       mixed ? "Individual controls use different profiles. Check their effective assignments below." :
+                       "Current system observations are shown below. Applying a profile globally clears individual overrides.");
+    if (root != NULL) {
+        gint64 checked = json_object_get_int_member(root, "checked_at");
+        g_autoptr(GDateTime) when = g_date_time_new_from_unix_local(checked);
+        g_autofree gchar *time = when != NULL ? g_date_time_format(when, "%H:%M:%S") : g_strdup("unknown");
+        g_autofree gchar *label = g_strdup_printf("Last system observation %s · refreshes automatically", time);
+        gtk_label_set_text(app->checked_label, label);
+    } else gtk_label_set_text(app->checked_label, "Status is missing, stale or invalid. Inspection can help diagnose the service.");
+    JsonObject *usb = object_member(root, "usb");
+    JsonNode *pending_node = usb != NULL ? json_object_get_member(usb, "pending") : NULL;
+    gint64 pending = pending_node != NULL && JSON_NODE_HOLDS_VALUE(pending_node) && json_node_get_value_type(pending_node) == G_TYPE_INT64 ? json_node_get_int(pending_node) : -1;
+    const char *usb_profile = string_member(usb, "profile", string_member(object_member(profiles, "assignments"), "usb", "not assigned"));
+    g_autofree gchar *pending_text = pending < 0 ? g_strdup("USB status unavailable. New devices are not assumed to be blocked until authorization is verified.") :
+        g_strdup_printf("USB profile: %s · %" G_GINT64_FORMAT " blocked device%s awaiting a decision. Approval is scoped to this USB profile.", usb_profile, pending, pending == 1 ? "" : "s");
+    gtk_label_set_text(app->usb_pending, pending_text);
+    if (app->overview_usb != NULL) gtk_label_set_text(app->overview_usb, pending_text);
+    /* Cached entries are pending, not a trusted inventory. Keep a manually
+     * inspected inventory until the user asks to refresh it. */
+    if (!app->usb_inventory)
+        show_usb_devices(app, array_member(usb, "devices"));
+}
+
+/* The directory cannot be replaced by another user; the opened file is then
+ * checked itself before its bounded contents are parsed. Never follow links,
+ * trust user-writable status, or preserve green indicators after expiry. */
+static JsonNode *read_status_cache(void)
+{
+    int directory = open("/run/octoshield", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) return NULL;
+    struct stat info;
+    if (fstat(directory, &info) != 0 || info.st_uid != 0 || info.st_gid != 0 || (info.st_mode & 07777) != 0755) {
+        close(directory); return NULL;
+    }
+    int fd = openat(directory, "status.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    close(directory);
+    if (fd < 0) return NULL;
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 || info.st_gid != 0 ||
+        (info.st_mode & 07777) != 0644 || info.st_size < 2 || info.st_size > 262144) {
+        close(fd); return NULL;
+    }
+    g_autofree gchar *data = g_malloc((gsize)info.st_size + 1);
+    gsize used = 0;
+    while (used < (gsize)info.st_size) {
+        ssize_t count = read(fd, data + used, (gsize)info.st_size - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { close(fd); return NULL; }
+        used += (gsize)count;
+    }
+    close(fd); data[used] = '\0';
+    g_autoptr(JsonParser) parser = json_parser_new();
+    if (!g_utf8_validate(data, (gssize)used, NULL) || memchr(data, '\0', used) != NULL ||
+        !json_parser_load_from_data(parser, data, (gssize)used, NULL)) return NULL;
+    JsonNode *root = json_parser_get_root(parser);
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root)) return NULL;
+    JsonObject *object = json_node_get_object(root);
+    JsonNode *schema = json_object_get_member(object, "schema");
+    JsonNode *checked = json_object_get_member(object, "checked_at");
+    if (schema == NULL || checked == NULL || !JSON_NODE_HOLDS_VALUE(schema) || !JSON_NODE_HOLDS_VALUE(checked) ||
+        json_node_get_value_type(schema) != G_TYPE_INT64 || json_node_get_value_type(checked) != G_TYPE_INT64 ||
+        json_node_get_int(schema) != 1) return NULL;
+    gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+    gint64 observed = json_node_get_int(checked);
+    return observed >= 0 && observed <= now && now - observed <= 90 ? json_node_copy(root) : NULL;
+}
+
+static gboolean refresh_status(gpointer data)
+{
+    App *app = data;
+    if (app->status_rows == NULL) return G_SOURCE_CONTINUE;
+    g_autoptr(JsonNode) root = read_status_cache();
+    if (root != NULL && json_object_get_int_member(json_node_get_object(root), "checked_at") < app->status_not_before)
+        g_clear_pointer(&root, json_node_unref);
+    render_status(app, root != NULL ? json_node_get_object(root) : NULL);
+    return G_SOURCE_CONTINUE;
+}
+
+static void refresh_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    refresh_status(data);
+}
+
+static void handle_data_log(App *app, const char *text)
+{
+    if (app->operation == NULL || app->update_status == NULL) return;
+    g_autoptr(JsonParser) parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, text, -1, NULL)) return;
+    JsonNode *node = json_parser_get_root(parser);
+    if (node == NULL) return;
+    if (g_str_equal(app->operation->title, "Refresh device list")) {
+        if (JSON_NODE_HOLDS_ARRAY(node)) show_usb_devices(app, json_node_get_array(node));
+        else if (JSON_NODE_HOLDS_OBJECT(node)) show_usb_devices(app, array_member(json_node_get_object(node), "devices"));
+        app->usb_inventory = TRUE;
+        app->operation->data_seen = TRUE;
+        return;
+    }
+    if (!JSON_NODE_HOLDS_OBJECT(node)) return;
+    JsonObject *root = json_node_get_object(node);
+    if (g_str_equal(app->operation->title, "Check for OctoShield updates")) {
+        const char *current = string_member(root, "current", "unknown");
+        const char *latest = string_member(root, "latest", "unknown");
+        const char *message = string_member(root, "message", "Unable to determine the latest package.");
+        g_autofree gchar *label = g_strdup_printf("Installed %s · latest %s\n%s", current, latest, message);
+        gtk_label_set_text(app->update_status, label);
+        const char *url = string_member(root, "download_url", "");
+        if (!g_str_has_prefix(url, "https://github.com/octoleo/octoshield/releases/download/v"))
+            url = "https://github.com/octoleo/octoshield/releases/latest";
+        gtk_link_button_set_uri(app->update_link, url);
+        app->operation->data_seen = TRUE;
+    } else if (g_str_equal(app->operation->title, "Inspect profile configuration")) {
+        const char *id = string_member(root, "id", "unknown");
+        GString *configuration = g_string_new(NULL);
+        g_string_append_printf(configuration, "Saved profile: %s\n", string_member(root, "name", id));
+        GHashTableIter iter;
+        gpointer key;
+        gpointer value;
+        g_hash_table_iter_init(&iter, app->setting_choices);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            g_auto(GStrv) path = g_strsplit(key, ".", 2);
+            JsonObject *section = object_member(root, path[0]);
+            JsonNode *setting = section != NULL ? json_object_get_member(section, path[1]) : NULL;
+            guint selection = GTK_INVALID_LIST_POSITION;
+            const char *description = "unknown";
+            if (setting != NULL && JSON_NODE_HOLDS_VALUE(setting)) {
+                if (json_node_get_value_type(setting) == G_TYPE_BOOLEAN) {
+                    selection = json_node_get_boolean(setting) ? 0 : 1;
+                    description = selection == 0 ? "enabled" : "disabled";
+                } else if (json_node_get_value_type(setting) == G_TYPE_STRING) {
+                    description = json_node_get_string(setting);
+                    selection = g_str_equal(description, "enabled") ? 0 : g_str_equal(description, "disabled") ? 1 : g_str_equal(description, "baseline") ? 2 : GTK_INVALID_LIST_POSITION;
+                }
+            }
+            if (g_strcmp0(id, selected_profile(app, app->edit_profile)) == 0)
+                gtk_drop_down_set_selected(value, selection);
+            const char *setting_title = g_object_get_data(G_OBJECT(value), "setting-title");
+            g_string_append_printf(configuration, "%s: %s\n", setting_title != NULL ? setting_title : (char *)key, description);
+        }
+        JsonArray *rules = array_member(object_member(root, "firewall"), "rules");
+        g_string_append_printf(configuration, "\nSaved firewall exceptions: %u\n", rules != NULL ? json_array_get_length(rules) : 0);
+        if (rules != NULL) for (guint i = 0; i < json_array_get_length(rules); i++) {
+            JsonNode *rule_node = json_array_get_element(rules, i);
+            if (!JSON_NODE_HOLDS_OBJECT(rule_node)) continue;
+            JsonObject *rule = json_node_get_object(rule_node);
+            JsonNode *port = json_object_get_member(rule, "port");
+            gint64 number = port != NULL && JSON_NODE_HOLDS_VALUE(port) && json_node_get_value_type(port) == G_TYPE_INT64 ? json_node_get_int(port) : 0;
+            JsonNode *expires_node = json_object_get_member(rule, "expires_at");
+            gint64 expires = expires_node != NULL && JSON_NODE_HOLDS_VALUE(expires_node) && json_node_get_value_type(expires_node) == G_TYPE_INT64 ? json_node_get_int(expires_node) : -1;
+            g_autoptr(GDateTime) when = expires > 0 ? g_date_time_new_from_unix_local(expires) : NULL;
+            g_autofree gchar *expiry = when != NULL ? g_date_time_format(when, "%Y-%m-%d %H:%M") : g_strdup(expires == 0 ? "no expiry" : "expiry unknown");
+            g_string_append_printf(configuration, "%s: %s port %" G_GINT64_FORMAT " from %s on %s · %s\n", string_member(rule, "id", "unknown"), string_member(rule, "protocol", "unknown"), number, string_member(rule, "source", "unknown"), string_member(rule, "interface", "unknown"), expiry);
+        }
+        gtk_label_set_text(app->profile_details, configuration->str);
+        g_string_free(configuration, TRUE);
+        app->operation->data_seen = TRUE;
+    }
+}
+
+static void usb_device_selected(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    App *app = data;
+    guint index = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (index < app->usb_ids->len)
+        gtk_editable_set_text(app->usb_device_id, g_ptr_array_index(app->usb_ids, index));
+}
+
+static void open_usb_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    App *app = data;
+    gtk_list_box_select_row(app->navigation, gtk_list_box_get_row_at_index(app->navigation, 2));
+}
+
 static void build_overview(App *app)
 {
-    GtkWidget *page = page_new(app, "overview", "A prepared laptop. A clearer picture.",
-                               "Review your protections before the conference, then adjust individual controls when you return to the office.");
+    GtkWidget *page = page_new(app, "overview", "Overview", "Choose an environment and see what is actually active.");
     GtkWidget *hero = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 18);
     gtk_widget_add_css_class(hero, "shield-hero");
-    gtk_box_append(GTK_BOX(hero), brand_widget(app, 104, 120));
+    gtk_box_append(GTK_BOX(hero), brand_widget(app, 52, 60));
     GtkWidget *copy = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
     gtk_widget_set_hexpand(copy, TRUE);
-    gtk_box_append(GTK_BOX(copy), text_label("Start with an inspection", "title-2"));
-    gtk_box_append(GTK_BOX(copy), text_label("Read your current firewall, services, network and storage information. Inspection is evidence to review, not a guarantee of protection.", NULL));
+    app->overview_title = GTK_LABEL(text_label("Reading current status…", "title-2"));
+    app->overview_summary = GTK_LABEL(text_label("Waiting for a current system observation.", NULL));
+    gtk_box_append(GTK_BOX(copy), GTK_WIDGET(app->overview_title));
+    gtk_box_append(GTK_BOX(copy), GTK_WIDGET(app->overview_summary));
     gtk_box_append(GTK_BOX(hero), copy);
-    gtk_box_append(GTK_BOX(hero), action_button(app, "status", "Inspect system", TRUE));
+    app->global_profile = GTK_DROP_DOWN(profile_selector(app));
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_valign(controls, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(controls, "Apply this environment to firewall, USB, connections, services and monitoring. This clears individual overrides.");
+    gtk_box_append(GTK_BOX(controls), GTK_WIDGET(app->global_profile));
+    GtkWidget *apply = profile_button(app, "Apply profile", PROFILE_APPLY, app->global_profile, NULL, NULL, NULL, NULL);
+    gtk_widget_add_css_class(apply, "suggested-action");
+    gtk_box_append(GTK_BOX(controls), apply);
+    gtk_box_append(GTK_BOX(hero), controls);
     gtk_box_append(GTK_BOX(page), hero);
-    GtkWidget *group = group_new(page, "Prepare for an untrusted environment", "Every system change requests administrator authentication and its own review.");
-    group_add(group, action_row(app, "firewall", "Review", "network-wireless-symbolic"));
-    group_add(group, action_row(app, "usb-policy", "Review", "drive-removable-media-symbolic"));
-    group_add(group, action_row(app, "desktop-apply", "Review", "system-lock-screen-symbolic"));
-    GtkWidget *notice = text_label("Keep physical control of the laptop. Lock it when you step away, and shut it down before leaving it unattended. OctoShield strengthens existing Linux controls; it cannot eliminate every vulnerability.", "dim-label");
-    gtk_box_append(GTK_BOX(page), notice);
+    GtkWidget *group = group_new(page, "Observed protection", "Indicators report verified conditions, including incomplete or unsupported protection.");
+    group_add(group, status_row(app, "controls", "firewall", "Network firewall"));
+    group_add(group, status_row(app, "controls", "usb", "USB authorization"));
+    group_add(group, status_row(app, "controls", "network", "Connection privacy"));
+    group_add(group, status_row(app, "controls", "services", "Listening services"));
+    app->overview_usb = GTK_LABEL(text_label("Checking USB decisions…", NULL));
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->overview_usb));
+    GtkWidget *decisions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *review_usb = gtk_button_new_with_label("Review USB devices");
+    g_signal_connect(review_usb, "clicked", G_CALLBACK(open_usb_clicked), app);
+    gtk_box_append(GTK_BOX(decisions), review_usb);
+    gtk_box_append(GTK_BOX(decisions), action_button(app, "notify-enable", "Enable desktop alerts…", FALSE));
+    gtk_box_append(GTK_BOX(page), decisions);
+    app->checked_label = GTK_LABEL(text_label("Checking observation freshness…", "dim-label"));
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->checked_label));
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh status");
+    gtk_widget_set_halign(refresh, GTK_ALIGN_END);
+    g_signal_connect(refresh, "clicked", G_CALLBACK(refresh_clicked), app);
+    gtk_box_append(GTK_BOX(page), refresh);
+    group = group_new(page, "Additional exposure and baseline", "These observations have limits. An unavailable check is shown explicitly, and profiles never turn off your essential baseline protection.");
+    static const char *const exposure[][2] = {{"secure_boot", "Secure Boot"}, {"disk_encryption", "Disk encryption"}, {"thunderbolt", "Thunderbolt / USB4 and DMA protection"}, {"containers", "Container and virtual-machine exposure"}, {"forwarding", "Network forwarding"}};
+    for (gsize i = 0; i < G_N_ELEMENTS(exposure); i++)
+        group_add(group, status_row(app, "exposures", exposure[i][0], exposure[i][1]));
 }
 
 static void build_protections(App *app)
 {
-    GtkWidget *page = page_new(app, "protections", "Protections", "Choose the controls that fit this laptop. Impact details are shown before each change.");
-    GtkWidget *group = group_new(page, "System protection", "These operations use the system's administrator authentication dialog.");
-    static const char *ids[] = {"firewall", "usb-policy", "network", "services", "sudo", "updates", "apparmor", "monitor"};
-    static const char *icons[] = {"network-workgroup-symbolic", "drive-removable-media-symbolic", "network-wireless-symbolic", "preferences-system-symbolic", "dialog-password-symbolic", "software-update-available-symbolic", "security-high-symbolic", "network-transmit-receive-symbolic"};
-    for (gsize i = 0; i < G_N_ELEMENTS(ids); i++)
-        group_add(group, action_row(app, ids[i], "Review", icons[i]));
+    GtkWidget *page = page_new(app, "protections", "Profiles & protections", "Use an environment for each control, or restore its previous settings. Authentication is requested only when you perform a system operation.");
+    GtkWidget *group = group_new(page, "Individual profile assignments", "Apply the global profile to one control to remove its override. The status reports the current assignment and observed result.");
+    static const char *const controls[][2] = {{"firewall", "Network firewall"}, {"usb", "USB authorization"}, {"network", "Connection privacy"}, {"services", "Listening services"}, {"monitor", "Security monitoring"}};
+    for (gsize i = 0; i < G_N_ELEMENTS(controls); i++) {
+        group_add(group, status_row(app, "controls", controls[i][0], controls[i][1]));
+        GtkDropDown *selector = GTK_DROP_DOWN(profile_selector(app));
+        GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(buttons), GTK_WIDGET(selector));
+        gtk_box_append(GTK_BOX(buttons), profile_button(app, "Apply", PROFILE_APPLY, selector, controls[i][0], NULL, NULL, NULL));
+        gtk_box_append(GTK_BOX(buttons), profile_button(app, "Restore…", PROFILE_RESTORE, NULL, controls[i][0], NULL, NULL, NULL));
+        group_add(group, control_row("Adjust this protection", NULL, buttons));
+    }
+    group = group_new(page, "Baseline protection", "These independent controls stay in place when switching environments.");
+    static const char *const baseline[][3] = {{"sudo", "Fresh administrator authentication", "dialog-password-symbolic"}, {"updates", "Security updates", "software-update-available-symbolic"}, {"apparmor", "Application confinement", "security-high-symbolic"}};
+    for (gsize i = 0; i < G_N_ELEMENTS(baseline); i++) {
+        group_add(group, status_row(app, "controls", baseline[i][0], baseline[i][1]));
+        group_add(group, action_row(app, baseline[i][0], "Activate", baseline[i][2]));
+    }
+    group = group_new(page, "Create and customize profiles", "Changes are saved first. Apply the edited profile globally or to an individual control when ready. Profile names use lowercase letters, numbers and hyphens.");
+    app->edit_profile = GTK_DROP_DOWN(profile_selector(app));
+    group_add(group, control_row("Profile to edit or copy", NULL, GTK_WIDGET(app->edit_profile)));
+    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(buttons), profile_button(app, "Inspect configuration", PROFILE_SHOW, app->edit_profile, NULL, NULL, NULL, NULL));
+    gtk_box_append(GTK_BOX(buttons), profile_button(app, "Delete…", PROFILE_DELETE, app->edit_profile, NULL, NULL, NULL, NULL));
+    group_add(group, control_row("Saved settings", "Active profiles cannot be deleted.", buttons));
+    GtkWidget *name = input_row(group, "New profile name · for example client-visit");
+    GtkWidget *name_fields[] = {name, NULL};
+    group_add(group, control_row("Copy selected profile", NULL, profile_button(app, "Create profile", PROFILE_CREATE, app->edit_profile, NULL, NULL, NULL, name_fields)));
+    static const char *const settings[][2] = {{"network.autoconnect", "Previously trusted automatic connections"}, {"network.discovery", "Local network discovery"}, {"services.printing", "Printing service"}, {"services.bluetooth", "Bluetooth service"}, {"services.ssh", "Incoming SSH service"}, {"services.discovery", "Discovery service"}, {"services.samba", "File sharing service"}, {"services.remote_desktop", "System remote desktop service"}, {"monitor.enabled", "Security event monitoring"}};
+    static const char *const boolean_choices[] = {"Enabled", "Disabled", NULL};
+    static const char *const service_choices[] = {"Enabled", "Disabled", "Previous setting", NULL};
+    for (gsize i = 0; i < G_N_ELEMENTS(settings); i++) {
+        GtkDropDown *choice = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(g_str_has_prefix(settings[i][0], "services.") ? service_choices : boolean_choices));
+        gtk_drop_down_set_selected(choice, GTK_INVALID_LIST_POSITION);
+        g_hash_table_insert(app->setting_choices, (gpointer)settings[i][0], choice);
+        g_object_set_data(G_OBJECT(choice), "setting-title", (gpointer)settings[i][1]);
+        GtkWidget *edit = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(edit), GTK_WIDGET(choice));
+        gtk_box_append(GTK_BOX(edit), profile_button(app, "Save", PROFILE_SET, app->edit_profile, NULL, settings[i][0], choice, NULL));
+        group_add(group, control_row(settings[i][1], "Choose a value, then save it to the selected profile.", edit));
+    }
+    app->profile_details = GTK_LABEL(text_label("Inspect a profile to view its saved configuration and firewall rule identifiers.", "dim-label"));
+    gtk_label_set_selectable(app->profile_details, TRUE);
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->profile_details));
     group = group_new(page, "Your GNOME session", "Desktop settings are changed as your normal user and have their own private baseline.");
-    group_add(group, action_row(app, "desktop-apply", "Review", "system-lock-screen-symbolic"));
+    group_add(group, action_row(app, "desktop-apply", "Activate", "system-lock-screen-symbolic"));
     group_add(group, action_row(app, "desktop-status", "Inspect", "dialog-information-symbolic"));
     group_add(group, action_row(app, "desktop-restore", "Restore…", "edit-undo-symbolic"));
     GtkWidget *accounts = gtk_button_new_with_label("Open Accounts");
@@ -968,34 +1567,66 @@ static void build_protections(App *app)
 
 static void build_usb(App *app)
 {
-    GtkWidget *page = page_new(app, "usb", "USB devices", "Inspect a device's identity and interfaces before allowing it. Device names can be supplied by the device itself.");
-    GtkWidget *group = group_new(page, "Inspect the connected hardware", "The device list appears in Operation details. Use the numeric ID from that current list.");
+    GtkWidget *page = page_new(app, "usb", "USB devices", "Unknown devices remain blocked while authorization is active. Remembered approvals belong only to the effective USB profile; device names alone cannot prove identity.");
+    app->usb_pending = GTK_LABEL(text_label("Checking pending USB devices…", "title-3"));
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->usb_pending));
+    GtkWidget *alerts = group_new(page, "Blocked-device alerts", "Enable desktop alerts to hear about blocked devices while OctoShield is closed. Authorization stays enforced independently of this window; approvals wait until you unlock the session.");
+    group_add(alerts, action_row(app, "notify-enable", "Enable alerts…", "preferences-system-notifications-symbolic"));
+    GtkWidget *group = group_new(page, "Connected hardware", "The pending list is available without authentication. Refresh the full inventory to inspect identity and interfaces before approving a device.");
+    group_add(group, status_row(app, "controls", "usb", "USB authorization"));
     group_add(group, action_row(app, "usb-list", "Refresh", "view-refresh-symbolic"));
-    group_add(group, action_row(app, "usb-policy", "Review policy", "security-high-symbolic"));
-    group = group_new(page, "Authorize or block one device", "Enable USB authorization first, then use administrator authentication to approve or block a connected device.");
+    app->usb_devices = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){NULL}));
+    gtk_widget_set_size_request(GTK_WIDGET(app->usb_devices), 240, -1);
+    group_add(group, control_row("Select a connected device", NULL, GTK_WIDGET(app->usb_devices)));
+    group = group_new(page, "Authorize or block one device", "Allow once expires when switching USB profiles. Remember authorizes only this profile. Switching profiles reevaluates devices already attached.");
     GtkWidget *device = input_row(group, "Numeric device ID");
+    app->usb_device_id = GTK_EDITABLE(device);
+    g_signal_connect(app->usb_devices, "notify::selected", G_CALLBACK(usb_device_selected), app);
     adw_entry_row_set_input_purpose(ADW_ENTRY_ROW(device), GTK_INPUT_PURPOSE_DIGITS);
     GtkWidget *permanent = gtk_switch_new();
-    group_add(group, control_row("Remember authorization", "Off: current connection only. On: persist a trusted-device rule.", permanent));
+    group_add(group, control_row("Remember for the current USB profile", "Off: allow once. On: save permission only for this profile.", permanent));
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_set_halign(buttons, GTK_ALIGN_END);
     GtkWidget *block = input_button(app, "Block device…", INPUT_USB_BLOCK, device, NULL, NULL, NULL);
-    GtkWidget *allow = input_button(app, "Review authorization…", INPUT_USB_ALLOW, device, NULL, permanent, NULL);
+    GtkWidget *allow = input_button(app, "Allow device…", INPUT_USB_ALLOW, device, NULL, permanent, NULL);
     gtk_widget_add_css_class(allow, "suggested-action");
     gtk_box_append(GTK_BOX(buttons), block);
+    gtk_box_append(GTK_BOX(buttons), input_button(app, "Forget approval…", INPUT_USB_FORGET, device, NULL, NULL, NULL));
     gtk_box_append(GTK_BOX(buttons), allow);
     gtk_box_append(GTK_BOX(page), buttons);
+    group = group_new(page, "Prepare another USB profile", "Enroll only physically reviewed devices. Keep essential input devices available and safely unmount storage before restrictive changes.");
+    GtkDropDown *profile = GTK_DROP_DOWN(profile_selector(app));
+    group_add(group, control_row("Destination profile", NULL, GTK_WIDGET(profile)));
+    group_add(group, control_row("Review the connected device set", NULL, profile_button(app, "Enroll devices…", PROFILE_ENROLL, profile, NULL, NULL, NULL, NULL)));
     gtk_box_append(GTK_BOX(page), text_label("USB authorization is separate from file scanning and encryption. Blocking your active input or network device can disconnect it immediately; unmount storage before blocking it.", "dim-label"));
 }
 
 static void build_office(App *app)
 {
-    GtkWidget *page = page_new(app, "office", "Office access", "Restore only the access you need. Each exception is narrow and reviewed before it is applied.");
-    GtkWidget *group = group_new(page, "Allow an incoming TCP service", "Choose one port and a trusted IPv4 subnet. A universal /0 source is intentionally refused.");
-    GtkWidget *port = input_row(group, "TCP port · 1–65535");
+    GtkWidget *page = page_new(app, "office", "Profile access & exceptions", "Keep your protective profile while allowing the particular connection or service you need. Outgoing SSH does not require an incoming exception.");
+    GtkWidget *group = group_new(page, "Incoming firewall exception", "Rules belong to the selected profile. Save changes, then apply its firewall settings. Sources support IPv4 and IPv6; use any only when you intend unrestricted sources.");
+    GtkDropDown *profile = GTK_DROP_DOWN(profile_selector(app));
+    group_add(group, control_row("Firewall profile", NULL, GTK_WIDGET(profile)));
+    GtkWidget *port = input_row(group, "Port · 1–65535");
     adw_entry_row_set_input_purpose(ADW_ENTRY_ROW(port), GTK_INPUT_PURPOSE_DIGITS);
-    GtkWidget *subnet = input_row(group, "Trusted IPv4 subnet · for example 192.168.1.0/24");
-    gtk_box_append(GTK_BOX(page), input_button(app, "Review firewall exception…", INPUT_OFFICE_FIREWALL, port, subnet, NULL, NULL));
+    GtkDropDown *protocol = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"TCP", "UDP", NULL}));
+    group_add(group, control_row("Protocol", NULL, GTK_WIDGET(protocol)));
+    GtkWidget *subnet = input_row(group, "Source · 192.168.1.0/24, 2001:db8::/64, or any");
+    GtkWidget *interface = input_row(group, "Network interface · for example wlan0, or any");
+    gtk_editable_set_text(GTK_EDITABLE(interface), "any");
+    GtkWidget *duration = input_row(group, "Expires after minutes · 0 keeps the rule, maximum 10080");
+    gtk_editable_set_text(GTK_EDITABLE(duration), "60");
+    GtkWidget *fields[] = {port, subnet, interface, duration, NULL};
+    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(buttons, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(buttons), profile_button(app, "Save exception", PROFILE_RULE_ADD, profile, NULL, NULL, protocol, fields));
+    gtk_box_append(GTK_BOX(buttons), profile_button(app, "Apply firewall", PROFILE_APPLY, profile, "firewall", NULL, NULL, NULL));
+    gtk_box_append(GTK_BOX(page), buttons);
+    group = group_new(page, "Saved exceptions", "Inspect configuration to see the saved rules and their identifiers in Operation details. Removing a rule takes effect when you apply this firewall profile.");
+    group_add(group, control_row("Inspect selected profile", NULL, profile_button(app, "Inspect rules", PROFILE_SHOW, profile, NULL, NULL, NULL, NULL)));
+    GtkWidget *rule = input_row(group, "Rule identifier · copy from the inspected configuration");
+    GtkWidget *rule_fields[] = {rule, NULL};
+    gtk_box_append(GTK_BOX(page), profile_button(app, "Remove exception…", PROFILE_RULE_REMOVE, profile, NULL, NULL, NULL, rule_fields));
     group = group_new(page, "Reconnect to a trusted saved network", "Inspect the system first to identify the exact saved connection UUID.");
     GtkWidget *uuid = input_row(group, "Saved connection UUID");
     gtk_box_append(GTK_BOX(page), input_button(app, "Review automatic connection…", INPUT_OFFICE_NETWORK, uuid, NULL, NULL, NULL));
@@ -1025,8 +1656,17 @@ static void build_monitoring(App *app)
 
 static void build_recovery(App *app)
 {
-    GtkWidget *page = page_new(app, "recovery", "Recovery & change records", "Review the recorded changes before restoring access. There is no one-click global security reset.");
-    GtkWidget *group = group_new(page, "Recovery information", "System configuration backups remain administrator-only. The detail view shows a transaction's action record, not stored configuration secrets.");
+    GtkWidget *page = page_new(app, "recovery", "Recovery, updates & change records", "Restore recorded settings with an explicit preview. Updates install over the existing Debian package and retain your saved configuration.");
+    GtkWidget *group = group_new(page, "Restore system settings", "Restore the baseline recorded before profile management. The helper previews changes and reports any incomplete recovery.");
+    group_add(group, control_row("Previous system settings", NULL, profile_button(app, "Restore…", PROFILE_RESTORE, NULL, NULL, NULL, NULL, NULL)));
+    group = group_new(page, "OctoShield updates", "Download the Debian package for your Ubuntu version, then open it with the system installer. Administrator authentication is handled by the package manager.");
+    group_add(group, action_row(app, "update-check", "Check", "software-update-available-symbolic"));
+    app->update_status = GTK_LABEL(text_label("Installed " OCTOSHIELD_VERSION ". Check when you are ready; opening this app does not contact the repository.", "dim-label"));
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->update_status));
+    app->update_link = GTK_LINK_BUTTON(gtk_link_button_new_with_label("https://github.com/octoleo/octoshield/releases/latest", "Download the latest Debian package"));
+    gtk_widget_set_halign(GTK_WIDGET(app->update_link), GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->update_link));
+    group = group_new(page, "Recovery information", "System configuration backups remain administrator-only. The detail view shows a transaction's action record, not stored configuration secrets.");
     group_add(group, action_row(app, "recovery", "Read", "help-browser-symbolic"));
     group_add(group, action_row(app, "backups", "List", "document-open-recent-symbolic"));
     GtkWidget *transaction = input_row(group, "Backup transaction ID · copy from the backup list");
@@ -1062,11 +1702,11 @@ static GtkWidget *build_sidebar(App *app)
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
     static const char *const navigation[][3] = {
         {"overview", "Overview", "view-grid-symbolic"},
-        {"protections", "Protections", "security-high-symbolic"},
+        {"protections", "Profiles & protection", "security-high-symbolic"},
         {"usb", "USB devices", "drive-removable-media-symbolic"},
-        {"office", "Office access", "network-workgroup-symbolic"},
+        {"office", "Access & exceptions", "network-workgroup-symbolic"},
         {"monitoring", "Monitoring", "network-transmit-receive-symbolic"},
-        {"recovery", "Recovery", "edit-undo-symbolic"}
+        {"recovery", "Recovery & updates", "edit-undo-symbolic"}
     };
     for (gsize i = 0; i < G_N_ELEMENTS(navigation); i++) {
         GtkWidget *row = gtk_list_box_row_new();
@@ -1126,7 +1766,7 @@ static GtkWidget *build_activity(App *app)
     app->spinner = GTK_SPINNER(gtk_spinner_new());
     gtk_widget_set_visible(GTK_WIDGET(app->spinner), FALSE);
     gtk_box_append(GTK_BOX(status), GTK_WIDGET(app->spinner));
-    app->activity = GTK_LABEL(text_label("Ready — choose an inspection or protection to review", "dim-label"));
+    app->activity = GTK_LABEL(text_label("Ready · status refreshes automatically; changes need your approval", "dim-label"));
     gtk_widget_set_hexpand(GTK_WIDGET(app->activity), TRUE);
     gtk_box_append(GTK_BOX(status), GTK_WIDGET(app->activity));
     app->decline = gtk_button_new_with_label("Decline current change");
@@ -1186,6 +1826,16 @@ static gboolean smoke_finished(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static void refresh_active_notifier(void)
+{
+    /* Reload an already-running notifier after package upgrade. try-restart
+     * preserves a user's choice to leave notifications disabled. The fixed
+     * user-service invocation cannot request system privileges. */
+    const char *const command[] = {"/usr/bin/systemctl", "--user", "try-restart", "octoshield-notify.service", NULL};
+    GSubprocess *process = g_subprocess_newv(command, G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+    if (process != NULL) g_subprocess_wait_async(process, NULL, accounts_waited, NULL);
+}
+
 static void activate(GApplication *application, gpointer data)
 {
     App *app = data;
@@ -1199,6 +1849,14 @@ static void activate(GApplication *application, gpointer data)
     gtk_widget_set_size_request(GTK_WIDGET(app->window), 820, 600);
     g_signal_connect(app->window, "close-request", G_CALLBACK(window_close_requested), app);
     app->operation_widgets = g_ptr_array_new();
+    app->status_rows = g_ptr_array_new_with_free_func(g_free);
+    app->profile_selectors = g_ptr_array_new();
+    app->profile_ids = g_ptr_array_new_with_free_func(g_free);
+    app->usb_ids = g_ptr_array_new_with_free_func(g_free);
+    app->setting_choices = g_hash_table_new(g_str_hash, g_str_equal);
+    static const char *const defaults[] = {"conference", "public", "office", "home"};
+    for (gsize i = 0; i < G_N_ELEMENTS(defaults); i++)
+        g_ptr_array_add(app->profile_ids, g_strdup(defaults[i]));
     app->brand_pictures = g_ptr_array_new();
     app->style_manager = adw_style_manager_get_default();
     adw_style_manager_set_color_scheme(app->style_manager, ADW_COLOR_SCHEME_DEFAULT);
@@ -1246,7 +1904,11 @@ static void activate(GApplication *application, gpointer data)
     gtk_style_context_add_provider_for_display(gtk_widget_get_display(GTK_WIDGET(app->window)), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
     update_actions(app);
+    refresh_status(app);
+    app->refresh_timer = g_timeout_add_seconds(15, refresh_status, app);
     gtk_window_present(app->window);
+    if (app->refresh_session_service && !app->smoke_test)
+        refresh_active_notifier();
     if (app->smoke_test)
         g_timeout_add(700, smoke_finished, app);
 }
@@ -1285,6 +1947,7 @@ int main(int argc, char **argv)
     }
     App app = {0};
     app.smoke_test = smoke_test;
+    app.refresh_session_service = TRUE;
     app.application = adw_application_new(OCTOSHIELD_APPLICATION_ID, smoke_test ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.application, "activate", G_CALLBACK(activate), &app);
     int result = g_application_run(G_APPLICATION(app.application), argc, argv);

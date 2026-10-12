@@ -21,6 +21,7 @@ setup() {
     source "$OCTOSHIELD_TEST_ROOT/src/lib/core.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/usb.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/office.sh"
+    source "$OCTOSHIELD_TEST_ROOT/src/lib/profiles.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/cli.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/api.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/user_api.sh"
@@ -45,6 +46,12 @@ setup() {
     usb::list() { test::route usb list; }
     usb::allow() { test::route usb allow "$@"; }
     usb::block() { test::route usb block "$@"; }
+    usb::forget() { test::route usb forget "$@"; }
+    usb::profile_enroll() { test::route usb enroll "$@"; }
+    usb::devices_json() { test::route usb devices; }
+    profiles::dispatch() { test::route profile "$@"; }
+    updates::check() { test::route updates check; }
+    updates::show() { test::route updates check; }
     office::firewall() { test::route office firewall "$@"; }
     office::network() { test::route office network "$@"; }
     office::service() { test::route office service "$@"; }
@@ -108,6 +115,30 @@ test::user_parity() {
     test::privileged_parity usb allow 7
     test::privileged_parity usb allow 7 --permanent
     test::privileged_parity usb block 7
+    test::privileged_parity usb devices
+    test::privileged_parity usb forget 7
+    test::privileged_parity usb enroll office
+}
+
+@test "named profiles settings restoration and scoped exceptions have GUI CLI parity" {
+    test::privileged_parity profile list
+    test::privileged_parity profile show office
+    test::privileged_parity profile create client-visit conference
+    test::privileged_parity profile delete client-visit
+    test::privileged_parity profile apply conference
+    test::privileged_parity profile apply office usb
+    test::privileged_parity profile restore
+    test::privileged_parity profile restore firewall
+    test::privileged_parity profile set office services.printing baseline
+    test::privileged_parity profile set home monitor.enabled true
+    test::privileged_parity profile rule-add office 443 tcp 192.168.1.0/24 wlan0 60
+    test::privileged_parity profile rule-add home 88 udp 2001:db8::/64 enp3s0 10080
+    test::privileged_parity profile rule-add conference 443 tcp any any 0
+    test::privileged_parity profile rule-remove office r1791830500-1234-456
+}
+
+@test "release checks share the unprivileged GUI and CLI backend" {
+    test::user_parity updates check
 }
 
 @test "office firewall network and every supported service have parity" {

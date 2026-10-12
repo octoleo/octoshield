@@ -129,6 +129,134 @@ static void test_window(void)
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-overview.png");
 }
 
+static void test_observed_status_and_overrides(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_autofree gchar *snapshot = g_strdup_printf(
+        "{\"schema\":1,\"checked_at\":%" G_GINT64_FORMAT ","
+        "\"profiles\":{\"active\":\"conference\",\"assignments\":{\"firewall\":\"conference\",\"usb\":\"office\"},"
+        "\"overrides\":{\"usb\":\"office\"},\"results\":{\"firewall\":{\"status\":\"failed\"}}},"
+        "\"controls\":{\"firewall\":{\"state\":\"active\",\"summary\":\"Native firewall is enabled\"},"
+        "\"usb\":{\"state\":\"active\",\"summary\":\"Authorization verified\"}},"
+        "\"usb\":{\"pending\":2,\"devices\":[{\"id\":17,\"state\":\"blocked\",\"label\":\"USB device\"}]}}",
+        g_get_real_time() / G_USEC_PER_SEC);
+    g_assert_true(json_parser_load_from_data(parser, snapshot, -1, NULL));
+    render_status(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    g_assert_true(test_app.cache_valid);
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.overview_title), "individual overrides"));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.overview_title), "changes incomplete"));
+    StatusRow *firewall = g_ptr_array_index(test_app.status_rows, 0);
+    StatusRow *usb = g_ptr_array_index(test_app.status_rows, 1);
+    g_assert_cmpstr(gtk_label_get_text(firewall->badge), ==, "Needs attention");
+    g_assert_cmpstr(gtk_label_get_text(usb->badge), ==, "Active");
+    g_assert_nonnull(strstr(adw_action_row_get_subtitle(usb->row), "office (override)"));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.usb_pending), "2 blocked devices"));
+    g_assert_null(test_app.operation);
+    g_assert_null(test_app.preview);
+    JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+    json_object_set_boolean_member(object_member(root, "profiles"), "available", FALSE);
+    render_status(&test_app, root);
+    g_assert_cmpstr(gtk_label_get_text(usb->badge), ==, "Unknown");
+    g_assert_cmpstr(gtk_label_get_text(firewall->badge), ==, "Unknown");
+    /* Losing a fresh observation must clear previous positive indicators. */
+    render_status(&test_app, NULL);
+    g_assert_false(test_app.cache_valid);
+    g_assert_cmpstr(gtk_label_get_text(usb->badge), ==, "Unknown");
+    g_assert_cmpstr(gtk_label_get_text(firewall->badge), ==, "Unknown");
+}
+
+static void test_profile_catalog_selection(void)
+{
+    gtk_drop_down_set_selected(test_app.global_profile, 2);
+    g_assert_cmpstr(selected_profile(&test_app, test_app.global_profile), ==, "office");
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_assert_true(json_parser_load_from_data(parser, "[{\"id\":\"conference\",\"name\":\"Conference\"},{\"id\":\"client-visit\",\"name\":\"Client visit\"},{\"id\":\"home\",\"name\":\"Home\"},{\"id\":\"office\",\"name\":\"Office\"},{\"id\":\"public\",\"name\":\"Public\"}]", -1, NULL));
+    update_catalog(&test_app, json_node_get_array(json_parser_get_root(parser)));
+    g_assert_cmpuint(test_app.profile_ids->len, ==, 5);
+    g_assert_cmpstr(selected_profile(&test_app, test_app.global_profile), ==, "office");
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.global_profile), ==, 3);
+    g_assert_true(json_parser_load_from_data(parser, "[{\"id\":\"../escape\",\"name\":\"Invalid\"}]", -1, NULL));
+    update_catalog(&test_app, json_node_get_array(json_parser_get_root(parser)));
+    g_assert_cmpuint(test_app.profile_ids->len, ==, 5);
+}
+
+static void test_data_models(void)
+{
+    Operation operation = {.app = &test_app, .title = "Refresh device list"};
+    test_app.operation = &operation;
+    handle_data_log(&test_app, "[{\"id\":22,\"state\":\"blocked\",\"name\":\"<b>untrusted keyboard</b>\"},{\"id\":0,\"name\":\"invalid\"}]");
+    g_assert_cmpuint(test_app.usb_ids->len, ==, 1);
+    gtk_drop_down_set_selected(test_app.usb_devices, 0);
+    g_assert_cmpstr(gtk_editable_get_text(test_app.usb_device_id), ==, "22");
+    operation.title = "Check for OctoShield updates";
+    handle_data_log(&test_app, "{\"current\":\"1.1.0\",\"latest\":\"1.2.0\",\"message\":\"Update available\",\"download_url\":\"https://evil.invalid/package.deb\"}");
+    g_assert_cmpstr(gtk_link_button_get_uri(test_app.update_link), ==, "https://github.com/octoleo/octoshield/releases/latest");
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.update_status), "1.2.0"));
+    /* Unrelated device/log output must never alter update controls. */
+    operation.title = "Apply profile";
+    handle_data_log(&test_app, "{\"current\":\"fake\",\"latest\":\"fake\",\"message\":\"fake\"}");
+    g_assert_null(strstr(gtk_label_get_text(test_app.update_status), "fake"));
+    test_app.operation = NULL;
+    test_app.usb_inventory = FALSE;
+    render_status(&test_app, NULL);
+}
+
+static void receive_data_chunks(Operation *operation, const char *json)
+{
+    Reader reader = {operation, NULL, g_byte_array_new(), TRUE, FALSE, FALSE};
+    for (gsize offset = 0; offset < strlen(json); offset += 4096) {
+        g_autofree gchar *chunk = g_strndup(json + offset, MIN((gsize)4096, strlen(json) - offset));
+        g_autoptr(JsonBuilder) builder = json_builder_new();
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type"); json_builder_add_string_value(builder, "log");
+        json_builder_set_member_name(builder, "text"); json_builder_add_string_value(builder, chunk);
+        json_builder_end_object(builder);
+        g_autoptr(JsonNode) root = json_builder_get_root(builder);
+        g_autoptr(JsonGenerator) generator = json_generator_new();
+        json_generator_set_root(generator, root);
+        g_autofree gchar *event = json_generator_to_data(generator, NULL);
+        g_byte_array_set_size(reader.line, 0);
+        g_byte_array_append(reader.line, (const guint8 *)event, strlen(event));
+        handle_line(&reader);
+    }
+    g_byte_array_unref(reader.line);
+    g_assert_false(operation->data_seen);
+    g_assert_cmpstr(operation->data_output->str, ==, json);
+    handle_data_log(&test_app, operation->data_output->str);
+    g_assert_true(operation->data_seen);
+}
+
+static void test_large_data_records(void)
+{
+    Operation operation = {.app = &test_app, .title = "Inspect profile configuration", .review = g_string_new(NULL), .data_output = g_string_new(NULL)};
+    test_app.operation = &operation;
+    GString *profile = g_string_new("{\"id\":\"office\",\"name\":\"Office\",\"firewall\":{\"rules\":[");
+    for (guint i = 0; i < 80; i++)
+        g_string_append_printf(profile, "%s{\"id\":\"r1791830500-123-%u\",\"port\":443,\"protocol\":\"tcp\",\"source\":\"192.168.1.0/24\",\"interface\":\"wlan0\",\"expires_at\":0}", i > 0 ? "," : "", i);
+    g_string_append(profile, "]}}");
+    g_assert_cmpuint(profile->len, >, 4096);
+    receive_data_chunks(&operation, profile->str);
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.profile_details), "Saved firewall exceptions: 80"));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.profile_details), "r1791830500-123-79"));
+    g_string_free(profile, TRUE);
+    operation.title = "Refresh device list";
+    operation.data_seen = FALSE;
+    g_string_truncate(operation.data_output, 0);
+    GString *devices = g_string_new("[");
+    for (guint i = 0; i < 100; i++)
+        g_string_append_printf(devices, "%s{\"id\":%u,\"state\":\"blocked\",\"name\":\"USB device with a keyboard interface\"}", i > 0 ? "," : "", i + 1);
+    g_string_append_c(devices, ']');
+    g_assert_cmpuint(devices->len, >, 4096);
+    receive_data_chunks(&operation, devices->str);
+    g_assert_cmpuint(test_app.usb_ids->len, ==, 100);
+    g_string_free(devices, TRUE);
+    g_string_free(operation.review, TRUE);
+    g_string_free(operation.data_output, TRUE);
+    test_app.operation = NULL;
+    test_app.usb_inventory = FALSE;
+    render_status(&test_app, NULL);
+}
+
 static void test_accounts_entry(void)
 {
     /* Match the upstream GNOME 46/50 Users desktop entry without launching a
@@ -320,6 +448,10 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/window/unchanged-brand-assets-follow-theme", test_brand_resources_and_theme);
     g_test_add_func("/ui/window/about-identity", test_about_identity);
     g_test_add_func("/ui/window/screenshots-real-pages-light-and-dark", test_page_screenshots);
+    g_test_add_func("/ui/status/observed-partial-and-overrides", test_observed_status_and_overrides);
+    g_test_add_func("/ui/status/catalog-preserves-selection", test_profile_catalog_selection);
+    g_test_add_func("/ui/status/device-and-update-models", test_data_models);
+    g_test_add_func("/ui/status/large-profile-and-device-records", test_large_data_records);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);

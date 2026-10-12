@@ -278,6 +278,59 @@ static gboolean backup_id(const gchar *value)
     return TRUE;
 }
 
+static gboolean profile_id(const gchar *value)
+{
+    gsize length = strlen(value);
+    if (length == 0 || length > 32 || !g_ascii_islower(value[0]) || g_str_equal(value, "unmanaged"))
+        return FALSE;
+    for (gsize i = 1; i < length; i++)
+        if (!g_ascii_islower(value[i]) && !g_ascii_isdigit(value[i]) && value[i] != '-')
+            return FALSE;
+    return TRUE;
+}
+
+static gboolean profile_action(gsize argc, const gchar *const *args)
+{
+    static const gchar *const controls[] = {"firewall", "usb", "network", "services", "monitor", NULL};
+    static const gchar *const keys[] = {"network.autoconnect", "network.discovery", "services.printing", "services.bluetooth", "services.ssh", "services.discovery", "services.samba", "services.remote_desktop", "monitor.enabled", NULL};
+    if (argc == 2)
+        return g_str_equal(args[1], "list") || g_str_equal(args[1], "restore");
+    if (argc == 3 && g_str_equal(args[1], "restore"))
+        return one_of(args[2], controls);
+    if (argc < 3 || !profile_id(args[2]))
+        return FALSE;
+    if (g_str_equal(args[1], "show") || g_str_equal(args[1], "delete"))
+        return argc == 3;
+    if (g_str_equal(args[1], "create"))
+        return argc == 4 && profile_id(args[3]);
+    if (g_str_equal(args[1], "apply"))
+        return argc == 3 || (argc == 4 && one_of(args[3], controls));
+    if (g_str_equal(args[1], "set"))
+        return argc == 5 && one_of(args[3], keys) &&
+               (g_str_has_prefix(args[3], "services.") ?
+                (g_str_equal(args[4], "enabled") || g_str_equal(args[4], "disabled") || g_str_equal(args[4], "baseline")) :
+                (g_str_equal(args[4], "true") || g_str_equal(args[4], "false")));
+    if (g_str_equal(args[1], "rule-remove"))
+        return argc == 4 && g_regex_match_simple("^r[0-9]{1,16}-[0-9]{1,10}-[0-9]{1,5}$", args[3], 0, 0);
+    if (g_str_equal(args[1], "rule-add")) {
+        if (argc != 8 || !decimal(args[3], 65535) ||
+            !(g_str_equal(args[4], "tcp") || g_str_equal(args[4], "udp")))
+            return FALSE;
+        g_autoptr(GInetAddressMask) source = g_inet_address_mask_new_from_string(args[5], NULL);
+        if (source == NULL && !g_str_equal(args[5], "any"))
+            return FALSE;
+        if (!g_str_equal(args[6], "any")) {
+            if (strlen(args[6]) == 0 || strlen(args[6]) > 15 || !g_ascii_isalnum(args[6][0]))
+                return FALSE;
+            for (const char *p = args[6]; *p; p++)
+                if (!g_ascii_isalnum(*p) && *p != '_' && *p != '-' && *p != '.' && *p != ':')
+                    return FALSE;
+        }
+        return g_str_equal(args[7], "0") || decimal(args[7], 10080);
+    }
+    return FALSE;
+}
+
 static gboolean privileged_action(gsize argc, const gchar *const *args)
 {
     static const gchar *const controls[] = {
@@ -296,6 +349,8 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
     if (g_str_equal(args[0], "apply")) {
         return argc == 2 && one_of(args[1], controls);
     }
+    if (g_str_equal(args[0], "profile"))
+        return profile_action(argc, args);
     if (g_str_equal(args[0], "backup-show")) {
         return argc == 2 && backup_id(args[1]);
     }
@@ -303,13 +358,15 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
         return argc == 2 && one_of(args[1], monitor);
     }
     if (g_str_equal(args[0], "usb")) {
+        if (argc == 3 && g_str_equal(args[1], "enroll"))
+            return profile_id(args[2]);
         if (argc == 2) {
-            return g_str_equal(args[1], "list");
+            return g_str_equal(args[1], "list") || g_str_equal(args[1], "devices");
         }
         if (argc < 3 || !decimal(args[2], G_GUINT64_CONSTANT(4294967294))) {
             return FALSE;
         }
-        if (g_str_equal(args[1], "block")) {
+        if (g_str_equal(args[1], "block") || g_str_equal(args[1], "forget")) {
             return argc == 3;
         }
         return g_str_equal(args[1], "allow") &&
@@ -337,6 +394,8 @@ static gboolean user_action(gsize argc, const gchar *const *args)
     if (argc == 1) {
         return g_str_equal(args[0], "recovery");
     }
+    if (argc == 2 && g_str_equal(args[0], "updates") && g_str_equal(args[1], "check"))
+        return TRUE;
     return argc == 2 &&
            ((g_str_equal(args[0], "desktop") && one_of(args[1], desktop)) ||
             (g_str_equal(args[0], "monitor") && one_of(args[1], monitor)));
@@ -345,7 +404,7 @@ static gboolean user_action(gsize argc, const gchar *const *args)
 GStrv octoshield_action_argv(gboolean privileged, gsize argc,
                            const gchar *const *args, GError **error)
 {
-    gboolean valid = args != NULL && argc >= 1 && argc <= 4;
+    gboolean valid = args != NULL && argc >= 1 && argc <= 8;
     for (gsize index = 0; valid && index < argc; index++) {
         valid = args[index] != NULL && strlen(args[index]) <= 128;
     }
