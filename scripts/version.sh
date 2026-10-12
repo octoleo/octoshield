@@ -108,7 +108,7 @@ version::set() (
     # All output is prepared and checked before promotion. Restore originals if
     # a promotion fails or this process receives an ordinary interrupt.
     # Invoked indirectly through the EXIT trap below.
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     version::cleanup() {
         local result=$? restored=1 file
         if ((result != 0 && promoted)); then

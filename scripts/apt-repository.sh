@@ -245,7 +245,7 @@ aptrepo::main() (
     aptrepo::inputs "$input" || return 1
     work=$(mktemp -d "${output%/*}/.octoshield-apt.XXXXXXXX")
     # Only our own freshly created staging directory is removed on failure.
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     aptrepo::cleanup() {
         local result=$?
         if [[ -n $keyhome ]]; then gpgconf --homedir "$keyhome" --kill gpg-agent >/dev/null 2>&1 || :; fi
