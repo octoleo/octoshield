@@ -10,7 +10,7 @@ Build on the Ubuntu release and CPU architecture you intend to support, ideally 
 sudo apt-get update
 sudo apt-get install build-essential debhelper pkg-config \
     libgtk-4-dev libadwaita-1-dev libjson-glib-dev \
-    bats jq shellcheck shfmt desktop-file-utils libxml2-utils
+    bats jq shellcheck shfmt desktop-file-utils libxml2-utils appstream apt-utils gnupg python3
 
 dpkg-buildpackage -us -uc -b
 ```
@@ -35,8 +35,9 @@ These example filenames describe the amd64 0.2.0 build; use the actual emitted f
 | `/usr/bin/octoshield-gtk` | Native GNOME frontend |
 | `/usr/lib/octoshield` | Shared Bash implementation, precompiled monitor, and supporting data |
 | `/usr/libexec/octoshield-helper` | Fixed administrator-action entry point |
-| `/usr/share/applications/org.octoleo.OctoShield.desktop` | GNOME application launcher |
-| `/usr/share/polkit-1/actions/org.octoleo.octoshield.policy` | Administrator authorization policy |
+| `/usr/share/applications/io.vdm.OctoShield.desktop` | GNOME application launcher |
+| `/usr/share/metainfo/io.vdm.OctoShield.metainfo.xml` | AppStream description, publisher, version, and screenshot references |
+| `/usr/share/polkit-1/actions/io.vdm.OctoShield.policy` | Administrator authorization policy |
 
 Package installation does not select protections, trust USB devices, enable monitoring, or start the GUI as root. Monitoring remains opt-in. Package upgrades retain configuration and do not restart active monitoring automatically. Removal stops package-owned monitoring and removes the program while retaining native host policies and private backups. Purge is not a security reset. Standalone `/usr/local` installations are retained; see [recovery.md](recovery.md#package-upgrades-coexistence-and-removal).
 
@@ -58,6 +59,8 @@ Artifacts and releases use separate `SHA256SUMS-ubuntu24.04` and `SHA256SUMS-ubu
 The repository remains private. Access to workflow artifacts and release assets follows the repository's GitHub permissions. Creating a release does not make the repository public, and an unauthenticated raw `main` bootstrap cannot fetch a private checkout.
 
 Pushing a `v*` tag such as `v0.2.0` triggers release automation, which builds packages for the configured matrix and attaches assets to the GitHub release. Branch and pull-request builds validate/package code without publishing a release. Tag only a reviewed, validated commit whose version matches the Debian changelog; do not treat an unmerged PR artifact as a release. Creating these workflow files does not itself publish a release.
+
+The native metadata identifies the developer as **Vast Development Method**, the application as **OctoShield**, and its desktop ID as `io.vdm.OctoShield`. The [distribution guide](distribution.md) describes release assets, semantic version maintenance, the automatic GitHub release token, and optional signed APT hosting. Direct package release needs no application-store credentials. APT publication separately requires the publisher's signing key and an explicitly configured client source.
 
 ## Acceptance
 

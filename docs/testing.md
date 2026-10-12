@@ -6,7 +6,7 @@ Install test/build dependencies on Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential bats shellcheck shfmt jq
+sudo apt-get install build-essential bats shellcheck shfmt jq apt-utils gnupg appstream python3
 make check
 ```
 
@@ -27,6 +27,8 @@ Run ordinary tests from the repository root without root privileges. Temporary f
 
 The backend suite covers declined confirmations, failed backups/packages/native commands, invalid identifiers, preserved update origins, USB enrollment interruptions and drift, GNOME baseline validation/rollback, installer source/symlink handling, event provenance, bounded monitor parsing, thresholds, cooldowns, and notification state. A mocked successful command does not establish that a host's native package behaves identically.
 
+Release tests check coherent versions, fixed documentation/media assembly, package-mapped AppStream/DEP-11 catalogues, and APT indexes. APT tests create disposable packages and a temporary signing key, verify signatures and hash chains, and exercise APT with isolated state; they do not install packages, change host sources, or import keys into your normal keyring. Catalogue preparation uses Python's standard library and `appstreamcli` during the build; the installed application has no Python runtime requirement. Production signing credentials are never required for these tests.
+
 ## Native GUI
 
 ```bash
@@ -40,18 +42,20 @@ dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo \
 
 Run the smoke test as an ordinary user. It opens the actual GTK window under a temporary display and exits without applying protections. It verifies startup, not live PolicyKit authentication or GNOME hardware behavior.
 
+The display suite also captures each native page in light and dark themes under `build/screenshots/`. These twelve images use demonstration/initial data. `scripts/release-assets.sh` checks their PNG headers/dimensions and copies them unchanged with metadata and documentation; it does not establish real hardware protection or upload them.
+
 Protocol tests exercise malformed/oversized JSON, untrusted display text, fixed argument construction, and privileged/unprivileged action separation. Capability tests route the same operations through the compiled GUI argument model and mocked CLI/backend dispatchers. Neither substitutes for clicking the actual controls on a recoverable desktop system.
 
 ## Debian metadata and lifecycle
 
 ```bash
-sudo apt-get install debhelper desktop-file-utils libxml2-utils
+sudo apt-get install debhelper desktop-file-utils libxml2-utils appstream
 bash tests/package.sh
 make package
 bash tests/package.sh ../octoshield_0.2.0_amd64.deb
 ```
 
-Use the emitted filename for a different package version or architecture. These package checks inspect desktop/XML/PolicyKit metadata, mocked maintainer-script behavior, archive ownership/dependencies, and the installed payload; they do not install the package.
+Use the emitted filename for a different package version or architecture. These package checks inspect desktop/XML/PolicyKit metadata, validate AppStream semantically with `appstreamcli validate --no-net`, and check mocked maintainer scripts, archive ownership/dependencies, and the installed payload; they do not install the package. Offline AppStream validation does not prove screenshot URLs are reachable or that any catalogue has accepted the application.
 
 The **Test lint and package** workflow also performs an actual package install, upgrade/reinstall, removal, and purge in each disposable Ubuntu container. This is separate from mocked lifecycle checks. Do not run the destructive lifecycle runner on a workstation: its purpose is to verify package actions in an expendable environment, including retention of a backup fixture and optional security-package state. It requires an explicit disposable-system flag and CI marker.
 
@@ -67,7 +71,7 @@ Use a disposable Ubuntu Desktop installation or VM with a recoverable console fi
 4. **USB:** enroll only known devices. Reconnect the trusted keyboard, mouse, dock and internal peripherals. Insert an expendable unfamiliar storage device and test HID/network-adapter classes where available; verify they remain unauthorized. Test temporary/permanent approval, reconnect, port movement, and current blocking in both interfaces; verify the documented manual revocation procedure separately.
 5. **Startup/recovery:** reboot, suspend/resume, change docks, and exercise the documented USB recovery boot. Verify interrupted enrollment is reported as incomplete and does not silently trust a newly attached device. Decline a GUI confirmation and inspect recorded partial changes.
 6. **Networking:** verify existing Wi-Fi profiles do not autoconnect after manual disconnect/reboot. Reconnect and inspect effective MAC/discovery settings. Check IPv6, enterprise Wi-Fi certificate validation, captive portals, and any required VPN. Choose new-profile autoconnect explicitly.
-7. **Desktop/authentication:** check five-minute idle lock, immediate lock on blanking, lack of automount, and available RDP/VNC controls. Restore the saved baseline. Test fresh sudo prompts and inspect passwordless grants/overrides; verify the GUI password action opens GNOME Accounts.
+7. **Desktop/authentication:** check five-minute idle lock, immediate lock on blanking, lack of automount, and available RDP/VNC controls. Restore the saved baseline. Test fresh sudo prompts and inspect passwordless grants/overrides; verify the GUI password action opens GNOME Settings → System → Users.
 8. **Updates/confinement:** inspect unattended-upgrades origins/timers and simulate with `sudo unattended-upgrade --dry-run --debug`; review `sudo aa-status` and existing complain/disabled profiles. Apply pending updates separately on a trusted network and reboot if required.
 9. **Notifications:** enable collector and notifier, then generate authorized firewall blocks, harmless failed sudo authentication, and a rejected USB device. Check thresholds/cooldowns, sanitized messages, and unavailable/resumed behavior after restarting collection. Verify log rotation on the target host; kernel/logger rate limits affect observed counts.
 10. **Office/removal:** allow one subnet/port and trusted connection, verify other protections stay active, remove that exception, and restore one selected configuration. Upgrade/remove the package and confirm UFW/USB policies, user settings and backups remain intact while its monitoring processes stop on removal.

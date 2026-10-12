@@ -1,6 +1,6 @@
 # Security policy
 
-OctoShield manages privileged host settings through native GNOME and terminal interfaces. The validation limits in [testing.md](docs/testing.md) apply to both; automated tests and graphical smoke tests do not establish protection against every attack or replace review on the target hardware.
+OctoShield, maintained by [Vast Development Method](https://www.vdm.io) for the Octoleo suite, manages privileged host settings through native GNOME and terminal interfaces. The validation limits in [testing.md](docs/testing.md) apply to both; automated tests and graphical smoke tests do not establish protection against every attack or replace review on the target hardware.
 
 ## Report a vulnerability
 
@@ -18,5 +18,7 @@ Include the affected commit/version, Ubuntu/kernel/package versions, minimal rep
 - Installing, upgrading, removing, or purging the desktop package must not silently reset host firewall rules, USB policy, GNOME settings, or security backups. Package-owned monitoring processes have their own lifecycle; native host protections remain independent.
 - The monitor processes selected native log events, accepts bounded category input, and exposes sanitized counters rather than raw logs to users. A forged local syslog identifier alone must not be accepted as trusted kernel/sudo/SSH provenance.
 - Backups are private because they can include network credentials. Host policy changes can be partially applied if a native command fails; recovery must be deliberate and targeted.
+- Build and test jobs need no publishing credentials. The GitHub release job uses the automatic token with its declared permission; pull-request builds must not gain release privileges. Release assets must describe actual application behavior and validation limits.
+- Optional APT publication requires a publisher-controlled signing key, an expected fingerprint, and explicit hosting configuration. Unsigned test repositories must never be deployed as trusted sources. Users approve a dedicated `Signed-By` keyring and source after independently checking the fingerprint; package installation must not silently add that trust.
 
 Full-disk encryption, Secure Boot configuration, initramfs USB policy, invasive physical access, firmware attacks, trusted-device impersonation, browser/application exploits, and third-party container firewall rules are outside the protections implemented here. See the README for operational limits. Changes must preserve these distinctions rather than claim guaranteed security.

@@ -1,6 +1,6 @@
 # OctoShield
 
-Ubuntu laptop protection for conferences and everyday work, with a **native GNOME application and a standalone terminal interface**. Part of the [OctoLeo](https://github.com/octoleo) suite, OctoShield uses Bash and C to configure Ubuntu's established firewall, USB authorization, confinement, authentication, and update mechanisms.
+Ubuntu laptop protection for conferences and everyday work, with a **native GNOME application and a standalone terminal interface**. Maintained by [Vast Development Method](https://www.vdm.io) as part of the [Octoleo](https://github.com/octoleo) suite, OctoShield uses Bash and C to configure Ubuntu's established firewall, USB authorization, confinement, authentication, and update mechanisms.
 
 The GTK4/libadwaita desktop application and Whiptail CLI use the same security controls. Choose a protection, review its impact, authenticate when required, and inspect the result. Settings remain in place when you close the application. Office adjustments grant specific access; there is no automatic “unharden everything” mode.
 
@@ -12,6 +12,8 @@ The GTK4/libadwaita desktop application and Whiptail CLI use the same security c
 | --- | --- | --- |
 | Downloadable `.deb` | Native OctoShield application/icon, `octoshield` CLI, precompiled monitor, and privilege helper | Matching Ubuntu release and architecture; APT resolves runtime dependencies. No compiler is required. |
 | Standalone CLI | `octoshield` terminal menus and the same system controls | Bash, local systemd terminal, and compiler/build dependencies installed by the bootstrap. No GTK/libadwaita or GNOME desktop dependencies are installed. |
+
+Read the [feature guide](docs/features.md) for the complete capability overview and [distribution guide](docs/distribution.md) for permissions, upgrades, removal, and release preparation. The package retains its native application description, developer details, icon, and AppStream metadata. An optional signed APT repository lets Ubuntu's package tools deliver future updates after you explicitly add its source; see [repository updates](docs/distribution.md#updates-through-a-signed-apt-repository).
 
 ### Desktop application and CLI: install the package
 
@@ -137,7 +139,7 @@ octoshield backups
 octoshield recovery
 ```
 
-`octoshield password` calls the system's normal `passwd` interface for your current user. The graphical password action opens GNOME Accounts; it does not create a separate OctoShield password. OctoShield never receives or stores your password. Changing it also changes that account's normal login password; desktop keyring/vault synchronization is outside OctoShield's scope.
+`octoshield password` calls the system's normal `passwd` interface for your current user. The graphical password action opens GNOME Settings → System → Users; it does not create a separate OctoShield password. OctoShield never receives or stores your password. Changing it also changes that account's normal login password; desktop keyring/vault synchronization is outside OctoShield's scope.
 
 ## USB approval
 
@@ -202,7 +204,7 @@ Keep the OS and applications patched, lock the screen when leaving the laptop, a
 ## Development
 
 ```bash
-sudo apt-get install build-essential bats shellcheck shfmt jq
+sudo apt-get install build-essential bats shellcheck shfmt jq apt-utils gnupg appstream python3
 make check
 ```
 
@@ -214,7 +216,7 @@ make gui
 make ui-test
 ```
 
-`make package` builds the `.deb` after Debian build dependencies are installed. Other targets include `make test`, `make lint`, `make format`, and `make sanitize`. See [testing](docs/testing.md), [packaging](docs/packaging.md), [contribution guidelines](CONTRIBUTING.md), and [security reporting](SECURITY.md).
+`make package` builds the `.deb` after Debian build dependencies are installed. Other targets include `make test`, `make lint`, `make format`, and `make sanitize`. See [testing](docs/testing.md), [packaging](docs/packaging.md), [distribution and release preparation](docs/distribution.md), [contribution guidelines](CONTRIBUTING.md), and [security reporting](SECURITY.md).
 
 Native interfaces: [NetworkManager configuration](https://networkmanager.dev/docs/api/latest/NetworkManager.conf.html), [nmcli](https://networkmanager.dev/docs/api/latest/nmcli.html), [Ubuntu automatic updates](https://ubuntu.com/server/docs/how-to/software/automatic-updates/), and [USBGuard documentation](https://usbguard.github.io/documentation/).
 
