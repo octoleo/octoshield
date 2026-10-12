@@ -4,7 +4,7 @@ CFLAGS ?= -O2
 CPPFLAGS ?= -D_FORTIFY_SOURCE=2
 WARNINGS := -std=c11 -Wall -Wextra -Werror -pedantic
 HARDENING := -fstack-protector-strong -fPIE -pie -Wl,-z,relro,-z,now
-SHELL_FILES := src/octoshield src/octoshield-helper $(wildcard debian/octoshield.postinst debian/octoshield.prerm debian/octoshield.postrm) $(shell find src tests -type f \( -name '*.sh' -o -name '*.bats' \) | sort)
+SHELL_FILES := src/octoshield src/octoshield-helper $(wildcard debian/octoshield.postinst debian/octoshield.prerm debian/octoshield.postrm scripts/*.sh) $(shell find src tests -type f \( -name '*.sh' -o -name '*.bats' \) | sort)
 UI_PACKAGES := gtk4 libadwaita-1 json-glib-1.0 gio-2.0
 CLI_FILES := $(shell bash -c 'source src/lib/install.sh; install::files')
 DESTDIR ?=

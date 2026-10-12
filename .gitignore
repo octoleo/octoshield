@@ -1,6 +1,7 @@
 /build/
 /tests/tmp/
 /dist/
+__pycache__/
 /debian/.debhelper/
 /debian/debhelper-build-stamp
 /debian/files
