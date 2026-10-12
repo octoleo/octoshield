@@ -307,6 +307,51 @@ static void action_reject(void)
     g_free(long_arg);
 }
 
+static void action_profiles(void)
+{
+    static const gchar *const valid[][9] = {
+        {"profile", "list", NULL}, {"profile", "show", "office", NULL},
+        {"profile", "create", "client-visit", "conference", NULL},
+        {"profile", "delete", "client-visit", NULL},
+        {"profile", "apply", "conference", NULL},
+        {"profile", "apply", "office", "usb", NULL},
+        {"profile", "restore", NULL}, {"profile", "restore", "network", NULL},
+        {"profile", "set", "home", "services.printing", "baseline", NULL},
+        {"profile", "set", "home", "services.printing", "enabled", NULL},
+        {"profile", "set", "office", "monitor.enabled", "true", NULL},
+        {"profile", "rule-add", "office", "443", "tcp", "192.168.1.0/24", "wlan0", "60", NULL},
+        {"profile", "rule-add", "conference", "88", "udp", "2001:db8::/64", "enp3s0", "10080", NULL},
+        {"profile", "rule-add", "home", "443", "tcp", "any", "any", "0", NULL},
+        {"profile", "rule-remove", "home", "r1791830500-1234-456", NULL},
+        {"usb", "devices", NULL}, {"usb", "forget", "123", NULL},
+        {"usb", "enroll", "office", NULL}
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(valid); i++) assert_action(TRUE, valid[i]);
+    const char *updates[] = {"updates", "check", NULL};
+    assert_action(FALSE, updates);
+}
+
+static void action_profiles_reject(void)
+{
+    static const gchar *const invalid[][9] = {
+        {"profile", "apply", "unmanaged", NULL},
+        {"profile", "apply", "../../etc", NULL},
+        {"profile", "apply", "office", "shell", NULL},
+        {"profile", "set", "office", "services.printing", "true", NULL},
+        {"profile", "set", "office", "usb.enabled", "baseline", NULL},
+        {"profile", "set", "office", "command", "true", NULL},
+        {"profile", "rule-add", "office", "0", "tcp", "any", "any", "0", NULL},
+        {"profile", "rule-add", "office", "443", "icmp", "any", "any", "0", NULL},
+        {"profile", "rule-add", "office", "443", "tcp", "1.2.3.999/24", "any", "0", NULL},
+        {"profile", "rule-add", "office", "443", "tcp", "any", "--help", "0", NULL},
+        {"profile", "rule-add", "office", "443", "tcp", "any", "any", "10081", NULL},
+        {"profile", "rule-remove", "office", "$(id)", NULL},
+        {"usb", "enroll", "office;id", NULL}
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(invalid); i++)
+        reject_action(TRUE, g_strv_length((gchar **)invalid[i]), invalid[i]);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -317,5 +362,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/action/privileged", action_privileged);
     g_test_add_func("/ui/action/user", action_user);
     g_test_add_func("/ui/action/reject", action_reject);
+    g_test_add_func("/ui/action/profiles-and-updates", action_profiles);
+    g_test_add_func("/ui/action/profiles-reject", action_profiles_reject);
     return g_test_run();
 }
