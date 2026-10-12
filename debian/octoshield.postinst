@@ -16,6 +16,14 @@ case "$1" in
         ;;
 esac
 
+if [ -z "${DPKG_ROOT:-}" ]; then
+    case "$1" in
+        configure | abort-upgrade | abort-remove | abort-deconfigure)
+            rm -f -- /run/octoshield-package-maintenance
+            ;;
+    esac
+fi
+
 #DEBHELPER#
 
 exit 0

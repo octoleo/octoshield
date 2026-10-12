@@ -7,9 +7,43 @@ setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     CORE_STATE="$BATS_TEST_TMPDIR/state"
     CORE_TRANSACTION=test-transaction
+    CORE_PACKAGE_MAINTENANCE="$BATS_TEST_TMPDIR/package-maintenance"
     mkdir -p "$CORE_STATE/backups/$CORE_TRANSACTION/original"
     # Ownership changes are privileged in production; all paths here are fixtures.
     chown() { :; }
+}
+
+@test 'package maintenance refuses a root operation before creating its transaction' {
+    core::require_root() { :; }
+    CORE_TRANSACTION=
+    : >"$CORE_PACKAGE_MAINTENANCE"
+    run core::begin 'must not start'
+    [ "$status" -ne 0 ]
+    [[ $output == *'package update or removal is in progress'* ]]
+    [ ! -e "$CORE_STATE/lock" ]
+    [ -z "$CORE_TRANSACTION" ]
+}
+
+@test 'maintenance starting between first check and operation lock is refused' {
+    core::require_root() { :; }
+    install() { mkdir -p "$CORE_STATE" "$CORE_STATE/backups"; }
+    flock() {
+        command flock "$@" || return 1
+        : >"$CORE_PACKAGE_MAINTENANCE"
+    }
+    CORE_TRANSACTION=
+    local result=0
+    core::begin 'must not start' || result=$?
+    [ "$result" -ne 0 ]
+    [ -z "$CORE_TRANSACTION" ]
+    # The declined operation must release its lock even in a persistent caller.
+    command flock -n "$CORE_STATE/lock" true
+}
+
+@test 'package maintenance symlink also fails closed' {
+    ln -s "$BATS_TEST_TMPDIR/nonexistent" "$CORE_PACKAGE_MAINTENANCE"
+    run core::package_available
+    [ "$status" -ne 0 ]
 }
 
 @test 'modules have no side effects when sourced' {

@@ -26,6 +26,7 @@ for package in ufw usbguard apparmor apparmor-utils unattended-upgrades; do
     original_packages[$package]=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || :)
 done
 marker=/var/lib/octoshield/backups/package-lifecycle-test/original/marker
+install -d -m 0700 /var/lib/octoshield /var/lib/octoshield/backups
 install -d -m 0700 "${marker%/*}"
 printf 'Private backup must survive install, upgrade, remove and purge.\n' >"$marker"
 chmod 0600 "$marker"
@@ -71,12 +72,21 @@ check_preserved_state
 check_inactive_services
 
 # Reinstalling the same archive exercises the dpkg upgrade maintainer-script path.
+# A running control must cause nonblocking refusal before package replacement.
+exec 8>/var/lib/octoshield/lock
+flock -n 8 || fail 'cannot acquire disposable operation lock'
+if dpkg --install "$archive"; then fail 'upgrade was allowed during an active protection change'; fi
+[[ ! -e /run/octoshield-package-maintenance ]] || fail 'refused upgrade left a maintenance marker'
+flock -u 8
+exec 8>&-
 dpkg --install "$archive"
 /usr/bin/octoshield --help >/dev/null
+[[ ! -e /run/octoshield-package-maintenance ]] || fail 'upgrade did not release maintenance exclusion'
 check_preserved_state
 check_inactive_services
 
 apt-get remove --yes octoshield
+[[ ! -e /run/octoshield-package-maintenance ]] || fail 'removal did not release maintenance exclusion'
 check_preserved_state
 [[ ! -e /usr/bin/octoshield && ! -e /usr/bin/octoshield-gtk && ! -e /usr/libexec/octoshield-helper ]] || fail 'package removal left executable entry points installed'
 apt-get purge --yes octoshield

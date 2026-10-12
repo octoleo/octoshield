@@ -34,6 +34,18 @@ sudo apt remove octoshield
 
 Removal stops the package's monitoring services and removes its application; it does **not** undo UFW rules, USBGuard trust, GNOME settings, service masks, update/sudo settings, or private backups. Purging also is not an “unharden” operation. A retained standalone installation can still manage protections; otherwise reinstall the package or use the native system tools and targeted procedures below. Check any pre-existing standalone service overrides separately.
 
+If package upgrade/removal reports an OctoShield operation in progress, let that action finish and retry APT. Do not force package removal or kill the helper during a system change.
+
+During package replacement/removal, `/run/octoshield-package-maintenance` prevents new system changes from starting against incomplete program files. Normal completion clears it. If a package operation is interrupted, repair the package first with `sudo dpkg --configure -a`, then retry the intended APT operation as appropriate. Confirm that no APT/dpkg operation remains active and that package files are consistent before removing only a stale maintenance marker with `sudo rm -- /run/octoshield-package-maintenance`. Do not delete the active-operation lock. Reboot clears `/run`, but does not by itself repair an interrupted package installation.
+
+Removal disables the notifier in available user managers. Offline users' home directories and custom units are not rewritten. Each user can disable their notification preference before uninstalling:
+
+```bash
+systemctl --user disable --now octoshield-notify.service
+```
+
+After removal, an offline user's previous enablement may remain as a dangling link at `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/graphical-session.target.wants/octoshield-notify.service`. Inspect it with `readlink` and remove only that exact link if it is dangling and points to the removed packaged unit. Retain working standalone or custom unit links; do not remove the entire user systemd directory.
+
 ## Graphical startup and authentication
 
 Start `octoshield-gtk` as the normal logged-in GNOME user to see startup diagnostics. Do not run the application with `sudo`. A package built for another Ubuntu release or CPU architecture is not a supported workaround for missing runtime libraries; install the matching build with APT.
