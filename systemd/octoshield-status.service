@@ -1,5 +1,5 @@
 [Unit]
-Description=OctoShield verified protection status and approved exception expiry
+Description=OctoShield verified protection status and expiry bookkeeping
 After=NetworkManager.service usbguard.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -17,8 +17,7 @@ UMask=0077
 NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
-# UFW reload applies its configured networking sysctls when an approved timed
-# exception expires. A read-only /proc/sys mount would silently prevent expiry.
+ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
@@ -29,7 +28,9 @@ SystemCallArchitectures=native
 RestrictNamespaces=yes
 MemoryMax=192M
 TasksMax=64
-CPUQuota=20%
+# A large policy is verified twice when expiry metadata is reconciled. Allow
+# up to one CPU so this bounded work completes before the public cache is stale.
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target

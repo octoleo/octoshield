@@ -224,9 +224,9 @@ profiles::expire() {
     if profile_controls::expire "$profile"; then
         document=$(jq -c --arg p "$profile" --argjson now "$now" '.profiles[$p].firewall.rules |= map(select(.expires_at==0 or .expires_at>$now))' <<<"$document") || return 1
         profiles::_save "$document" || return 1
-        profiles::_result firewall applied 'Expired firewall exceptions were removed; pending edits still require Apply.' "$profile"
+        profiles::_result firewall applied 'Expired firewall permissions were verified closed and reconciled; pending edits still require Apply.' "$profile"
     else
-        profiles::_result firewall failed 'An expired exception could not be removed. Inspect the firewall immediately.'
+        profiles::_result firewall failed 'Firewall expiry verification or metadata reconciliation failed. Inspect the current policy.'
         return 1
     fi
 }

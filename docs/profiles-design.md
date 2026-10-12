@@ -34,8 +34,10 @@ IPv4/IPv6 UFW user chains after reload with a kernel UTC time match. Its inclusi
 `--datestop` is the saved deadline minus one second. Missing time-match support
 fails closed: there is no untimed fallback. The rule stops granting new access
 at its deadline even when the observer or application is absent; established
-connections retain the normal stateful policy. The observer cleans up expired
-rules under the operation lock, independently of deadline enforcement. Reload
+connections retain the normal stateful policy. The observer verifies expiry and reconciles saved
+metadata under the operation lock, independently of deadline enforcement.
+Inert kernel rules remain until the next Apply or reload; expiry does not
+rebuild permanent firewall policy. Reload
 or reboot withdraws grants sooner, and expired access cannot reopen from disk.
 Reactivating a still-unexpired grant requires explicit Apply. Native `ufw status`
 omits runtime permissions; OctoShield verifies kernel rules and their deadlines.

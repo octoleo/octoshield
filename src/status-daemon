@@ -1,8 +1,9 @@
 #!/bin/bash -p
 # SPDX-License-Identifier: Apache-2.0
 # The privileged collector observes system policy and publishes a bounded,
-# sanitized cache. The only policy mutation is expiry of previously authorized
-# timed firewall exceptions, through the same operation lock as interactive use.
+# sanitized cache. The kernel enforces timed firewall deadlines independently;
+# this collector only reconciles their private metadata through the same
+# operation lock as interactive use. It never reapplies native firewall policy.
 set -Eeuo pipefail
 umask 077
 IFS=$' \t\n'
@@ -28,9 +29,9 @@ status_daemon::once() {
     core::package_available >/dev/null 2>&1 || return 0
     if declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
         (
-            core::begin 'Expire previously approved timed firewall exceptions' || exit 1
+            core::begin 'Reconcile expired firewall exception metadata' || exit 1
             profiles::expire
-        ) || printf 'OctoShield: a timed exception could not expire; review the active firewall profile.\n' >&2
+        ) || printf 'OctoShield: firewall expiry metadata reconciliation failed; review the active profile. Kernel-enforced deadlines remain independent of this collector.\n' >&2
     fi
     core::private_directory "$CORE_STATE" && core::safe_lock "$CORE_STATE/lock" || return 1
     exec 8>>"$CORE_STATE/lock" || return 1
@@ -47,7 +48,10 @@ case "${1:-}" in
     '')
         [[ $# -eq 0 ]] || exit 2
         while :; do
-            timeout --kill-after=3s 45s /bin/bash -p "$STATUS_SELF" --once || printf 'OctoShield: live status refresh failed; the previous cache will become stale.\n' >&2
+            # A maximum-size firewall can require two complete verifications
+            # when expiry bookkeeping is due. The 60-second bound plus this
+            # loop's 15-second pause stays within the 90-second cache lifetime.
+            timeout --kill-after=3s 60s /bin/bash -p "$STATUS_SELF" --once || printf 'OctoShield: live status refresh failed; the previous cache will become stale.\n' >&2
             sleep 15
         done
         ;;

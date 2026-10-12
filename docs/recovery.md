@@ -113,7 +113,7 @@ The following system restore examples assume that root shell and selected `snaps
 
 ## Firewall
 
-The conference action resets UFW exceptions. If it fails during reset/configuration, UFW may be disabled; remain disconnected until `ufw status verbose` confirms your intended policy.
+The Conference firewall action replaces exceptions through the profile engine without resetting or deliberately disabling an active firewall. A failed or interrupted operation is reported as incomplete. Review the saved transaction, `ufw status verbose`, and OctoShield's observed status before relying on the policy; runtime timed grants appear only in OctoShield's verification.
 
 Prefer re-running `octoshield apply firewall` from your normal terminal when you want the conference policy. To deliberately restore an earlier UFW policy from a relevant snapshot, while disconnected:
 

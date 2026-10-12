@@ -510,26 +510,46 @@ profile_controls::_satisfies() {
     esac
 }
 profile_controls::expiry_due() {
-    local saved now
+    local saved now profile desired
     saved=$(profile_controls::_read firewall) || return 1
     now=$(date +%s) || return 1
-    jq -e --argjson now "$now" 'any(.policy.rules[]?; .expires_at>0 and .expires_at<=$now)' <<<"$saved" >/dev/null
+    if jq -e --argjson now "$now" 'any(.policy.rules[]?; .expires_at>0 and .expires_at<=$now)' <<<"$saved" >/dev/null; then return 0; fi
+    # A previous process may have committed adapter bookkeeping and then exited
+    # before the profile document was saved. Retry that harmless reconciliation
+    # without applying any pending edit or adding a native permission.
+    profile=$(profiles::active firewall) || return 1
+    [[ $profile != unmanaged ]] || return 1
+    desired=$(profiles::get "$profile" firewall) || return 1
+    jq -e --argjson now "$now" 'any(.rules[]; .expires_at>0 and .expires_at<=$now)' <<<"$desired" >/dev/null
 }
 profile_controls::expire() {
-    local profile=$1 saved policy now current
+    local saved policy now current checked expected
+    profiles::valid_name "${1-}" || return 1
     saved=$(profile_controls::_read firewall) || return 1
     policy=$(jq -ce .policy <<<"$saved") || return 1
-    profile_controls::conflict firewall || return 1
-    if profile_controls::_runtime_narrowed "$saved"; then
-        policy=$(jq -c '.rules|=map(select(.expires_at==0))' <<<"$policy") || return 1
-    fi
-    if ! profile_controls::_firewall_apply "$profile" "$policy" expire; then
-        profile_controls::_record_actual firewall || :
-        return 1
-    fi
     current=$(profile_controls::snapshot firewall) || return 1
+    expected=$(jq -r .expected <<<"$saved") || return 1
+    if [[ $(profile_controls::_hash <<<"$current") != "$expected" ]]; then
+        if profile_controls::_runtime_narrowed "$saved" "$current"; then
+            policy=$(jq -c '.rules|=map(select(.expires_at==0))' <<<"$policy") || return 1
+        else
+            core::die 'Firewall policy changed outside OctoShield; expiry metadata was preserved for review and retry.'
+            return 1
+        fi
+    fi
     now=$(date +%s) || return 1
     policy=$(jq -c --argjson now "$now" '.rules|=map(select(.expires_at==0 or .expires_at>$now))' <<<"$policy") || return 1
+    # The kernel time matcher already closes expired grants. Verify that effective
+    # policy and update bookkeeping only: replaying hundreds of UFW rules here
+    # could exceed the observer deadline and interrupt unrelated protection.
+    # Inert expired kernel rules remain bounded by the 256-rule profile limit and
+    # disappear at the next explicitly authorized Apply or native firewall reload.
+    profile_firewall::verify "$policy" || return 1
+    checked=$(profile_controls::snapshot firewall) || return 1
+    [[ $(profile_controls::_hash <<<"$checked") == "$(profile_controls::_hash <<<"$current")" ]] || {
+        core::die 'Firewall policy changed during expiry verification; retrying on the next observation.'
+        return 1
+    }
     saved=$(jq -c --arg expected "$(profile_controls::_hash <<<"$current")" --arg desired "$(profile_controls::_hash <<<"$policy")" --argjson observed "$current" --argjson policy "$policy" '.expected=$expected|.desired=$desired|.policy=$policy|.observed=$observed' <<<"$saved") || return 1
     profile_controls::_write firewall "$saved"
 }
@@ -571,7 +591,7 @@ profile_controls::_expiry_ready() {
     enabled=$(systemctl show --property=UnitFileState --value octoshield-status.service) || return 1
     active=$(systemctl show --property=ActiveState --value octoshield-status.service) || return 1
     [[ $loaded == loaded && $enabled == enabled && $active == active ]] || {
-        core::die 'Timed firewall permissions require the enabled, running OctoShield status service to remove expired rules. Start it before applying temporary exceptions.'
+        core::die 'Timed firewall permissions require the enabled, running OctoShield status service for profile status and expiry bookkeeping. The kernel enforces their deadlines. Start the service before applying temporary exceptions.'
         return 1
     }
 }
@@ -598,10 +618,10 @@ profile_controls::_restrict_discovery() {
 # this exact narrowing, with untouched disk policy and every other captured
 # native chain unchanged. An unrelated external change remains a conflict.
 profile_controls::_runtime_narrowed() {
-    local saved=$1 current permanent before after family
+    local saved=$1 current=${2-} permanent before after family
     jq -e '.observed|type=="object"' <<<"$saved" >/dev/null || return 1
     jq -e 'any(.policy.rules[]?; .expires_at>0)' <<<"$saved" >/dev/null || return 1
-    current=$(profile_controls::_firewall_snapshot) || return 1
+    [[ -n $current ]] || current=$(profile_controls::_firewall_snapshot) || return 1
     [[ $(jq -r .observed.config <<<"$saved") == "$(jq -r .config <<<"$current")" ]] || return 1
     before=$(jq -r .observed.status <<<"$saved" | awk '/^(Status:|Logging:|Default:|New profiles:)/') || return 1
     after=$(jq -r .status <<<"$current" | awk '/^(Status:|Logging:|Default:|New profiles:)/') || return 1
