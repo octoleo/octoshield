@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Exercise the compiled GUI argv model and both Bash frontend dispatchers.
 # Every operational handler is a spy; these tests never elevate or change hosts.
-# shellcheck disable=SC1091,SC2317
+# shellcheck disable=SC1091,SC2317,SC2329
 
 setup_file() {
     local -a compiler_flags
