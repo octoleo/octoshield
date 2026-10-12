@@ -1,0 +1,58 @@
+#!/bin/bash -p
+# SPDX-License-Identifier: Apache-2.0
+# The privileged collector observes system policy and publishes a bounded,
+# sanitized cache. The only policy mutation is expiry of previously authorized
+# timed firewall exceptions, through the same operation lock as interactive use.
+set -Eeuo pipefail
+umask 077
+IFS=$' \t\n'
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
+((EUID == 0)) || {
+    printf 'The status collector requires root.\n' >&2
+    exit 1
+}
+STATUS_SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || exit 1
+readonly STATUS_SELF
+readonly OCTOSHIELD_ROOT=${STATUS_SELF%/src/status-daemon}
+for status_module in core controls usb monitor office profiles profile_firewall_verify profile_controls status; do
+    # shellcheck source=/dev/null
+    source "$OCTOSHIELD_ROOT/src/lib/$status_module.sh"
+done
+unset status_module
+
+status_daemon::once() {
+    # The maintenance marker covers dpkg file replacement, while the shared
+    # flock prevents reporting the middle of an interactive profile switch.
+    core::package_available >/dev/null 2>&1 || return 0
+    if declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
+        (
+            core::begin 'Expire previously approved timed firewall exceptions' || exit 1
+            profiles::expire
+        ) || printf 'OctoShield: a timed exception could not expire; review the active firewall profile.\n' >&2
+    fi
+    core::private_directory "$CORE_STATE" && core::safe_lock "$CORE_STATE/lock" || return 1
+    exec 8>>"$CORE_STATE/lock" || return 1
+    flock --shared --nonblock 8 || return 0
+    core::package_available >/dev/null 2>&1 || return 0
+    status::refresh
+}
+
+case "${1:-}" in
+    --once)
+        [[ $# -eq 1 ]] || exit 2
+        status_daemon::once
+        ;;
+    '')
+        [[ $# -eq 0 ]] || exit 2
+        while :; do
+            timeout --kill-after=3s 45s /bin/bash -p "$STATUS_SELF" --once || printf 'OctoShield: live status refresh failed; the previous cache will become stale.\n' >&2
+            sleep 15
+        done
+        ;;
+    *)
+        printf 'Usage: status-daemon [--once]\n' >&2
+        exit 2
+        ;;
+esac

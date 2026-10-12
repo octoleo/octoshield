@@ -11,9 +11,11 @@ setup() {
     export OCTOSHIELD_ROOT="$BATS_TEST_TMPDIR/source"
     INSTALL_LIBRARY="$BATS_TEST_TMPDIR/lib"
     INSTALL_EXECUTABLES="$BATS_TEST_TMPDIR/bin"
+    INSTALL_SYSTEM_UNITS="$BATS_TEST_TMPDIR/system-units"
+    INSTALL_USER_UNITS="$BATS_TEST_TMPDIR/user-units"
     export CORE_TRANSACTION=test
     export FAIL=
-    mkdir -p "$OCTOSHIELD_ROOT" "$INSTALL_LIBRARY" "$INSTALL_EXECUTABLES"
+    mkdir -p "$OCTOSHIELD_ROOT" "$INSTALL_LIBRARY" "$INSTALL_EXECUTABLES" "$INSTALL_SYSTEM_UNITS" "$INSTALL_USER_UNITS"
     local file
     while IFS= read -r file; do
         mkdir -p "$(dirname "$OCTOSHIELD_ROOT/$file")"
@@ -31,14 +33,22 @@ setup() {
         printf 'packages %s\n' "$*" >>"$CALLS"
         [[ $FAIL != packages ]]
     }
+    core::write_file() { cat >"$1"; }
+    systemctl() {
+        printf 'systemctl %s\n' "$*" >>"$CALLS"
+        [[ $1 != is-active ]]
+    }
 }
 
 mock_install_environment() {
     install::safe_directory() { [[ -d $1 && ! -L $1 ]]; }
+    install::safe_file() { [[ -f $1 && ! -L $1 ]]; }
     install::stage() {
         printf 'stage\n' >>"$CALLS"
         [[ $FAIL != stage ]] || return 1
         printf 'new program\n' >"$2/new-program"
+        mkdir "$2/systemd"
+        cp "$OCTOSHIELD_ROOT"/systemd/*.service "$2/systemd/"
     }
     chown() { :; }
     mv() {
@@ -94,10 +104,36 @@ mock_bootstrap_download() {
 @test 'source initialization ignores inherited install destination overrides' {
     INSTALL_LIBRARY=/unsafe
     INSTALL_EXECUTABLES=/unsafe
+    INSTALL_SYSTEM_UNITS=/unsafe
+    INSTALL_USER_UNITS=/unsafe
     source "$BATS_TEST_DIRNAME/../src/lib/install.sh"
     [ "$INSTALL_LIBRARY" = /usr/local/lib ]
     [ "$INSTALL_EXECUTABLES" = /usr/local/bin ]
+    [ "$INSTALL_SYSTEM_UNITS" = /etc/systemd/system ]
+    [ "$INSTALL_USER_UNITS" = /etc/systemd/user ]
     [ ! -s "$CALLS" ]
+}
+
+@test 'standalone install deploys all units but only starts passive status and preserves explicit disable' {
+    mock_install_environment
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -eq 0 ]
+    grep -Fx 'systemctl enable --now octoshield-status.service' "$CALLS"
+    [ -f "$INSTALL_SYSTEM_UNITS/octoshield-monitor.service" ]
+    [ -f "$INSTALL_USER_UNITS/octoshield-notify.service" ]
+    run grep -E '(enable|start).*octoshield-(monitor|notify)' "$CALLS"
+    [ "$status" -eq 1 ]
+    : >"$CALLS"
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -eq 0 ]
+    run grep -q 'systemctl enable\|systemctl restart' "$CALLS"
+    [ "$status" -eq 1 ]
+    printf 'administrator override\n' >"$INSTALL_SYSTEM_UNITS/octoshield-status.service"
+    : >"$CALLS"
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -ne 0 ]
+    [ ! -s "$CALLS" ]
+    [ "$(cat "$INSTALL_SYSTEM_UNITS/octoshield-status.service")" = 'administrator override' ]
 }
 
 @test 'complete source manifest validates' {
@@ -331,4 +367,88 @@ mock_bootstrap_download() {
     run grep -q '^executed' "$CALLS"
     [ "$status" -eq 1 ]
     [ "$(find "$TMPDIR" -mindepth 1 | wc -l)" -eq 0 ]
+}
+
+@test 'unchanged previous vendor units upgrade before the previous tree is deleted' {
+    mock_install_environment
+    mkdir -p "$INSTALL_LIBRARY/octoshield/systemd"
+    printf 'old program\n' >"$INSTALL_LIBRARY/octoshield/old-program"
+    local unit target
+    for unit in octoshield-status.service octoshield-monitor.service octoshield-notify.service; do
+        printf 'old vendor %s\n' "$unit" >"$INSTALL_LIBRARY/octoshield/systemd/$unit"
+        target=$(install::unit_target "$unit")
+        cp "$INSTALL_LIBRARY/octoshield/systemd/$unit" "$target"
+        printf 'new vendor %s\n' "$unit" >"$OCTOSHIELD_ROOT/systemd/$unit"
+    done
+    run install::run
+    [ "$status" -eq 0 ]
+    for unit in octoshield-status.service octoshield-monitor.service octoshield-notify.service; do
+        target=$(install::unit_target "$unit")
+        cmp -s "$target" "$OCTOSHIELD_ROOT/systemd/$unit"
+    done
+    [ "$(find "$INSTALL_LIBRARY" -maxdepth 1 -name '*.previous' | wc -l)" -eq 0 ]
+    run grep -q 'systemctl enable\|systemctl restart' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'admin-edited monitor prevents all unit and program replacement' {
+    mock_install_environment
+    mkdir -p "$INSTALL_LIBRARY/octoshield/systemd"
+    printf 'original program\n' >"$INSTALL_LIBRARY/octoshield/old-program"
+    printf 'old vendor monitor\n' >"$INSTALL_LIBRARY/octoshield/systemd/octoshield-monitor.service"
+    printf 'administrator monitor\n' >"$INSTALL_SYSTEM_UNITS/octoshield-monitor.service"
+    run install::run
+    [ "$status" -ne 0 ]
+    [ "$(cat "$INSTALL_LIBRARY/octoshield/old-program")" = 'original program' ]
+    [ "$(cat "$INSTALL_SYSTEM_UNITS/octoshield-monitor.service")" = 'administrator monitor' ]
+    [ ! -e "$INSTALL_SYSTEM_UNITS/octoshield-status.service" ]
+    [ ! -e "$INSTALL_USER_UNITS/octoshield-notify.service" ]
+    run grep -q '^systemctl' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'linked user unit is preserved and blocks deployment before any unit writes' {
+    mock_install_environment
+    printf 'administrator unit\n' >"$BATS_TEST_TMPDIR/admin-unit"
+    ln -s "$BATS_TEST_TMPDIR/admin-unit" "$INSTALL_USER_UNITS/octoshield-notify.service"
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -ne 0 ]
+    [ ! -e "$INSTALL_SYSTEM_UNITS/octoshield-status.service" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/admin-unit")" = 'administrator unit' ]
+    [ -L "$INSTALL_USER_UNITS/octoshield-notify.service" ]
+}
+
+@test 'an already active collector restarts without enabling inactive protections' {
+    mock_install_environment
+    systemctl() {
+        printf 'systemctl %s\n' "$*" >>"$CALLS"
+        if [[ $1 == is-active ]]; then [[ $3 == octoshield-monitor.service ]]; else return 0; fi
+    }
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -eq 0 ]
+    grep -Fx 'systemctl restart octoshield-monitor.service' "$CALLS"
+    run grep -E 'systemctl (enable|start).*octoshield-(monitor|notify)' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'failed status observer startup is reported even when no monitor is active' {
+    mock_install_environment
+    systemctl() { [[ $1 != enable && $1 != is-active ]]; }
+    run install::services "$OCTOSHIELD_ROOT"
+    [ "$status" -ne 0 ]
+}
+
+@test 'service preflight rejects unsafe owner permissions and hardlinked unit files' {
+    stat() { printf '1000:644:1\n'; }
+    run install::safe_file "$OCTOSHIELD_ROOT/systemd/octoshield-status.service"
+    [ "$status" -ne 0 ]
+    stat() { printf '0:664:1\n'; }
+    run install::safe_file "$OCTOSHIELD_ROOT/systemd/octoshield-status.service"
+    [ "$status" -ne 0 ]
+    stat() { printf '0:644:2\n'; }
+    run install::safe_file "$OCTOSHIELD_ROOT/systemd/octoshield-status.service"
+    [ "$status" -ne 0 ]
+    stat() { printf '0:644:1\n'; }
+    run install::safe_file "$OCTOSHIELD_ROOT/systemd/octoshield-status.service"
+    [ "$status" -eq 0 ]
 }
