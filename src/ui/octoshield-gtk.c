@@ -882,9 +882,15 @@ static GtkWidget *action_row(App *app, const char *id, const char *button_label,
 static GtkWidget *group_new(GtkWidget *page, const char *title, const char *description)
 {
     GtkWidget *group = adw_preferences_group_new();
-    adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group), title);
-    if (description != NULL)
-        adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(group), description);
+    /* Adwaita renders group headings and descriptions as markup internally,
+     * unlike our explicitly plain-text action rows. Escape every value here
+     * so punctuation and future dynamic descriptions remain literal text. */
+    g_autofree gchar *safe_title = g_markup_escape_text(title, -1);
+    adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group), safe_title);
+    if (description != NULL) {
+        g_autofree gchar *safe_description = g_markup_escape_text(description, -1);
+        adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(group), safe_description);
+    }
     gtk_box_append(GTK_BOX(page), group);
     return group;
 }

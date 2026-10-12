@@ -129,6 +129,16 @@ static void test_window(void)
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-overview.png");
 }
 
+static void test_group_text_escaping(void)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_ref_sink(page);
+    GtkWidget *group = group_new(page, "Access & <permissions>", "Keep <device> approvals & settings literal.");
+    g_assert_cmpstr(adw_preferences_group_get_title(ADW_PREFERENCES_GROUP(group)), ==, "Access &amp; &lt;permissions&gt;");
+    g_assert_cmpstr(adw_preferences_group_get_description(ADW_PREFERENCES_GROUP(group)), ==, "Keep &lt;device&gt; approvals &amp; settings literal.");
+    g_object_unref(page);
+}
+
 static void test_observed_status_and_overrides(void)
 {
     g_autoptr(JsonParser) parser = json_parser_new();
@@ -353,6 +363,7 @@ static void test_icon_decoding(void)
      * packages such as GNOME System Monitor. */
     static const char *const names[] = {
         "dialog-information-symbolic", "dialog-password-symbolic",
+        "dialog-question-symbolic", "dialog-warning-symbolic", "emblem-ok-symbolic",
         "document-open-recent-symbolic", "drive-removable-media-symbolic",
         "edit-undo-symbolic", "help-browser-symbolic", "help-about-symbolic",
         "media-playback-stop-symbolic", "network-wireless-symbolic",
@@ -443,6 +454,7 @@ int main(int argc, char **argv)
     g_assert_true(g_application_register(G_APPLICATION(test_app.application), NULL, &error));
     activate(G_APPLICATION(test_app.application), &test_app);
     g_test_add_func("/ui/window/all-pages", test_window);
+    g_test_add_func("/ui/window/group-text-escaping", test_group_text_escaping);
     g_test_add_func("/ui/window/accounts-panel-entry", test_accounts_entry);
     g_test_add_func("/ui/window/icons-decode-with-installed-loaders", test_icon_decoding);
     g_test_add_func("/ui/window/unchanged-brand-assets-follow-theme", test_brand_resources_and_theme);
