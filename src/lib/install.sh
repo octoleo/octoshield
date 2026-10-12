@@ -8,6 +8,7 @@ install::files() {
     printf '%s\n' \
         src/octoshield src/lib/core.sh src/lib/controls.sh src/lib/usb.sh \
         src/lib/desktop.sh src/lib/monitor.sh src/lib/install.sh src/lib/cli.sh \
+        src/lib/office.sh src/lib/api.sh src/lib/user_api.sh \
         src/monitor.c src/notify.sh systemd/octoshield-monitor.service \
         systemd/octoshield-notify.service README.md LICENSE docs/recovery.md
 }
@@ -82,13 +83,13 @@ install::run() (
     done
     destination=$INSTALL_LIBRARY/octoshield
     [[ ! -L $destination && ! -L $INSTALL_EXECUTABLES/octoshield ]] || {
-        core::die 'Refusing to replace a linked Octoshield installation.'
+        core::die 'Refusing to replace a linked OctoShield installation.'
         return 1
     }
     if [[ -e $destination ]]; then
         install::safe_directory "$destination" || return 1
     fi
-    core::install_packages gcc libc6-dev curl ca-certificates whiptail jq libnotify-bin || return 1
+    core::install_packages gcc libc6-dev curl ca-certificates whiptail jq || return 1
     stage=$(mktemp -d "$INSTALL_LIBRARY/.octoshield-install.XXXXXXXX") || return 1
     previous=$stage.previous
     launcher=$(mktemp "$INSTALL_EXECUTABLES/.octoshield-launcher.XXXXXXXX") || {

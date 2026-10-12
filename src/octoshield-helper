@@ -1,0 +1,22 @@
+#!/bin/bash -p
+# SPDX-License-Identifier: Apache-2.0
+# Private, fixed-action polkit entry point installed root-owned by the .deb.
+# Privileged Bash mode suppresses imported functions and BASH_ENV before startup.
+set -Eeuo pipefail
+umask 077
+IFS=$' \t\n'
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH
+cd / || exit 1
+if ((EUID != 0)) || [[ ! ${PKEXEC_UID:-} =~ ^[0-9]+$ ]]; then
+    printf 'Start privileged actions through the OctoShield desktop application.\n' >&2
+    exit 1
+fi
+readonly OCTOSHIELD_ROOT=/usr/lib/octoshield
+for octoshield_module in core controls usb desktop monitor office cli api; do
+    # shellcheck source=/dev/null
+    source "$OCTOSHIELD_ROOT/src/lib/$octoshield_module.sh"
+done
+unset octoshield_module
+api::main "$@"

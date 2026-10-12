@@ -10,7 +10,7 @@ declare -a DESKTOP_SCHEMA=() DESKTOP_KEY=() DESKTOP_TYPE=() DESKTOP_TARGET=() DE
 
 # Avoid requiring the launcher's logging implementation when testing this module.
 desktop::error() {
-    printf 'Octoshield desktop: %s\n' "$*" >&2
+    printf 'OctoShield desktop: %s\n' "$*" >&2
     return 1
 }
 

@@ -3,8 +3,8 @@
 # Runs only as the desktop user. Never consumes raw root logs or evaluates state.
 
 notify::message() {
-    notify-send --app-name=Octoshield --icon=security-high --urgency=normal \
-        --expire-time=15000 "Octoshield: $1" "$2"
+    notify-send --app-name=OctoShield --icon=security-high --urgency=normal \
+        --expire-time=15000 "OctoShield: $1" "$2"
 }
 
 notify::snapshot() {
@@ -62,7 +62,7 @@ notify::run() {
             previous=$current
             unavailable=0
         elif ((unavailable == 0)); then
-            notify::message 'Monitoring unavailable' 'Octoshield is not reporting security events. Run octoshield monitor status. Existing firewall and USB policies are independent of this monitor.' || :
+            notify::message 'Monitoring unavailable' 'OctoShield is not reporting security events. Run octoshield monitor status. Existing firewall and USB policies are independent of this monitor.' || :
             unavailable=1
         fi
         sleep 3

@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-Octoshield 0.1.0 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 0.2.0 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -25,9 +25,14 @@ Usage: octoshield [COMMAND]
   monitor enable-desktop    Enable security notifications for this user
   monitor disable-desktop   Disable this user's notifications
   monitor status            Inspect monitor and desktop notification services
+  monitor logs|disable      Read collector logs or disable collection
   office                    Guided, narrowly scoped office access changes
+  office firewall PORT CIDR Allow one TCP port from a trusted IPv4 subnet
+  office network UUID       Enable autoconnect for one saved network
+  office service UNIT       Restore one supported service
   password                  Change your password using the system passwd tool
   backups                   List private system configuration snapshots
+  backup-show ID            Read a private transaction's action history
   recovery                  Show recovery instructions
   --help | --version
 
@@ -37,35 +42,43 @@ weakening occurs when you return to the office. Review each selected change.
 USAGE
 }
 
+cli::installed_command() {
+    case "$OCTOSHIELD_ROOT" in
+        /usr/lib/octoshield) printf '/usr/bin/octoshield\n' ;;
+        /usr/local/lib/octoshield) printf '/usr/local/bin/octoshield\n' ;;
+        *)
+            core::die 'Install first: bash src/octoshield install'
+            return 1
+            ;;
+    esac
+}
+
 cli::system() {
     core::require_local || return 1
     if ((EUID != 0)); then
-        [[ -x /usr/local/bin/octoshield ]] || {
+        local launcher
+        launcher=$(cli::installed_command) || return 1
+        [[ -x $launcher ]] || {
             core::die 'Install first: bash src/octoshield install'
             return 1
         }
         # Expire the caller's cached timestamp for device authorization.
         if [[ ${1:-} == usb && ${2:-} == allow ]]; then
-            sudo -k -- /usr/local/bin/octoshield "$@"
+            sudo -k -- "$launcher" "$@"
         else
-            sudo -- /usr/local/bin/octoshield "$@"
+            sudo -- "$launcher" "$@"
         fi
         return $?
     fi
     core::supported_os || return 1
-    core::begin "$*" || return 1
+    if [[ $1 != office-system ]]; then api::validate "$@" || return 2; fi
+    if [[ $1 == office-system ]] || api::mutates "$@"; then core::begin "$*" || return 1; fi
     local result=0
     case "$1" in
-        apply) "${CLI_CONTROLS[$2]}" || result=$? ;;
-        usb)
-            case "$2" in
-                list) usb::list || result=$? ;;
-                allow) usb::allow "${@:3}" || result=$? ;;
-                block) usb::block "$3" || result=$? ;;
-            esac
-            ;;
         office-system) cli::office_system || result=$? ;;
+        *) api::dispatch "$@" || result=$? ;;
     esac
+    if [[ $1 != office-system ]] && ! api::mutates "$@"; then return "$result"; fi
     if ((result == 0)); then
         core::record 'COMPLETE'
         core::log "Saved change record: $CORE_STATE/backups/$CORE_TRANSACTION"
@@ -77,7 +90,7 @@ cli::system() {
 }
 
 cli::status() {
-    printf 'Octoshield 0.1.0 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 0.2.0 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -102,7 +115,7 @@ cli::status() {
     printf '\nListening TCP/UDP sockets (review container-published ports too):\n'
     ss -lntu 2>/dev/null || true
     printf '\nNetwork connections:\n'
-    if command -v nmcli >/dev/null; then nmcli -f NAME,TYPE,AUTOCONNECT connection show || true; fi
+    if command -v nmcli >/dev/null; then nmcli -f NAME,UUID,TYPE,AUTOCONNECT connection show || true; fi
     printf '\n'
     if ((EUID != 0)); then desktop::status || true; fi
     printf '\nA service being active is not proof of complete protection. See README limits.\n'
@@ -110,6 +123,10 @@ cli::status() {
 
 cli::install() {
     core::require_local || return 1
+    if [[ $OCTOSHIELD_ROOT == /usr/lib/octoshield ]]; then
+        core::log 'This copy is managed by Debian. Upgrade it with sudo apt install ./octoshield_VERSION_ARCH.deb.'
+        return 0
+    fi
     if ((EUID == 0)); then
         core::supported_os || return 1
         install::run || return 1
@@ -122,14 +139,14 @@ cli::install() {
 
 cli::setup() {
     core::require_local || return 1
-    if [[ $OCTOSHIELD_ROOT != /usr/local/lib/octoshield ]]; then
+    if [[ $OCTOSHIELD_ROOT != /usr/local/lib/octoshield && $OCTOSHIELD_ROOT != /usr/lib/octoshield ]]; then
         cli::install
         return $?
     fi
     local choice result
     while :; do
         if command -v whiptail >/dev/null; then
-            choice=$(whiptail --title 'Octoshield — laptop security' --menu \
+            choice=$(whiptail --title 'OctoShield — laptop security' --menu \
                 'Select a protection or adjustment. Each system change is reviewed before applying.' 24 88 15 \
                 status 'Inspect current security and listening ports' \
                 firewall 'Block unsolicited inbound Wi-Fi/Ethernet traffic' \
@@ -137,17 +154,23 @@ cli::setup() {
                 network 'Limit automatic connections and network discovery' \
                 services 'Disable selected listening and Bluetooth services' \
                 desktop 'Lock GNOME promptly and disable media automount' \
+                desktop-restore 'Restore your saved GNOME settings' \
                 sudo 'Require fresh sudo authentication' \
                 updates 'Enable automatic security updates' \
                 apparmor 'Activate installed AppArmor confinement profiles' \
                 monitor 'Enable system security-event monitoring' \
                 notifications 'Enable GNOME security notifications' \
+                notifications-off 'Disable GNOME security notifications' \
+                monitor-status 'Inspect monitoring and notifications' \
+                monitor-logs 'Read the collector log' \
+                monitor-off 'Disable the system event collector' \
                 devices 'Review/authorize a blocked USB device' \
+                backups 'List saved transactions and read action history' \
                 office 'Allow selected office access without a global reset' \
                 password 'Change your user password' \
                 recovery 'Read recovery and backup instructions' 3>&1 1>&2 2>&3) || return 0
         else
-            printf '\nChoices: status firewall usb network services desktop sudo updates apparmor\nmonitor notifications devices office password recovery quit\n> '
+            printf '\nChoices: status firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
             IFS= read -r choice || return 0
         fi
         result=0
@@ -155,7 +178,13 @@ cli::setup() {
             quit | '') return 0 ;;
             status) cli::status || result=$? ;;
             desktop) desktop::apply || result=$? ;;
+            desktop-restore) desktop::restore || result=$? ;;
             notifications) monitor::enable_desktop || result=$? ;;
+            notifications-off) monitor::disable_desktop || result=$? ;;
+            monitor-status) monitor::status || result=$? ;;
+            monitor-logs) cli::system monitor logs || result=$? ;;
+            monitor-off) cli::system monitor disable || result=$? ;;
+            backups) cli::backup_menu || result=$? ;;
             devices) cli::devices || result=$? ;;
             office) cli::system office-system || result=$? ;;
             password) cli::password || result=$? ;;
@@ -174,15 +203,32 @@ cli::setup() {
 
 cli::devices() {
     cli::system usb list || return 1
-    local id
-    printf '\nReview the device above. Enter its numeric ID to allow until unplug/restart (empty cancels): '
+    local id action
+    printf '\nReview the device above. Enter its numeric ID (empty cancels): '
     IFS= read -r id || return 1
     [[ -n $id ]] || return 0
     [[ $id =~ ^[0-9]+$ ]] || {
         core::die 'Use a numeric device ID.'
         return 1
     }
-    cli::system usb allow "$id"
+    printf 'Action: 1) Allow until unplug/restart  2) Allow permanently  3) Block\n> '
+    IFS= read -r action || return 1
+    case "$action" in
+        1) cli::system usb allow "$id" ;;
+        2) cli::system usb allow "$id" --permanent ;;
+        3) cli::system usb block "$id" ;;
+        *) return 1 ;;
+    esac
+}
+
+cli::backup_menu() {
+    local identifier
+    cli::system backups || return 1
+    printf '\nTransaction ID to inspect (empty returns): '
+    IFS= read -r identifier || return 1
+    [[ -n $identifier ]] || return 0
+    api::valid_backup_id "$identifier" || return 2
+    cli::system backup-show "$identifier"
 }
 
 cli::password() {
@@ -195,70 +241,34 @@ cli::password() {
 }
 
 cli::office_system() {
-    local choice port subnet uuid unit load_state
-    local -a units=()
+    local choice port subnet uuid
     printf '\n1) Allow one TCP port from an office IPv4 subnet\n2) Enable autoconnect for a trusted saved network\n3) Restore selected disabled service\nChoice: '
     IFS= read -r choice || return 1
     case "$choice" in
         1)
             printf 'TCP port (1–65535): '
             IFS= read -r port || return 1
-            [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || return 1
             printf 'Trusted IPv4 subnet in CIDR notation (example 192.168.1.0/24): '
             IFS= read -r subnet || return 1
-            cli::valid_subnet "$subnet" || {
-                core::die 'Invalid subnet; /0 is intentionally refused.'
-                return 1
-            }
-            core::confirm "Allow TCP $port only from $subnet?" || return 1
-            core::backup /etc/ufw || return 1
-            ufw allow from "$subnet" to any port "$port" proto tcp || return 1
-            core::record "OFFICE firewall tcp/$port from $subnet"
+            office::firewall "$port" "$subnet"
             ;;
         2)
             nmcli -f NAME,UUID,TYPE,AUTOCONNECT connection show || return 1
             printf 'Trusted connection UUID: '
             IFS= read -r uuid || return 1
-            [[ $uuid =~ ^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$ ]] || return 1
-            core::confirm "Enable autoconnect for $uuid?" || return 1
-            core::backup /etc/NetworkManager/system-connections || return 1
-            nmcli connection modify uuid "$uuid" connection.autoconnect yes || return 1
-            core::record "OFFICE autoconnect $uuid"
+            office::network "$uuid"
             ;;
         3)
             printf 'Service (ssh.service, avahi-daemon.service, bluetooth.service, cups.service): '
             IFS= read -r choice || return 1
-            case "$choice" in ssh.service | avahi-daemon.service | bluetooth.service | cups.service) ;; *) return 1 ;; esac
-            core::confirm "Unmask and start $choice? Firewall exceptions must be configured separately." || return 1
-            case "$choice" in
-                ssh.service) units=(ssh.service ssh.socket) ;;
-                avahi-daemon.service) units=(avahi-daemon.service avahi-daemon.socket) ;;
-                bluetooth.service) units=(bluetooth.service) ;;
-                cups.service) units=(cups.service cups.socket cups.path) ;;
-            esac
-            for unit in "${units[@]}"; do
-                load_state=$(systemctl show --property=LoadState --value "$unit") || return 1
-                [[ $load_state != not-found ]] || continue
-                core::backup "/etc/systemd/system/$unit" || return 1
-                systemctl unmask "$unit" || return 1
-            done
-            systemctl enable --now "$choice" || return 1
-            core::record "OFFICE service $choice"
+            office::service "$choice"
             ;;
         *) return 1 ;;
     esac
 }
 
 cli::valid_subnet() {
-    local subnet=$1 octet prefix
-    local -a octets
-    [[ $subnet =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]] || return 1
-    prefix=${subnet##*/}
-    ((10#$prefix > 0)) || return 1
-    IFS='.' read -r -a octets <<<"${subnet%/*}"
-    for octet in "${octets[@]}"; do
-        ((10#$octet <= 255)) || return 1
-    done
+    office::valid_subnet "$@"
 }
 
 cli::recovery() {
@@ -275,7 +285,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'Octoshield 0.1.0\n'
+            printf 'OctoShield 0.2.0\n'
             ;;
         setup | status | password | recovery)
             (($# == 0)) || return 2
@@ -312,6 +322,7 @@ cli::main() {
                 enable-desktop) monitor::enable_desktop ;;
                 disable-desktop) monitor::disable_desktop ;;
                 status) monitor::status ;;
+                logs | disable) cli::system monitor "$1" ;;
                 run)
                     core::require_root || return 1
                     monitor::run
@@ -320,17 +331,22 @@ cli::main() {
             esac
             ;;
         office)
-            (($# == 0)) || return 2
-            cli::system office-system
+            if (($# == 0)); then
+                cli::system office-system
+            else
+                api::validate office "$@" || return 2
+                cli::system office "$@"
+            fi
             ;;
         office-system)
             (($# == 0 && EUID == 0)) || return 2
             cli::system office-system
             ;;
-        backups)
-            (($# == 0)) || return 2
-            if ((EUID == 0)); then core::backups; else sudo -- /usr/local/bin/octoshield backups; fi
+        backups | backup-show)
+            api::validate "$command" "$@" || return 2
+            cli::system "$command" "$@"
             ;;
+        user-api) user_api::main "$@" ;;
         *)
             core::die "Unknown command: $command (use --help)"
             return 2

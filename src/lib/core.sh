@@ -6,7 +6,7 @@ CORE_STATE=/var/lib/octoshield
 CORE_TRANSACTION=
 CORE_APT_UPDATED=0
 
-core::log() { printf 'Octoshield: %s\n' "$*" >&2; }
+core::log() { printf 'OctoShield: %s\n' "$*" >&2; }
 core::die() {
     core::log "ERROR: $*"
     return 1
@@ -65,7 +65,7 @@ core::begin() {
     install -d -m 0700 -o root -g root "$CORE_STATE" "$CORE_STATE/backups" || return 1
     exec 9>"$CORE_STATE/lock" || return 1
     flock -n 9 || {
-        core::die 'Another Octoshield operation is running.'
+        core::die 'Another OctoShield operation is running.'
         return 1
     }
     CORE_TRANSACTION="$(date -u +%Y%m%dT%H%M%SZ)-$$"

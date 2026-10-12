@@ -5,6 +5,7 @@
 
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/office.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/cli.sh"
     core::require_local() { :; }
     core::supported_os() { :; }
