@@ -161,7 +161,7 @@ api::interrupted() {
 # Shared transport for the two fixed, trusted adapters. Run in a subshell so
 # protocol overrides never leak into the terminal CLI or caller's environment.
 # Callbacks below are invoked indirectly by the shared control modules.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 api::serve() (
     local callback=${1-} result=0 base=/run API_DIRECTORY API_CONFIRM_ID=0
     case "$callback" in api::operation | user_api::dispatch) ;; *) return 2 ;; esac

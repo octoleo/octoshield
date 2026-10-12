@@ -7,6 +7,7 @@
 /debian/octoshield/
 /debian/octoshield.debhelper.log
 /debian/octoshield.substvars
+/debian/*.debhelper
 *.gcda
 *.gcno
 *.gcov
