@@ -95,13 +95,19 @@ chmod 0755 "$fixture/mock-bin/systemctl" "$fixture/mock-bin/loginctl" "$fixture/
 
 lifecycle() {
     : >"$PACKAGE_TEST_LOG"
-    PATH="$fixture/mock-bin:/usr/bin:/bin" /bin/sh "$fixture/lifecycle/$1" "$2" >"$fixture/lifecycle-output" 2>&1
+    PATH="$fixture/mock-bin:/usr/bin:/bin" /bin/sh "$fixture/lifecycle/$1" "${@:2}" >"$fixture/lifecycle-output" 2>&1
 }
 
 lifecycle postinst configure
-equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl daemon-reload' 'installation only reloads unit metadata'
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl enable octoshield-status.service\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'installation starts only the status observer'
+lifecycle postinst configure 1.0.0
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl enable octoshield-status.service\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'migration from 1.0 starts the new observer without changing controls'
+lifecycle postinst configure 1.1.0
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'later upgrade retains observer enablement choice'
+PACKAGE_TEST_SYSTEMCTL_EXIT=1 lifecycle postinst configure 1.1.0
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl is-enabled --quiet octoshield-status.service' 'disabled observer is not enabled or started by later upgrade'
 lifecycle prerm upgrade
-equal "$(cat "$PACKAGE_TEST_LOG")" '' 'upgrade must not stop controls'
+equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl stop octoshield-status.service' 'upgrade pauses only observer before replacing its modules'
 [[ -f $maintenance && $(stat -c %a "$maintenance") == 600 ]] || fail 'upgrade must leave a private maintenance marker while dpkg replaces files'
 lifecycle postrm upgrade
 equal "$(cat "$PACKAGE_TEST_LOG")" '' 'upgrade must not disable controls'
@@ -128,13 +134,13 @@ lifecycle prerm failed-upgrade
 lifecycle postinst abort-upgrade
 [[ ! -e $maintenance ]] || fail 'aborted upgrade must release maintenance exclusion'
 lifecycle prerm remove
-equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service' 'removal stops our monitor and disables our notifier for numeric active users'
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl stop octoshield-status.service\nsystemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service' 'removal stops our observer and monitor and disables our notifier for numeric active users'
 grep -Fq 'security settings and private backups remain' "$fixture/lifecycle-output" || fail 'removal must disclose retained security settings'
 [[ -f $maintenance ]] || fail 'removal must exclude new protection changes'
 lifecycle postrm remove
 [[ ! -e $maintenance ]] || fail 'finished removal must release maintenance exclusion for standalone CLI use'
 lifecycle postrm purge
-equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl disable octoshield-monitor.service\nsystemctl --global disable octoshield-notify.service\nsystemctl daemon-reload' 'purge affects only package-owned service enablement'
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl disable octoshield-status.service\nsystemctl disable octoshield-monitor.service\nsystemctl --global disable octoshield-notify.service\nsystemctl daemon-reload' 'purge affects only package-owned service enablement'
 for action in abort-upgrade abort-remove abort-deconfigure; do
     : >"$maintenance"
     lifecycle postinst "$action"
@@ -180,12 +186,16 @@ awk '$2 != "0/0" {bad=1} END {exit bad}' "$fixture/contents" || fail 'package pa
 [[ ! -e $fixture/root/etc ]] || fail 'package must not install or replace system security configuration'
 [[ -z $(find "$fixture/root" -type f -perm /6000 -print) ]] || fail 'setuid/setgid files are forbidden'
 
-for executable in usr/bin/octoshield usr/bin/octoshield-gtk usr/libexec/octoshield-helper usr/lib/octoshield/bin/octoshield-monitor; do
+for executable in usr/bin/octoshield usr/bin/octoshield-gtk usr/libexec/octoshield-helper usr/lib/octoshield/bin/octoshield-monitor usr/lib/octoshield/src/status-daemon; do
     [[ -f $fixture/root/$executable && -x $fixture/root/$executable && ! -L $fixture/root/$executable ]] || fail "missing regular executable $executable"
 done
 for path in \
     usr/lib/octoshield/src/lib/core.sh \
     usr/lib/octoshield/src/lib/api.sh \
+    usr/lib/octoshield/src/lib/updates.sh \
+    usr/lib/octoshield/src/lib/profiles.sh \
+    usr/lib/octoshield/src/lib/profile_controls.sh \
+    usr/lib/octoshield/src/lib/status.sh \
     usr/lib/octoshield/src/notify.sh \
     usr/share/applications/io.vdm.OctoShield.desktop \
     usr/share/pixmaps/io.vdm.OctoShield.png \
@@ -194,6 +204,7 @@ for path in \
     usr/share/metainfo/io.vdm.OctoShield.metainfo.xml \
     usr/share/polkit-1/actions/io.vdm.OctoShield.policy \
     usr/lib/systemd/system/octoshield-monitor.service \
+    usr/lib/systemd/system/octoshield-status.service \
     usr/lib/systemd/user/octoshield-notify.service; do
     [[ -f $fixture/root/$path && ! -L $fixture/root/$path ]] || fail "missing regular package file $path"
 done
@@ -205,7 +216,7 @@ done
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type d ! -perm -0005 -print) ]] || fail 'library directories must be readable/searchable by desktop users'
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type f ! -perm -0004 -print) ]] || fail 'runtime library must be readable by desktop users'
 [[ -z $(find "$fixture/root/usr" -perm /0022 -print) ]] || fail 'package paths must not be writable by non-root users'
-for path in "$fixture/root/usr/lib/systemd/system/octoshield-monitor.service" "$fixture/root/usr/lib/systemd/user/octoshield-notify.service"; do
+for path in "$fixture/root/usr/lib/systemd/system/octoshield-monitor.service" "$fixture/root/usr/lib/systemd/system/octoshield-status.service" "$fixture/root/usr/lib/systemd/user/octoshield-notify.service"; do
     if grep -Fq /usr/local "$path"; then fail 'package service points at standalone installation'; fi
 done
 for script in postinst prerm postrm; do
@@ -215,8 +226,8 @@ for script in postinst prerm postrm; do
         fail "unexpected generated systemd lifecycle snippet in $script"
     fi
 done
-if grep -Eq 'deb-systemd-(invoke|helper)|(systemctl).*(start|restart|enable)' "$fixture/control/postinst"; then
-    fail 'generated postinst unexpectedly changes service activation state'
+if grep -E 'deb-systemd-(invoke|helper)|(systemctl).*(start|restart|enable)' "$fixture/control/postinst" | grep -Fv 'octoshield-status.service'; then
+    fail 'postinst activates a service other than the status observer'
 fi
 if grep -Eq '^[[:space:]]*(ufw|usbguard|apt-get|octoshield|/usr/bin/octoshield)[[:space:]]' "$fixture/control/postinst"; then
     fail 'package install unexpectedly applies hardening or installs control packages'

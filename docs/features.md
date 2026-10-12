@@ -1,35 +1,35 @@
 # OctoShield features
 
-OctoShield prepares Ubuntu laptops for conferences, shared networks, and everyday work. Maintained by [Vast Development Method](https://www.vdm.io) as part of the **Octoleo** suite, it brings established Ubuntu security controls into a native GNOME application and a complete terminal interface.
+OctoShield brings Ubuntu laptop protections into a native GNOME application and a complete Whiptail/command-line interface. It is maintained by [Vast Development Method](https://www.vdm.io) as part of the **Octoleo** suite. Both interfaces use the same Bash modules; C provides the native GTK4/libadwaita interface and bounded event aggregation. The desktop follows system light/dark appearance and uses the supplied OctoShield artwork.
 
-The `.deb` includes both interfaces and a compiled monitor. After explicit enrollment in the publisher's signed APT repository, Ubuntu's package tools can deliver application updates. Native AppStream metadata retains the application's description, developer details, and screenshot references for compatible software catalogues. The independent CLI installer needs no GTK or GNOME dependencies. Supported targets are Ubuntu 24.04 and 26.04 with systemd; desktop features require a normal GNOME session. See the [README](../README.md) to install and [distribution guide](distribution.md) for release preparation and removal.
+## Named profiles and individual overrides
 
-## Choose and review each protection
+Conference, Public, Office and Home provide editable starting points. Create another profile by copying one, adjust settings and firewall exceptions, then explicitly apply the saved profile. Change every managed control together or select a different profile for just firewall, USB, network privacy, services or monitoring. The dashboard identifies those overrides and incomplete changes. Home and Office restore original printing, Bluetooth and saved Wi-Fi autoconnect choices while retaining incoming-deny firewall policy, blocked incoming SSH and disabled discovery by default. A location change does not weaken independent update, AppArmor, sudo or screen-lock baselines.
 
-| Feature | What it changes |
-| --- | --- |
-| Host firewall | Configures UFW for IPv4 and IPv6, denying unsolicited inbound and forwarded traffic. Setup explains and confirms resetting existing rules; outgoing traffic remains allowed. |
-| USB authorization | Enrolls physically reviewed devices with USBGuard. Unknown devices remain blocked pending administrator approval. Choose temporary or persistent authorization for a reviewed device and port. |
-| Network privacy | Disables autoconnect for existing Wi-Fi profiles, uses private MAC addresses, and reduces local name-discovery traffic. Reconnect to apply profile changes; choose new-profile autoconnect explicitly. |
-| Service exposure | Stops and masks selected sharing, printing, Bluetooth, and remote-access services after explaining the impact. |
-| GNOME settings | Configures screen locking, removable-media behavior, and available per-user remote-desktop settings. Saved GNOME preferences can be restored separately. |
-| Authentication | Applies a syntax-checked sudo timeout. Existing passwordless grants remain effective; normal system account settings handle password changes. |
-| Security updates | Enables automatic Ubuntu security updates while retaining configured origins and disabling automatic reboots in its settings. |
-| AppArmor | Enables the service and reloads installed profiles in their existing modes; it does not claim to confine every application. |
+Firewall profiles cover UFW's host IPv4 and IPv6 policy for Wi-Fi and Ethernet. Outgoing connections remain allowed. Inbound exceptions specify a port, TCP/UDP protocol, source address or subnet, incoming interface and optional expiry. Profile switching narrows allowances before adding the destination's exceptions, without deliberately disabling or resetting an active firewall. Established connections are not terminated. Returning to a saved original firewall, network or service state is an explicit reviewed action. External configuration changes are reported before replacement rather than silently overwritten.
 
-Installing the application does not select or apply these protections. Disruptive actions explain the proposed change and require confirmation. The native desktop remains a normal-user application; its fixed helper requests administrator authorization for individual system actions.
+Printing, Bluetooth, incoming SSH and discovery are separate service choices. Printing can be enabled in Conference without switching the firewall or all other protections to Office. Network discovery and printer-specific reachability remain separate decisions. Network privacy settings govern saved Wi-Fi autoconnect, discovery and MAC behavior; newly created connections need their own review. The app does not trust a Wi-Fi name or plugged-in cable as proof that a network is safe, and it does not automatically switch profiles based on a network name.
 
-## Inspect, adjust, and recover
+## USB decisions stay with the effective USB profile
 
-- Inspect protection status, listening services, connection profiles, and selected security events.
-- Enable the native event collector and restrained desktop notifications for selected firewall, USB, and authentication events.
-- Grant a subnet-restricted TCP exception, restore one supported service, or enable autoconnect for one trusted connection when office work requires it.
-- Review private action history and practical recovery guidance. System configuration snapshots support deliberate, targeted repair.
+After physical enrollment, USBGuard blocks unknown devices while approval is pending. Approve the current attachment temporarily or remember the reviewed device/port for the current USB profile. Office approval does not grant Conference approval. Switching reevaluates attached devices and expires temporary permissions. The review identifies devices that could disconnect and refuses deauthorization of detected mounted storage until it is safely unmounted. Device changes during review require a fresh review.
 
-The GTK4/libadwaita application follows the desktop's light or dark appearance. Both interfaces share the same Bash control functions; C implements the graphical application and bounded event aggregation. During an operation, the application shows its busy state and results. Native-command details appear at operation boundaries, so package installation may take time between updates. Leave the window open until the action finishes; pending confirmation can be declined.
+The USB page and CLI support listing devices, temporary/profile-specific approval, blocking the current attachment, forgetting remembered approval and preparing an inactive profile's trusted device set. Copying a profile intentionally copies its profile-specific USB approvals. Existing 1.0.0 approval policy is retained separately for explicit restoration.
 
-## Understand the limits
+With user notifications enabled, blocked devices prompt an unlocked local session to open OctoShield for authenticated review. Approval remains blocked while the session is locked. Notification delivery depends on GNOME settings and session availability; USBGuard enforcement does not depend on the application window being open.
 
-OctoShield reduces exposure without guaranteeing protection against every attack. It cannot detect passive surveillance. USB identities can be imitated, and early boot precedes USBGuard enforcement. Docker-published ports need separate firewall review. Disk encryption and Secure Boot are inspected only. Interrupted changes can leave partial state and may require targeted recovery.
+## Verified status and additional exposure checks
 
-Validate the selected controls on the actual laptop before relying on them. The [hardware checklist](testing.md#hardware-acceptance-checklist) distinguishes automated checks from physical acceptance. Removing the application stops its packaged monitoring services while preserving host security policy and recovery backups; [recovery guidance](recovery.md) explains how to change those settings intentionally.
+A background observer publishes sanitized summaries that the GUI and CLI can read without administrator authentication. Indicators distinguish active, inactive, partial, unknown and unsupported results and expire stale observations. Desired settings are compared with observed native policy. Missing tools, incomplete transitions or conflicting changes cannot be presented as fully active protection. The observer also removes previously authorized expired firewall allowances under the same operation lock; an unavailable observer means scheduled cleanup requires attention.
+
+Additional observations cover container/forwarding exposure, Thunderbolt/USB4 authorization and DMA-protection indicators, Secure Boot and disk-encryption topology. These are inspection features, not automatic Docker firewall rewriting, firmware configuration or disk encryption. Container-published ports can bypass ordinary host filtering; a UFW indicator does not certify every network path. Network topology changes and blocked devices can produce desktop notifications even while the application window is closed.
+
+Baseline controls retain the original explicit operations for UFW setup, USB enrollment, network privacy, service restrictions, GNOME locking/media behavior, sudo freshness, Ubuntu security updates without automatic reboot, and AppArmor in existing profile modes. Optional event collection provides bounded firewall, USB and authentication notifications. Private action history and configuration snapshots support deliberate recovery; they are not general file backups or Restic/S3 integration.
+
+## Installation, updates and limits
+
+The versioned Debian package installs both interfaces and the compiled monitor. Opening a newer matching `.deb` with the system package installer upgrades the same package, retaining settings and snapshots. The package starts the status observer but never activates a security profile automatically. **Check for updates** uses only the fixed official GitHub release source on request; it offers a validated matching package link and leaves installation/administrator authentication to the package manager. A separately configured signed APT repository remains an optional update path. Native AppStream metadata includes feature descriptions, publisher identity and release screenshots.
+
+The standalone CLI remains available without GTK or GNOME dependencies. Supported targets are Ubuntu 24.04 and 26.04 with systemd; desktop actions require a local user session. App-store discovery and package-installer availability depend on the Ubuntu frontend. See the [README](../README.md), [distribution guide](distribution.md) and [recovery guide](recovery.md).
+
+OctoShield reduces exposure without guaranteeing protection against every attack. USB identities can be imitated; firmware, early boot, malicious trusted hardware and vulnerabilities in permitted software remain outside these controls. Interrupted changes may leave partial state and require targeted recovery. Validate behavior on the actual laptop using the [hardware checklist](testing.md#hardware-acceptance-checklist); fixture and container success alone does not prove physical protection.

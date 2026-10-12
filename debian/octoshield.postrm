@@ -6,6 +6,7 @@ set -e
 if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
     case "$1" in
         purge)
+            systemctl disable octoshield-status.service >/dev/null 2>&1 || true
             systemctl disable octoshield-monitor.service >/dev/null 2>&1 || true
             systemctl --global disable octoshield-notify.service >/dev/null 2>&1 || true
             ;;

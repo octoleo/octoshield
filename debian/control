@@ -45,11 +45,14 @@ Recommends:
 Description: Ubuntu laptop protection with a native GNOME interface
  OctoShield provides a native GTK desktop application and a Bash command-line
  interface for configuring established Ubuntu security mechanisms. It helps
- review firewall policy, USB authorization, desktop locking, security updates,
- application confinement, and security-event notifications.
+ manage named protection profiles, verified live status, scoped firewall rules,
+ per-profile USB authorization, desktop locking, security updates, application
+ confinement, and security-event notifications. Official release checks offer
+ matching Debian packages for normal package-manager upgrades.
  .
  Each privileged change requires an explicit action and authentication. Package
- installation does not enable security controls or enroll USB devices. The
+ installation starts only the status observer and does not select a protection
+ profile, enable security controls or enroll USB devices. The
  desktop application runs as the logged-in user and delegates narrowly scoped
  operations to a fixed PolicyKit-authorized helper.
  .

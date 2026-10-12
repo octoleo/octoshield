@@ -15,17 +15,17 @@ sudo apt-get install build-essential debhelper pkg-config \
 dpkg-buildpackage -us -uc -b
 ```
 
-`make package` is the repository's convenience target for the package build. For version 1.0.0 on amd64, a local build emits `../octoshield_1.0.0_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `1.0.0`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
+`make package` is the repository's convenience target for the package build. For version 1.1.0 on amd64, a local build emits `../octoshield_1.1.0_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `1.1.0`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
 
 Inspect and install a locally built package in a disposable test system:
 
 ```bash
-dpkg-deb --info ../octoshield_1.0.0_amd64.deb
-dpkg-deb --contents ../octoshield_1.0.0_amd64.deb
-sudo apt install ../octoshield_1.0.0_amd64.deb
+dpkg-deb --info ../octoshield_1.1.0_amd64.deb
+dpkg-deb --contents ../octoshield_1.1.0_amd64.deb
+sudo apt install ../octoshield_1.1.0_amd64.deb
 ```
 
-These example filenames describe the amd64 1.0.0 build; use the actual emitted filename for another version or architecture.
+These example filenames describe the amd64 1.1.0 build; use the actual emitted filename for another version or architecture.
 
 ## Program ownership and lifecycle
 
@@ -39,7 +39,7 @@ These example filenames describe the amd64 1.0.0 build; use the actual emitted f
 | `/usr/share/metainfo/io.vdm.OctoShield.metainfo.xml` | AppStream description, publisher, version, and screenshot references |
 | `/usr/share/polkit-1/actions/io.vdm.OctoShield.policy` | Administrator authorization policy |
 
-Package installation does not select protections, trust USB devices, enable monitoring, or start the GUI as root. Monitoring remains opt-in. Package upgrades retain configuration and do not restart active monitoring automatically. Removal stops package-owned monitoring and removes the program while retaining native host policies and private backups. Purge is not a security reset. Standalone `/usr/local` installations are retained; see [recovery.md](recovery.md#package-upgrades-coexistence-and-removal).
+Package installation does not select protections, trust USB devices, enable security-event collection, or start the GUI as root. It starts `octoshield-status.service` to report observed state without applying a profile. The observer also expires previously approved managed firewall allowances under the operation lock. Package upgrades retain configuration and profile state, stop/resume only the status observer while replacing code, and preserve the user's event-monitor enablement. Later upgrades respect a disabled or masked observer. Removal stops package-owned status and monitoring services and removes the program while retaining native host policies and private backups. Purge is not a security reset. Standalone `/usr/local` installations are retained; see [recovery.md](recovery.md#package-upgrades-coexistence-and-removal).
 
 The package declares GUI runtime dependencies. The independent `bash src/octoshield install` path installs the CLI only, without GTK/libadwaita/GNOME dependencies; it locally compiles the C monitor.
 
@@ -51,8 +51,8 @@ The **Test lint and package** workflow currently builds this matrix:
 
 | Build | Actions artifact | Distributed package |
 | --- | --- | --- |
-| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_1.0.0_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_1.0.0_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_1.1.0_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_1.1.0_ubuntu26.04_amd64.deb` |
 
 Artifacts and releases use separate `SHA256SUMS-ubuntu24.04` and `SHA256SUMS-ubuntu26.04` files. After extraction/download, run the matching command, for example `sha256sum -c SHA256SUMS-ubuntu24.04`. These detect content changes, not independent publisher identity.
 
@@ -64,4 +64,4 @@ The native metadata identifies the developer as **Vast Development Method**, the
 
 ## Acceptance
 
-Package validation must cover install, upgrade, and remove in a disposable environment; check both launchers, desktop metadata, PolicyKit policy, file ownership, and the absence of automatic hardening/monitor activation. A GUI smoke test should open the actual native window under a test display without executing privileged controls. See [testing.md](testing.md) for the separate hardware checklist.
+Package validation covers installation of the published 1.0.0 package followed by a real upgrade to 1.1.0, reinstall, removal and purge in disposable Ubuntu containers. CI pins the old archives' SHA-256 values and checks both launchers, desktop metadata, PolicyKit policy, ownership, preserved recovery snapshots/native configuration/user preferences/profile state/monitor enablement, and the absence of automatic hardening. Starting the status observer is intentional; starting the security-event collector without a previous user choice is forbidden. Native window tests run under an isolated display without applying privileged controls. See [testing.md](testing.md) for the separate hardware checklist.

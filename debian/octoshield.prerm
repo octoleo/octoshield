@@ -35,6 +35,11 @@ case "$1" in
             umask 077
             : >"$maintenance"
         )
+        # Stop only our status process before its Bash modules are replaced.
+        # UFW, USBGuard and all other native protection services keep running.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop octoshield-status.service >/dev/null 2>&1 || true
+        fi
         ;;
 esac
 
@@ -54,7 +59,7 @@ case "$1" in
                 done
         fi
         printf '%s\n' \
-            'OctoShield: removing the app stops its monitoring; previously approved security settings and private backups remain.' \
+            'OctoShield: removing the app stops its status reporting and monitoring; previously approved security settings and private backups remain.' \
             'Offline users may retain notification enablement preferences. No home directories or custom units are deleted.' >&2
         ;;
 esac

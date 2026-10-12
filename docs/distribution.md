@@ -6,17 +6,17 @@ The supported delivery is a downloadable `.deb` containing the native GNOME appl
 
 ## Install the package
 
-Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.0.0 on Ubuntu 24.04 from a new empty directory:
+Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.1.0 on Ubuntu 24.04 from a new empty directory:
 
 ```bash
 (
 set -e
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.0.0/octoshield_1.0.0_ubuntu24.04_amd64.deb
+    -O https://github.com/octoleo/octoshield/releases/download/v1.1.0/octoshield_1.1.0_ubuntu24.04_amd64.deb
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.0.0/SHA256SUMS-ubuntu24.04
+    -O https://github.com/octoleo/octoshield/releases/download/v1.1.0/SHA256SUMS-ubuntu24.04
 sha256sum -c SHA256SUMS-ubuntu24.04
-sudo apt install ./octoshield_1.0.0_ubuntu24.04_amd64.deb
+sudo apt install ./octoshield_1.1.0_ubuntu24.04_amd64.deb
 )
 ```
 
@@ -66,19 +66,23 @@ To stop repository updates without removing the app or its protections, set `Ena
 
 ## Consent and system changes
 
-Package installation installs program files and dependencies. It does not apply hardening, enroll USB devices, or enable monitoring automatically. Choose controls after opening the app.
+Package installation installs program files and dependencies and starts the background status observer. It does not apply hardening, enroll USB devices, select a security profile, or enable security-event collection automatically. Choose controls after opening the app. The observer reports existing state and processes only previously authorized managed firewall exception deadlines under the operation lock.
 
 - The desktop runs without administrator privileges. A fixed PolicyKit helper authenticates system actions; GNOME preferences and notifications remain in the user's session.
 - Each protection explains its impact. Disruptive changes require explicit confirmation, including the existing-rule reset for UFW and physical review of the USB enrollment set.
-- Relevant native configuration is saved in local, root-restricted recovery snapshots before modification, and action records identify changes. OctoShield does not separately encrypt these files. The GUI exposes action history rather than saved configuration secrets. These snapshots support configuration recovery; general folder backups and Restic/S3 integration are outside version 1.0.0.
+- Relevant native configuration is saved in local, root-restricted recovery snapshots before modification, and action records identify changes. OctoShield does not separately encrypt these files. The GUI exposes action history rather than saved configuration secrets. These snapshots support configuration recovery; general folder backups and Restic/S3 integration remain outside this release.
 - Operations show busy state and results; detailed package/native output arrives at operation boundaries. Declining a pending confirmation stops its next step. Interrupted actions may need repair; there is no claim of atomic rollback across native commands.
 - Office actions grant specific access without broadly undoing the other protections. The application does not promise immunity to every attack.
 
-See [features](features.md), the [control-by-control README](../README.md#what-each-control-does), and [recovery](recovery.md) before selecting changes that affect networking, input devices, or shared services.
+See [features](features.md), the [control-by-control README](../README.md#individual-baseline-controls), and [recovery](recovery.md) before selecting changes that affect networking, input devices, or shared services.
 
 ## Upgrade and clean removal
 
-Install a newer matching `.deb` with APT to upgrade. Package upgrades preserve policy and do not start, enable, or restart monitoring automatically. Existing monitoring processes keep running until an explicit restart or a later session/reboot.
+Version 1.1.0 retains the package name `octoshield`, so downloading its matching `.deb` and opening it with a supported desktop package installer upgrades 1.0.0 in place. The package manager asks for administrator permission. If double-clicking opens an archive viewer or no installer, use `sudo apt install ./octoshield_1.1.0_ubuntu24.04_amd64.deb` with your actual matching filename. Do not uninstall the older version first. Package upgrades preserve native policy, profile state, user preferences and private snapshots, and do not automatically select a new security profile.
+
+The application and `octoshield updates check` provide an explicit, normal-user release check against `https://api.github.com/repos/octoleo/octoshield/releases/latest`. The request uses HTTPS, time and size limits, canonical stable versions, and exact official package URL matching for Ubuntu 24.04/26.04 amd64. It sends no GitHub token, does not run at startup, and never downloads or executes an installer as root. A failed check is reported as unavailable, not as proof the application is current. Opening the offered release or package link uses your normal desktop browser; install the downloaded package through the system package manager. Older remote versions are not recommended as upgrades. No store keys or credentials are needed for this check.
+
+The status observer is introduced and enabled on installation or migration from 1.0.0. Package replacement briefly stops that observer so it cannot use half-replaced modules; configuration resumes it when enabled. Later upgrades respect a deliberately disabled or masked observer. UFW, USBGuard and existing security-event collection keep their current state. Opening the upgraded application refreshes an already-active notifier in your own session; it never enables a notifier you disabled. Event collector code reloads on an explicit restart or later reboot. A stale status indicator remains visible until a new observation is available.
 
 To remove the packaged application:
 
@@ -86,7 +90,7 @@ To remove the packaged application:
 sudo apt remove octoshield
 ```
 
-Removal stops package-owned monitoring and notification services and removes the application, CLI, helper, and installed launcher assets. It disables notification preferences in available user managers; offline users' home directories and custom units are left for their own review. Before uninstalling, each user can run `systemctl --user disable --now octoshield-notify.service`. See [recovery](recovery.md#package-upgrades-coexistence-and-removal) for a stale offline-user enablement link. If a system action is in progress, wait for it to finish before retrying a refused upgrade/removal.
+Removal stops package-owned status reporting, monitoring and notification services and removes the application, CLI, helper, and installed launcher assets. It disables notification preferences in available user managers; offline users' home directories and custom units are left for their own review. Before uninstalling, each user can run `systemctl --user disable --now octoshield-notify.service`. See [recovery](recovery.md#package-upgrades-coexistence-and-removal) for a stale offline-user enablement link. If a system action is in progress, wait for it to finish before retrying a refused upgrade/removal.
 
 Purging with `sudo apt purge octoshield` is also supported. Neither removal nor purge resets UFW/USBGuard/NetworkManager/sudo/AppArmor policy, restores GNOME preferences, or deletes private recovery backups. These are host settings that may still be protecting the laptop, not disposable application caches. Runtime dependencies installed through APT follow APT's normal dependency management.
 
@@ -163,7 +167,7 @@ The workflow runs `bash scripts/apt-repository.sh --input PACKAGE_DIRECTORY --as
 
 Use `MAJOR.MINOR.PATCH`: major for incompatible changes, minor for compatible features, and patch for compatible fixes. A version number is not a security assurance. The helper accepts plain `X.Y.Z` without prerelease/build suffixes or leading zeroes. Version 1.0.0 is the first stable packaged release; subsequent versions follow the same tested publication path.
 
-Prepare the next release on a review branch. For a patch release after 1.0.0:
+Prepare the next release on a review branch. For a patch release after 1.1.0:
 
 ```bash
 git switch main

@@ -4,7 +4,7 @@ CFLAGS ?= -O2
 CPPFLAGS ?= -D_FORTIFY_SOURCE=2
 WARNINGS := -std=c11 -Wall -Wextra -Werror -pedantic
 HARDENING := -fstack-protector-strong -fPIE -pie -Wl,-z,relro,-z,now
-SHELL_FILES := src/octoshield src/octoshield-helper $(wildcard debian/octoshield.postinst debian/octoshield.prerm debian/octoshield.postrm scripts/*.sh) $(shell find src tests -type f \( -name '*.sh' -o -name '*.bats' \) | sort)
+SHELL_FILES := src/octoshield src/octoshield-helper src/status-daemon $(wildcard debian/octoshield.postinst debian/octoshield.prerm debian/octoshield.postrm scripts/*.sh) $(shell find src tests -type f \( -name '*.sh' -o -name '*.bats' \) | sort)
 UI_PACKAGES := gtk4 libadwaita-1 json-glib-1.0 gio-2.0
 CLI_FILES := $(shell bash -c 'source src/lib/install.sh; install::files')
 DESTDIR ?=
@@ -67,14 +67,15 @@ check: lint test
 install: all gui
 	@test -n "$(DESTDIR)" || { echo 'Use make package or supply a staging DESTDIR.' >&2; exit 1; }
 	@for file in $(CLI_FILES); do install -D -m 0644 "$$file" "$(DESTDIR)/usr/lib/octoshield/$$file"; done
-	chmod 0755 "$(DESTDIR)/usr/lib/octoshield/src/octoshield" "$(DESTDIR)/usr/lib/octoshield/src/notify.sh"
+	chmod 0755 "$(DESTDIR)/usr/lib/octoshield/src/octoshield" "$(DESTDIR)/usr/lib/octoshield/src/notify.sh" "$(DESTDIR)/usr/lib/octoshield/src/status-daemon"
 	install -D -m 0755 build/octoshield-monitor "$(DESTDIR)/usr/lib/octoshield/bin/octoshield-monitor"
 	install -D -m 0755 build/octoshield-gtk "$(DESTDIR)/usr/bin/octoshield-gtk"
 	install -D -m 0755 src/octoshield-helper "$(DESTDIR)/usr/libexec/octoshield-helper"
 	printf '%s\n' '#!/bin/bash' 'exec /usr/bin/bash /usr/lib/octoshield/src/octoshield "$$@"' >"$(DESTDIR)/usr/bin/octoshield"
 	chmod 0755 "$(DESTDIR)/usr/bin/octoshield"
-	@for unit in octoshield-monitor.service octoshield-notify.service; do sed 's@/usr/local/@/usr/@g' "systemd/$$unit" >"$(DESTDIR)/usr/lib/octoshield/systemd/$$unit"; done
+	@for unit in octoshield-monitor.service octoshield-notify.service octoshield-status.service; do sed 's@/usr/local/@/usr/@g' "systemd/$$unit" >"$(DESTDIR)/usr/lib/octoshield/systemd/$$unit"; done
 	install -D -m 0644 "$(DESTDIR)/usr/lib/octoshield/systemd/octoshield-monitor.service" "$(DESTDIR)/usr/lib/systemd/system/octoshield-monitor.service"
+	install -D -m 0644 "$(DESTDIR)/usr/lib/octoshield/systemd/octoshield-status.service" "$(DESTDIR)/usr/lib/systemd/system/octoshield-status.service"
 	install -D -m 0644 "$(DESTDIR)/usr/lib/octoshield/systemd/octoshield-notify.service" "$(DESTDIR)/usr/lib/systemd/user/octoshield-notify.service"
 	install -D -m 0644 data/io.vdm.OctoShield.desktop "$(DESTDIR)/usr/share/applications/io.vdm.OctoShield.desktop"
 	install -D -m 0644 data/branding/OctoShield-light.png "$(DESTDIR)/usr/share/pixmaps/io.vdm.OctoShield.png"
