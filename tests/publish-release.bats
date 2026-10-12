@@ -40,6 +40,12 @@ respond() {
 if [[ $1 == api ]]; then
     if [[ $2 == --paginate && $3 == --slurp ]]; then
         if [[ ${MOCK_LIST_ERROR:-0} == 1 ]]; then exit 89; fi
+        if [[ -f $GH_STATE/release.json ]]; then
+            count=0; [[ ! -f $GH_STATE/draft-list-count ]] || count=$(cat "$GH_STATE/draft-list-count")
+            count=$((count + 1)); printf '%s\n' "$count" >"$GH_STATE/draft-list-count"
+            if [[ ${MOCK_CREATED_LIST_ERROR:-0} == 1 ]]; then exit 88; fi
+            if ((count <= ${MOCK_HIDDEN_LISTS:-0})); then printf '[[]]\n'; exit; fi
+        fi
         if [[ -f $GH_STATE/release.json ]]; then jq '[[.]]' "$GH_STATE/release.json"; else printf '[[]]\n'; fi
         exit
     fi
@@ -353,4 +359,31 @@ draft() {
     [ "$status" -ne 0 ]
     jq -e '.draft == true' "$GH_STATE/release.json"
     run ! grep '^release edit' "$GH_STATE/calls"
+}
+
+@test 'new draft visibility delay retries absence without creating a duplicate release' {
+    MOCK_HIDDEN_LISTS=2 release
+    [ "$status" -eq 0 ]
+    [[ $output == *'attempt 1/5'* && $output == *'attempt 2/5'* ]]
+    [ "$(grep -c '^release create' "$GH_STATE/calls")" -eq 1 ]
+    jq -e '.draft == false and (.assets | length) == 19' "$GH_STATE/release.json"
+}
+
+@test 'new draft permanent absence stops after five checks and leaves draft untouched' {
+    MOCK_HIDDEN_LISTS=99 release
+    [ "$status" -ne 0 ]
+    [[ $output == *'not visible after five checks'* ]]
+    [ "$(cat "$GH_STATE/draft-list-count")" -eq 5 ]
+    [ "$(grep -c '^release create' "$GH_STATE/calls")" -eq 1 ]
+    jq -e '.draft == true and (.assets | length) == 0' "$GH_STATE/release.json"
+    run ! grep '^release upload' "$GH_STATE/calls"
+}
+
+@test 'new draft API errors fail immediately without visibility retries' {
+    MOCK_CREATED_LIST_ERROR=1 release
+    [ "$status" -ne 0 ]
+    [[ $output == *'Could not inspect the created draft'* ]]
+    [ "$(cat "$GH_STATE/draft-list-count")" -eq 1 ]
+    jq -e '.draft == true and (.assets | length) == 0' "$GH_STATE/release.json"
+    run ! grep '^release upload' "$GH_STATE/calls"
 }
