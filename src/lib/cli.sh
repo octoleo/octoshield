@@ -11,17 +11,32 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.0.0 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.1.0 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
   install                   Install this checkout and open guided setup
   status                    Inspect protections and listening services
+  status --json             Read the verified, freshness-checked status snapshot
+  inspect                   Refresh the verified status with administrator access
+  profile                   Open the guided profile manager (Whiptail)
+  profile list|show NAME    List profiles or inspect one profile
+  profile create NAME BASE Copy a profile into a new editable profile
+  profile delete NAME      Delete an unused custom profile
+  profile apply NAME [CONTROL] Switch all protections, or override one
+  profile restore [CONTROL] Restore saved original settings
+  profile set NAME KEY VALUE Change a profile setting
+  profile rule-add NAME PORT PROTO SOURCE INTERFACE MINUTES
+                            Save an incoming exception (any source/interface allowed)
+  profile rule-remove NAME ID Remove a saved firewall exception
+  updates check             Check official releases and show upgrade instructions
   apply CONTROL             firewall|network|services|sudo|updates|apparmor|usb|monitor
   desktop apply|restore     Configure or restore this user's GNOME settings
   usb list                  List USB devices and authorization state
-  usb allow ID [--permanent] Authorize a reviewed device (temporary by default)
+  usb allow ID [--permanent] Allow once, or remember for the current USB profile
   usb block ID              Block a device
+  usb forget ID             Forget this device in the current USB profile and block it
+  usb enroll NAME           Physically review trusted devices for a profile
   monitor enable-desktop    Enable security notifications for this user
   monitor disable-desktop   Disable this user's notifications
   monitor status            Inspect monitor and desktop notification services
@@ -78,6 +93,11 @@ cli::system() {
         office-system) cli::office_system || result=$? ;;
         *) api::dispatch "$@" || result=$? ;;
     esac
+    if [[ $1 == office-system ]] || api::mutates "$@"; then
+        if declare -F status::refresh >/dev/null; then
+            status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+        fi
+    fi
     if [[ $1 != office-system ]] && ! api::mutates "$@"; then return "$result"; fi
     if ((result == 0)); then
         core::record 'COMPLETE'
@@ -90,7 +110,20 @@ cli::system() {
 }
 
 cli::status() {
-    printf 'OctoShield 1.0.0 — inspection (unknown means not verified)\n\n'
+    local snapshot
+    if declare -F status::read >/dev/null && snapshot=$(status::read 2>/dev/null); then
+        jq -r '
+          "OctoShield — verified system status", "",
+          ("Profile: " + (.profiles.active // .profiles.global // "unmanaged")),
+          ("Checked: " + (.checked_at | todateiso8601)), "",
+          ((.profiles.overrides // {}) | to_entries[] | "Override: \(.key) uses \(.value)"),
+          (.controls | to_entries[] | "\(.key): \(.value.state) — \(.value.summary)"), "",
+          (.exposures | to_entries[] | "\(.key): \(.value.state) — \(.value.summary)")
+        ' <<<"$snapshot"
+        return $?
+    fi
+    printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
+    printf 'OctoShield 1.1.0 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -149,6 +182,8 @@ cli::setup() {
             choice=$(whiptail --title 'OctoShield — laptop security' --menu \
                 'Select a protection or adjustment. Each system change is reviewed before applying.' 24 88 15 \
                 status 'Inspect current security and listening ports' \
+                profiles 'Switch and configure Conference, Office, Home or custom profiles' \
+                updates-check 'Check for a new OctoShield release' \
                 firewall 'Block unsolicited inbound Wi-Fi/Ethernet traffic' \
                 usb 'Enroll trusted USB devices and block unknown devices' \
                 network 'Limit automatic connections and network discovery' \
@@ -170,13 +205,15 @@ cli::setup() {
                 password 'Change your user password' \
                 recovery 'Read recovery and backup instructions' 3>&1 1>&2 2>&3) || return 0
         else
-            printf '\nChoices: status firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
+            printf '\nChoices: status profiles updates-check firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
             IFS= read -r choice || return 0
         fi
         result=0
         case "$choice" in
             quit | '') return 0 ;;
             status) cli::status || result=$? ;;
+            profiles) profile_cli::menu || result=$? ;;
+            updates-check) updates::show || result=$? ;;
             desktop) desktop::apply || result=$? ;;
             desktop-restore) desktop::restore || result=$? ;;
             notifications) monitor::enable_desktop || result=$? ;;
@@ -211,12 +248,13 @@ cli::devices() {
         core::die 'Use a numeric device ID.'
         return 1
     }
-    printf 'Action: 1) Allow until unplug/restart  2) Allow permanently  3) Block\n> '
+    printf 'Action: 1) Allow until unplug/restart/profile switch  2) Remember for current USB profile  3) Block  4) Forget and block\n> '
     IFS= read -r action || return 1
     case "$action" in
         1) cli::system usb allow "$id" ;;
         2) cli::system usb allow "$id" --permanent ;;
         3) cli::system usb block "$id" ;;
+        4) cli::system usb forget "$id" ;;
         *) return 1 ;;
     esac
 }
@@ -285,9 +323,32 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.0.0\n'
+            printf 'OctoShield 1.1.0\n'
             ;;
-        setup | status | password | recovery)
+        status)
+            if [[ $# -eq 1 && $1 == --json ]]; then
+                status::read
+            elif (($# == 0)); then
+                cli::status
+            else return 2; fi
+            ;;
+        profile)
+            if (($# == 0)); then
+                profile_cli::menu
+            else
+                profiles::validate "$@" || return 2
+                cli::system profile "$@"
+            fi
+            ;;
+        inspect)
+            (($# == 0)) || return 2
+            cli::system inspect
+            ;;
+        updates)
+            [[ $# -eq 1 && $1 == check ]] || return 2
+            updates::show
+            ;;
+        setup | password | recovery)
             (($# == 0)) || return 2
             "cli::$command"
             ;;
@@ -309,9 +370,10 @@ cli::main() {
             ;;
         usb)
             case "${1:-}" in
-                list) [[ $# -eq 1 ]] || return 2 ;;
+                list | devices) [[ $# -eq 1 ]] || return 2 ;;
+                enroll) [[ $# -eq 2 ]] && profiles::valid_name "$2" || return 2 ;;
                 allow) [[ ($# -eq 2 || ($# -eq 3 && $3 == --permanent)) && $2 =~ ^[0-9]+$ ]] || return 2 ;;
-                block) [[ $# -eq 2 && $2 =~ ^[0-9]+$ ]] || return 2 ;;
+                block | forget) [[ $# -eq 2 && $2 =~ ^[0-9]+$ ]] || return 2 ;;
                 *) return 2 ;;
             esac
             cli::system usb "$@"

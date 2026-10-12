@@ -63,15 +63,38 @@ core::package_available() {
     }
 }
 
+core::private_directory() {
+    local directory=$1 metadata
+    if [[ -e $directory || -L $directory ]]; then
+        [[ -d $directory && ! -L $directory ]] || return 1
+        metadata=$(stat -c '%u:%a' -- "$directory") || return 1
+        [[ $metadata =~ ^0:([0-7]{3,4})$ ]] || return 1
+        (((8#${BASH_REMATCH[1]} & 077) == 0)) || return 1
+    else
+        install -d -m 0700 -o root -g root -- "$directory" || return 1
+    fi
+}
+
+core::safe_lock() {
+    local file=$1 metadata
+    [[ ! -L $file ]] || return 1
+    if [[ -e $file ]]; then
+        [[ -f $file ]] || return 1
+        metadata=$(stat -c '%u:%a:%h' -- "$file") || return 1
+        [[ $metadata =~ ^0:([0-7]{3,4}):1$ ]] || return 1
+        (((8#${BASH_REMATCH[1]} & 077) == 0)) || return 1
+    fi
+}
+
 core::begin() {
     core::require_root || return 1
     core::package_available || return 1
     umask 077
-    [[ ! -L $CORE_STATE ]] || {
-        core::die 'State directory must not be a symlink.'
+    if ! core::private_directory "$CORE_STATE" || ! core::private_directory "$CORE_STATE/backups" ||
+        ! core::safe_lock "$CORE_STATE/lock"; then
+        core::die 'State, backups and lock must be private root-owned paths without symlinks or shared links.'
         return 1
-    }
-    install -d -m 0700 -o root -g root "$CORE_STATE" "$CORE_STATE/backups" || return 1
+    fi
     exec 9>"$CORE_STATE/lock" || return 1
     flock -n 9 || {
         core::die 'Another OctoShield operation is running.'

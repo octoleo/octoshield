@@ -24,128 +24,23 @@ controls::ufw_defaults() {
     ' "$file"
 }
 
+# Backwards-compatible entry points use the same profile engine as both UIs.
 controls::apply_firewall() {
-    local defaults
     core::require_root || return 1
     controls::local_console || return 1
-    core::confirm 'Prepare the conference firewall? Any missing UFW package will be installed before the network-disconnection step.' || return 1
-    core::install_packages ufw || return 1
-    core::log 'The conference firewall removes existing UFW exceptions, denies unsolicited incoming and forwarded traffic, permits outgoing traffic, and filters IPv4/IPv6.'
-    core::log 'Reset briefly disables UFW. Disconnect Wi-Fi/Ethernet first. Docker/container published ports and other firewall managers require separate review.'
-    if command -v ufw >/dev/null 2>&1; then
-        ufw status numbered || return 1
-    fi
-    core::confirm 'Back up and RESET all UFW rules, then enable the conference firewall?' || return 1
-    core::backup /etc/ufw || return 1
-    core::backup /etc/default/ufw || return 1
-    defaults=$(controls::ufw_defaults /etc/default/ufw) || return 1
-    ufw --force reset || return 1
-    core::write_file /etc/default/ufw 0644 <<<"$defaults" || return 1
-    ufw default deny incoming || return 1
-    ufw default allow outgoing || return 1
-    ufw default deny routed || return 1
-    ufw logging low || return 1
-    ufw --force enable || return 1
-    ufw status verbose || return 1
-    core::record 'firewall: reset UFW; IPv4/IPv6 inbound/forward deny, outbound allow, low logging' || return 1
+    profiles::apply conference firewall
 }
 
 controls::apply_network() {
-    local profiles uuid type
     core::require_root || return 1
     controls::local_console || return 1
-    if ! command -v nmcli >/dev/null 2>&1; then
-        core::die 'NetworkManager is required; Octoshield will not replace your network stack.'
-        return 1
-    fi
-    # UUIDs and types avoid parsing profile names, which can contain colons/newlines.
-    profiles=$(nmcli --terse --fields UUID,TYPE connection show) || return 1
-    core::log 'Disable autoconnect for existing Wi-Fi profiles, use stable private Wi-Fi MACs, randomize scanning, and disable LLMNR/mDNS for existing profiles.'
-    core::log 'Reconnect manually afterward to apply profile changes. Local .local discovery may stop working; MAC-registered networks may require office adjustments.'
-    core::confirm 'Apply network privacy settings and back up existing connection profiles (including their secrets)?' || return 1
-    core::backup /etc/NetworkManager/system-connections || return 1
-    core::backup /run/NetworkManager/system-connections || return 1
-    core::write_file /etc/NetworkManager/conf.d/90-octoshield.conf 0644 <<'CONFIG' || return 1
-# Managed by Octoshield. Explicit profile settings take precedence over defaults.
-[device]
-wifi.scan-rand-mac-address=yes
-wifi.iwd.autoconnect=false
-
-[connection]
-wifi.cloned-mac-address=stable
-connection.llmnr=0
-connection.mdns=0
-CONFIG
-    while IFS=: read -r uuid type; do
-        [[ -n $uuid ]] || continue
-        if [[ ! $uuid =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
-            core::die 'NetworkManager returned an invalid connection UUID; stopped.'
-            return 1
-        fi
-        nmcli connection modify uuid "$uuid" connection.llmnr 0 connection.mdns 0 || return 1
-        case "$type" in
-            802-11-wireless | wifi)
-                nmcli connection modify uuid "$uuid" connection.autoconnect no \
-                    802-11-wireless.cloned-mac-address stable || return 1
-                ;;
-        esac
-    done <<<"$profiles"
-    nmcli general reload conf || return 1
-    core::record 'network: existing Wi-Fi autoconnect disabled; private MAC defaults; LLMNR/mDNS profiles disabled; reconnect required' || return 1
-    core::log 'Reconnect Wi-Fi/Ethernet manually before relying on the new profile settings. Disable autoconnect when adding new conference networks; these defaults cannot enforce that choice.'
+    profiles::apply conference network
 }
 
 controls::apply_services() {
-    local unit load_state unit_state active_state index
-    local -a units=(
-        ssh.service ssh.socket avahi-daemon.service avahi-daemon.socket
-        cups.service cups.socket cups.path cups-browsed.service
-        bluetooth.service smbd.service nmbd.service gnome-remote-desktop.service
-    )
-    local -a targets=() unit_states=() active_states=()
     core::require_root || return 1
     controls::local_console || return 1
-    # Finish discovery before asking for consent or changing any unit. In
-    # particular, socket/path activation partners must appear in the review.
-    for unit in "${units[@]}"; do
-        load_state=$(systemctl show --property=LoadState --value "$unit") || return 1
-        [[ $load_state == not-found ]] && continue
-        if [[ $load_state != loaded && $load_state != masked ]]; then
-            core::die "Cannot safely inspect $unit: unexpected load state. No services were changed."
-            return 1
-        fi
-        unit_state=$(systemctl show --property=UnitFileState --value "$unit") || return 1
-        active_state=$(systemctl show --property=ActiveState --value "$unit") || return 1
-        if [[ ! $unit_state =~ ^[a-z][a-z-]{0,63}$ || ! $active_state =~ ^[a-z][a-z-]{0,63}$ ]]; then
-            core::die "Cannot safely inspect $unit: missing or invalid original state. No services were changed."
-            return 1
-        fi
-        targets+=("$unit")
-        unit_states+=("$unit_state")
-        active_states+=("$active_state")
-    done
-    if ((${#targets[@]} == 0)); then
-        core::log 'No installed sharing services or activation units from the conference policy were found. Nothing to change.'
-        return 0
-    fi
-    core::log 'The following installed units will be stopped and persistently masked. Their current states are:'
-    for index in "${!targets[@]}"; do
-        core::log "  ${targets[index]} enabled=${unit_states[index]} active=${active_states[index]}"
-    done
-    core::log 'Masking prevents these units from being started until they are unmasked. Related printing, Bluetooth and inbound SSH access may stop.'
-    core::log 'Bluetooth keyboards/mice will disconnect if Bluetooth is listed. Use the built-in or a trusted wired keyboard. Per-user sharing is managed separately in Desktop settings.'
-    core::confirm 'Stop and persistently mask exactly the units listed above?' || return 1
-    # Save every approved original before the first policy mutation. Never
-    # rediscover or add targets after consent, even if other units appear.
-    for index in "${!targets[@]}"; do
-        unit=${targets[index]}
-        core::record "service-before: $unit enabled=${unit_states[index]} active=${active_states[index]}" || return 1
-        core::backup "/etc/systemd/system/$unit" || return 1
-    done
-    for unit in "${targets[@]}"; do
-        systemctl mask --now "$unit" || return 1
-    done
-    core::record 'services: installed conference sharing services masked; see service-before entries for recovery' || return 1
+    profiles::apply conference services
 }
 
 controls::apply_sudo() {

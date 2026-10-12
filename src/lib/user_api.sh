@@ -13,6 +13,8 @@ user_api::validate() {
             case "$2" in enable-desktop | disable-desktop | status) return 0 ;; esac
             ;;
         recovery) [[ $# -eq 1 ]] && return 0 ;;
+        status) [[ $# -eq 1 ]] && return 0 ;;
+        updates) [[ $# -eq 2 && $2 == check ]] && return 0 ;;
     esac
     return 1
 }
@@ -26,6 +28,8 @@ user_api::dispatch() {
         'monitor disable-desktop') monitor::disable_desktop ;;
         'monitor status') monitor::status ;;
         'recovery ') cli::recovery ;;
+        'status ') status::read ;;
+        'updates check') updates::check ;;
         *) return 2 ;;
     esac
 }

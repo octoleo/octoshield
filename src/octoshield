@@ -10,11 +10,11 @@ if ((EUID == 0)); then
     export PATH
 fi
 
-readonly OCTOSHIELD_VERSION=1.0.0
+readonly OCTOSHIELD_VERSION=1.1.0
 
 bootstrap::help() {
     cat <<'HELP'
-OctoShield 1.0.0 — Ubuntu laptop protection
+OctoShield 1.1.0 — Ubuntu laptop protection
 
 Usage: octoshield [setup|status|install|backups|--help|--version]
 
@@ -35,6 +35,9 @@ bootstrap::run() (
         src/octoshield src/lib/core.sh src/lib/controls.sh src/lib/usb.sh
         src/lib/desktop.sh src/lib/monitor.sh src/lib/install.sh src/lib/cli.sh
         src/lib/office.sh src/lib/api.sh src/lib/user_api.sh
+        src/lib/profiles.sh src/lib/profile_controls.sh src/lib/profile_cli.sh src/lib/status.sh src/lib/updates.sh
+        src/lib/profile_firewall_verify.sh
+        src/status-daemon systemd/octoshield-status.service
         src/monitor.c src/notify.sh systemd/octoshield-monitor.service
         systemd/octoshield-notify.service README.md LICENSE docs/recovery.md
     )
@@ -91,7 +94,7 @@ octoshield_self=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || octoshield_sel
 octoshield_candidate=${octoshield_self%/*}
 if [[ -n $octoshield_self && -f $octoshield_candidate/lib/core.sh ]]; then
     readonly OCTOSHIELD_ROOT=${octoshield_candidate%/*}
-    for octoshield_module in core controls usb desktop monitor install office cli api user_api; do
+    for octoshield_module in core controls usb desktop monitor install office profiles profile_firewall_verify profile_controls profile_cli status updates cli api user_api; do
         # shellcheck source=/dev/null
         source "$OCTOSHIELD_ROOT/src/lib/$octoshield_module.sh"
     done
