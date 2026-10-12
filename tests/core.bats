@@ -9,6 +9,7 @@ setup() {
     CORE_TRANSACTION=test-transaction
     CORE_PACKAGE_MAINTENANCE="$BATS_TEST_TMPDIR/package-maintenance"
     mkdir -p "$CORE_STATE/backups/$CORE_TRANSACTION/original"
+    chmod 0700 "$CORE_STATE" "$CORE_STATE/backups"
     # Ownership changes are privileged in production; all paths here are fixtures.
     chown() { :; }
 }
@@ -44,6 +45,37 @@ setup() {
     ln -s "$BATS_TEST_TMPDIR/nonexistent" "$CORE_PACKAGE_MAINTENANCE"
     run core::package_available
     [ "$status" -ne 0 ]
+}
+
+@test 'operation refuses linked backup or lock targets before touching their contents' {
+    core::require_root() { :; }
+    local victim="$BATS_TEST_TMPDIR/victim"
+    printf 'keep\n' >"$victim"
+    ln -s "$victim" "$CORE_STATE/lock"
+    run core::begin unsafe-lock
+    [ "$status" -ne 0 ]
+    [ "$(cat "$victim")" = keep ]
+    rm "$CORE_STATE/lock"
+    mv "$CORE_STATE/backups" "$CORE_STATE/original-backups"
+    ln -s "$CORE_STATE/original-backups" "$CORE_STATE/backups"
+    run core::begin unsafe-backups
+    [ "$status" -ne 0 ]
+    [ ! -e "$CORE_STATE/lock" ]
+}
+
+@test 'operation refuses shared locks and nonprivate state' {
+    core::require_root() { :; }
+    printf 'keep\n' >"$BATS_TEST_TMPDIR/victim"
+    chmod 0600 "$BATS_TEST_TMPDIR/victim"
+    ln "$BATS_TEST_TMPDIR/victim" "$CORE_STATE/lock"
+    run core::begin shared-lock
+    [ "$status" -ne 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/victim")" = keep ]
+    rm "$CORE_STATE/lock"
+    chmod 0777 "$CORE_STATE"
+    run core::begin unsafe-directory
+    [ "$status" -ne 0 ]
+    [ ! -e "$CORE_STATE/lock" ]
 }
 
 @test 'modules have no side effects when sourced' {

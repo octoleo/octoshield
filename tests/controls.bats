@@ -84,41 +84,6 @@ setup() {
     [ "$(cat "$CALLS")" = root ]
 }
 
-@test 'declining firewall reset performs no mutations' {
-    FAIL=confirm
-    run controls::apply_firewall
-    [ "$status" -ne 0 ]
-    run grep -Eq '^(install|backup|write|ufw --force)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'firewall backs up before reset and configures both address families' {
-    run controls::apply_firewall
-    [ "$status" -eq 0 ]
-    [ "$(grep '^\(backup\|ufw --force\)' "$CALLS")" = $'backup /etc/ufw\nbackup /etc/default/ufw\nufw --force reset\nufw --force enable' ]
-    grep -Fx 'IPV6=yes' "$WRITES/etc/default/ufw"
-    grep -Fx 'ufw default deny incoming' "$CALLS"
-    grep -Fx 'ufw default allow outgoing' "$CALLS"
-    grep -Fx 'ufw default deny routed' "$CALLS"
-    grep -Fx 'ufw logging low' "$CALLS"
-}
-
-@test 'failed backup prevents firewall reset' {
-    FAIL='backup /etc/ufw'
-    run controls::apply_firewall
-    [ "$status" -ne 0 ]
-    run grep -q '^ufw --force reset$' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'failed firewall rule never reports success or proceeds to enable' {
-    FAIL='ufw default deny routed'
-    run controls::apply_firewall
-    [ "$status" -ne 0 ]
-    run grep -Eq '^(ufw --force enable|record firewall)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
 @test 'UFW defaults transform preserves unrelated settings and removes duplicate IPv6 assignments' {
     source "$BATS_TEST_DIRNAME/../src/lib/controls.sh"
     printf '%s\n' '# test' 'IPV6=no' 'MANAGE_BUILTINS=no' '  IPV6 =no' >"$BATS_TEST_TMPDIR/ufw"
@@ -135,156 +100,6 @@ setup() {
     [ "$output" = $'MANAGE_BUILTINS=no\nIPV6=yes' ]
     run controls::ufw_defaults "$BATS_TEST_TMPDIR/missing"
     [ "$status" -ne 0 ]
-}
-
-@test 'network control addresses UUIDs, disables only Wi-Fi autoconnect, and never disconnects' {
-    run controls::apply_network
-    [ "$status" -eq 0 ]
-    grep -Fx 'nmcli connection modify uuid 11111111-1111-1111-1111-111111111111 connection.autoconnect no 802-11-wireless.cloned-mac-address stable' "$CALLS"
-    run grep -E '22222222.*autoconnect' "$CALLS"
-    [ "$status" -eq 1 ]
-    run grep -E '^nmcli (networking|connection (up|down))' "$CALLS"
-    [ "$status" -eq 1 ]
-    grep -Fx 'wifi.scan-rand-mac-address=yes' "$WRITES/etc/NetworkManager/conf.d/90-octoshield.conf"
-    run grep -q ipv6 "$WRITES/etc/NetworkManager/conf.d/90-octoshield.conf"
-    [ "$status" -eq 1 ]
-}
-
-@test 'network control rejects malformed UUIDs without using them in commands' {
-    PROFILES='--hostile:802-11-wireless'
-    run controls::apply_network
-    [ "$status" -ne 0 ]
-    run grep -q '^nmcli connection modify' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'network enumeration failure does not create partial configuration' {
-    FAIL='nmcli --terse --fields UUID,TYPE connection show'
-    run controls::apply_network
-    [ "$status" -ne 0 ]
-    run grep -q '^write' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'network mutation failure propagates and prevents success record' {
-    FAIL='nmcli connection modify uuid 11111111-1111-1111-1111-111111111111 connection.llmnr 0 connection.mdns 0'
-    run controls::apply_network
-    [ "$status" -ne 0 ]
-    run grep -Eq '^(nmcli general reload|record network)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'network profile backup failure prevents persistent changes' {
-    FAIL='backup /run/NetworkManager/system-connections'
-    run controls::apply_network
-    [ "$status" -ne 0 ]
-    run grep -Eq '^(write|nmcli connection modify)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'service control records original state and masks only installed units' {
-    run controls::apply_services
-    [ "$status" -eq 0 ]
-    grep -Fx 'record service-before: ssh.service enabled=enabled active=active' "$CALLS"
-    [ "$(grep '^systemctl mask' "$CALLS")" = 'systemctl mask --now ssh.service' ]
-    grep -Fx 'backup /etc/systemd/system/ssh.service' "$CALLS"
-}
-
-@test 'service review lists all installed service socket and path targets before confirmation' {
-    SERVICE_UNITS='ssh.service ssh.socket avahi-daemon.service avahi-daemon.socket cups.service cups.socket cups.path'
-    core::log() { fake log "$@"; }
-    run controls::apply_services
-    [ "$status" -eq 0 ]
-    local unit
-    for unit in $SERVICE_UNITS; do
-        grep -Fx "log   $unit enabled=enabled active=active" "$CALLS"
-        grep -Fx "record service-before: $unit enabled=enabled active=active" "$CALLS"
-        grep -Fx "systemctl mask --now $unit" "$CALLS"
-    done
-    [ "$(grep -c '^systemctl mask' "$CALLS")" -eq 7 ]
-    # The complete state inspection and review precede consent. Every backup
-    # is complete before the first stop/mask, rather than interleaved with it.
-    awk '
-        /^confirm$/ { consent = 1 }
-        /^systemctl show / || /^log   / { if (consent) exit 1 }
-        /^backup / { if (!consent || mutated) exit 1; backups++ }
-        /^systemctl mask / { if (!consent || backups != 7) exit 1; mutated = 1 }
-        END { if (!consent || !mutated) exit 1 }
-    ' "$CALLS"
-}
-
-@test 'declining the exact service review performs no backup record or mutation' {
-    SERVICE_UNITS='ssh.service ssh.socket cups.path'
-    FAIL=confirm
-    run controls::apply_services
-    [ "$status" -ne 0 ]
-    [[ $output == *'ssh.socket enabled=enabled active=active'* ]]
-    [[ $output == *'cups.path enabled=enabled active=active'* ]]
-    [ "$(tail -n 1 "$CALLS")" = confirm ]
-    run grep -E '^(backup|record|systemctl mask)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'a late service preflight failure prevents consent and all mutations' {
-    SERVICE_UNITS='ssh.service ssh.socket cups.service cups.socket cups.path'
-    FAIL='systemctl show --property=ActiveState --value cups.path'
-    run controls::apply_services
-    [ "$status" -ne 0 ]
-    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'service discovery rejects an incomplete original state before consent' {
-    systemctl() {
-        fake systemctl "$@" || return 1
-        case "$*" in
-            'show --property=LoadState --value ssh.service') printf 'loaded\n' ;;
-            'show --property=UnitFileState --value ssh.service') printf '\n' ;;
-            'show --property=ActiveState --value ssh.service') printf 'active\n' ;;
-        esac
-    }
-    run controls::apply_services
-    [ "$status" -ne 0 ]
-    [[ $output == *'missing or invalid original state'* ]]
-    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'service control does not add newly available units after consent' {
-    core::confirm() {
-        fake confirm || return 1
-        SERVICE_UNITS+=' bluetooth.service'
-    }
-    run controls::apply_services
-    [ "$status" -eq 0 ]
-    [ "$(grep '^systemctl mask' "$CALLS")" = 'systemctl mask --now ssh.service' ]
-    awk '/^confirm$/ { consent = 1 } /^systemctl show / { if (consent) exit 1 }' "$CALLS"
-}
-
-@test 'service control has no mutation or consent when no policy targets are installed' {
-    SERVICE_UNITS=''
-    run controls::apply_services
-    [ "$status" -eq 0 ]
-    [[ $output == *'Nothing to change.'* ]]
-    run grep -E '^(confirm|backup|record|systemctl mask)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'a later service backup failure prevents every stop and mask' {
-    SERVICE_UNITS='ssh.service ssh.socket'
-    FAIL='backup /etc/systemd/system/ssh.socket'
-    run controls::apply_services
-    [ "$status" -ne 0 ]
-    run grep -E '^(systemctl mask|record services:)' "$CALLS"
-    [ "$status" -eq 1 ]
-}
-
-@test 'service masking failure is never recorded as success' {
-    FAIL='systemctl mask --now ssh.service'
-    run controls::apply_services
-    [ "$status" -ne 0 ]
-    run grep -q '^record services:' "$CALLS"
-    [ "$status" -eq 1 ]
 }
 
 @test 'sudo configuration is syntax checked and uses a sudoers-compatible filename and mode' {
@@ -342,7 +157,7 @@ setup() {
 
 @test 'all package installation failures stop their security control' {
     local control package
-    for control in firewall sudo updates apparmor; do
+    for control in sudo updates apparmor; do
         case "$control" in
             firewall) package=ufw ;;
             sudo) package=sudo ;;
@@ -355,5 +170,24 @@ setup() {
         [ "$status" -ne 0 ]
         run grep -Eq '^(write|backup|record|systemctl)' "$CALLS"
         [ "$status" -eq 1 ]
+    done
+}
+
+@test 'legacy firewall network and service commands use reversible Conference profiles' {
+    profiles::apply() { fake profile "$@"; }
+    for control in firewall network services; do
+        run "controls::apply_$control"
+        [ "$status" -eq 0 ]
+        grep -Fx "profile conference $control" "$CALLS"
+    done
+    run grep -E '^ufw|^nmcli|^systemctl' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'legacy commands propagate profile engine failure' {
+    profiles::apply() { return 7; }
+    for control in firewall network services; do
+        run "controls::apply_$control"
+        [ "$status" -eq 7 ]
     done
 }

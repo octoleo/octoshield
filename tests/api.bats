@@ -8,6 +8,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/usb.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/office.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/profiles.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/cli.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/api.sh"
     CORE_STATE="$BATS_TEST_TMPDIR/state"
@@ -49,6 +50,30 @@ setup() {
     [ "$status" -eq 2 ]
     [ ! -s "$TEST_CALLS" ]
     jq -e -s 'length == 2 and .[-1] == {type:"done",success:false}' <<<"$output"
+}
+
+@test 'profile helper validates every structured field before any mutation' {
+    run api::main profile rule-add conference 443 tcp any 'wlan0;id' 30
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
+    run api::main profile set conference arbitrary.key true
+    [ "$status" -eq 2 ]
+    run api::main profile apply conference arbitrary-control
+    [ "$status" -eq 2 ]
+    run api::main usb enroll '../../etc'
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
+}
+
+@test 'profile reads do not begin transactions while changes do' {
+    profiles::dispatch() { printf '%s\n' "$*"; }
+    run api::main profile list
+    [ "$status" -eq 0 ]
+    [ ! -s "$TEST_CALLS" ]
+    run api::main profile apply office firewall
+    [ "$status" -eq 0 ]
+    grep -Fx 'begin GUI profile apply office firewall' "$TEST_CALLS"
+    grep -Fx 'record COMPLETE' "$TEST_CALLS"
 }
 
 @test 'argument allowlist rejects flags, selectors and arbitrary paths' {

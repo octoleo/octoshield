@@ -6,6 +6,7 @@
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/office.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/profiles.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/cli.sh"
     core::require_local() { :; }
     core::supported_os() { :; }
@@ -20,6 +21,50 @@ setup() {
     run cli::main --help
     [ "$status" -eq 0 ]
     [[ $output == *'usb allow ID'* && $output == *'monitor status'* && $output == *'office'* ]]
+}
+
+@test 'profile commands pass exact validated arguments through the shared boundary' {
+    run cli::main profile apply office usb
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <profile> <apply> <office> <usb>' ]
+    run cli::main profile rule-add conference 443 tcp 192.0.2.0/24 wlan0 30
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <profile> <rule-add> <conference> <443> <tcp> <192.0.2.0/24> <wlan0> <30>' ]
+    run cli::main profile apply '../../etc' usb
+    [ "$status" -eq 2 ]
+    [[ $output != *SYSTEM* ]]
+    run cli::main profile set office services.printing enabled
+    [ "$status" -eq 0 ]
+}
+
+@test 'status JSON never escalates and preserves unavailable status failure' {
+    status::read() { printf '{"schema":1}\n'; }
+    run cli::main status --json
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"schema":1}' ]
+    status::read() { return 8; }
+    run cli::main status --json
+    [ "$status" -eq 8 ]
+}
+
+@test 'update discovery remains a user action without privileged dispatch' {
+    updates::show() { printf 'updates checked\n'; }
+    run cli::main updates check
+    [ "$status" -eq 0 ]
+    [ "$output" = 'updates checked' ]
+    run cli::main updates install
+    [ "$status" -eq 2 ]
+}
+
+@test 'profile USB enrollment and forgetting retain bounded arguments' {
+    run cli::main usb enroll office
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <usb> <enroll> <office>' ]
+    run cli::main usb forget 7
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <usb> <forget> <7>' ]
+    run cli::main usb enroll '../escape'
+    [ "$status" -eq 2 ]
 }
 
 @test 'unknown commands and extra arguments are rejected' {

@@ -14,14 +14,16 @@ api::validate() {
             ;;
         usb)
             case "${2-}" in
-                list) [[ $# -eq 2 ]] && return 0 ;;
+                list | devices) [[ $# -eq 2 ]] && return 0 ;;
+                enroll) [[ $# -eq 3 ]] && profiles::valid_name "$3" && return 0 ;;
                 allow)
                     [[ $# -eq 3 || ($# -eq 4 && $4 == --permanent) ]] || return 1
                     usb::_validate_id "$3" >/dev/null 2>&1 && return 0
                     ;;
-                block) [[ $# -eq 3 ]] && usb::_validate_id "$3" >/dev/null 2>&1 && return 0 ;;
+                block | forget) [[ $# -eq 3 ]] && usb::_validate_id "$3" >/dev/null 2>&1 && return 0 ;;
             esac
             ;;
+        profile) profiles::validate "${@:2}" && return 0 ;;
         office)
             case "${2-}" in
                 firewall) [[ $# -eq 4 ]] && office::valid_port "$3" && office::valid_subnet "$4" && return 0 ;;
@@ -29,7 +31,7 @@ api::validate() {
                 service) [[ $# -eq 3 ]] && office::valid_service "$3" && return 0 ;;
             esac
             ;;
-        backups | status) [[ $# -eq 1 ]] && return 0 ;;
+        backups | status | inspect) [[ $# -eq 1 ]] && return 0 ;;
         backup-show) [[ $# -eq 2 ]] && api::valid_backup_id "$2" && return 0 ;;
         monitor)
             [[ $# -eq 2 ]] || return 1
@@ -41,7 +43,8 @@ api::validate() {
 
 api::mutates() {
     case "$1 ${2-}" in
-        'apply '* | 'office '* | 'usb allow' | 'usb block' | 'monitor disable') return 0 ;;
+        'profile '*) profiles::mutates "${@:2}" ;;
+        'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'monitor disable') return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -99,14 +102,34 @@ api::backup_show() {
     head -c 262144 -- "$file" || return 1
 }
 
+api::inspect() (
+    if declare -F status::refresh >/dev/null; then
+        core::package_available || return 1
+        if [[ -e $CORE_STATE/lock || -L $CORE_STATE/lock ]]; then
+            core::private_directory "$CORE_STATE" && core::safe_lock "$CORE_STATE/lock" || return 1
+            exec 8<"$CORE_STATE/lock" || return 1
+            flock --shared --nonblock 8 || {
+                core::die 'Another OctoShield operation is still running.'
+                return 1
+            }
+        fi
+        status::refresh || return 1
+    fi
+    cli::status
+)
+
 api::dispatch() {
     case "$1" in
         apply) "${CLI_CONTROLS[$2]}" ;;
+        profile) profiles::dispatch "${@:2}" ;;
         usb)
             case "$2" in
                 list) usb::list ;;
+                devices) usb::devices_json ;;
+                enroll) usb::profile_enroll "$3" ;;
                 allow) usb::allow "${@:3}" ;;
                 block) usb::block "$3" ;;
+                forget) usb::forget "$3" ;;
             esac
             ;;
         office)
@@ -118,7 +141,7 @@ api::dispatch() {
             ;;
         backups) core::backups ;;
         backup-show) api::backup_show "$2" ;;
-        status) cli::status ;;
+        status | inspect) api::inspect ;;
         monitor)
             case "$2" in
                 status) monitor::status ;;
@@ -138,6 +161,11 @@ api::operation() {
         core::begin "GUI $*" || return 1
     fi
     api::dispatch "$@" || result=$?
+    # The background reader cannot take a coherent snapshot during a mutation.
+    # Refresh synchronously under our existing operation lock before completion.
+    if api::mutates "$@" && declare -F status::refresh >/dev/null; then
+        status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+    fi
     if api::mutates "$@"; then
         if ((result == 0)); then
             core::record 'COMPLETE' || result=1

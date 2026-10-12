@@ -21,6 +21,14 @@ setup() {
     [ "$status" -ne 0 ]
     run user_api::validate recovery /etc/shadow
     [ "$status" -ne 0 ]
+    run user_api::validate updates check
+    [ "$status" -eq 0 ]
+    run user_api::validate updates check https://example.com
+    [ "$status" -ne 0 ]
+    run user_api::validate status
+    [ "$status" -eq 0 ]
+    run user_api::validate profile apply office
+    [ "$status" -ne 0 ]
 }
 
 @test 'user API rejects root without dispatching operations' {
