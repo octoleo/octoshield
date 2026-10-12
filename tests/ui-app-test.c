@@ -139,6 +139,83 @@ static void test_accounts_entry(void)
     g_assert_null(accounts_argv[3]);
 }
 
+static void test_brand_resources_and_theme(void)
+{
+    /* These digests belong to the original user-supplied files. Embedded
+     * artwork must retain those exact bytes; scaling happens only in GTK. */
+    static const char *const resources[][2] = {
+        {BRAND_RESOURCE_LIGHT, "3bd6dd86d7e14f37e9150c3f3d344a714966967da8859a5245fdcf05e0ba1604"},
+        {BRAND_RESOURCE_DARK, "ef650804aea968b660c0d27e05d63307caa13470fd9bd7120f4ed71022abbf3e"}
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(resources); i++) {
+        g_autoptr(GError) error = NULL;
+        g_autoptr(GBytes) bytes = g_resources_lookup_data(resources[i][0], G_RESOURCE_LOOKUP_FLAGS_NONE, &error);
+        g_assert_no_error(error);
+        g_assert_nonnull(bytes);
+        g_autofree gchar *checksum = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, bytes);
+        g_assert_cmpstr(checksum, ==, resources[i][1]);
+    }
+    g_assert_cmpuint(test_app.brand_pictures->len, ==, 2);
+    g_assert_cmpint(adw_style_manager_get_color_scheme(test_app.style_manager), ==, ADW_COLOR_SCHEME_DEFAULT);
+    adw_style_manager_set_color_scheme(test_app.style_manager, ADW_COLOR_SCHEME_FORCE_LIGHT);
+    g_assert_false(adw_style_manager_get_dark(test_app.style_manager));
+    g_autoptr(GPtrArray) light_pictures = g_ptr_array_new_with_free_func(g_object_unref);
+    for (guint i = 0; i < test_app.brand_pictures->len; i++) {
+        GtkPicture *picture = g_ptr_array_index(test_app.brand_pictures, i);
+        GdkPaintable *paintable = gtk_picture_get_paintable(picture);
+        g_assert_nonnull(paintable);
+        g_assert_cmpint(gdk_paintable_get_intrinsic_width(paintable), >, 0);
+        g_ptr_array_add(light_pictures, g_object_ref(paintable));
+    }
+    adw_style_manager_set_color_scheme(test_app.style_manager, ADW_COLOR_SCHEME_FORCE_DARK);
+    g_assert_true(adw_style_manager_get_dark(test_app.style_manager));
+    for (guint i = 0; i < test_app.brand_pictures->len; i++) {
+        GtkPicture *picture = g_ptr_array_index(test_app.brand_pictures, i);
+        GdkPaintable *paintable = gtk_picture_get_paintable(picture);
+        g_assert_nonnull(paintable);
+        g_assert_true(paintable != g_ptr_array_index(light_pictures, i));
+    }
+    adw_style_manager_set_color_scheme(test_app.style_manager, ADW_COLOR_SCHEME_DEFAULT);
+}
+
+static void test_about_identity(void)
+{
+    GtkWidget *about = about_window(&test_app);
+    g_assert_cmpstr(adw_about_window_get_application_name(ADW_ABOUT_WINDOW(about)), ==, "OctoShield");
+    g_assert_cmpstr(adw_about_window_get_application_icon(ADW_ABOUT_WINDOW(about)), ==, "io.vdm.OctoShield");
+    g_assert_cmpstr(adw_about_window_get_developer_name(ADW_ABOUT_WINDOW(about)), ==, "Vast Development Method");
+    g_assert_cmpstr(adw_about_window_get_website(ADW_ABOUT_WINDOW(about)), ==, "https://www.vdm.io");
+    g_assert_cmpstr(adw_about_window_get_version(ADW_ABOUT_WINDOW(about)), ==, OCTOSHIELD_VERSION);
+    g_assert_nonnull(strstr(adw_about_window_get_comments(ADW_ABOUT_WINDOW(about)), "Octoleo"));
+    gtk_window_destroy(GTK_WINDOW(about));
+}
+
+static void test_page_screenshots(void)
+{
+    /* Capture the real initial pages before any fixture process runs. We do
+     * not invent inspection output, a protected state, or a device inventory. */
+    g_assert_null(test_app.operation);
+    g_autofree gchar *initial_log = log_text();
+    g_assert_nonnull(strstr(initial_log, "No protection has been applied"));
+    static const char *const pages[] = {"overview", "protections", "usb", "office", "monitoring", "recovery"};
+    static const AdwColorScheme schemes[] = {ADW_COLOR_SCHEME_FORCE_LIGHT, ADW_COLOR_SCHEME_FORCE_DARK};
+    static const char *const labels[] = {"light", "dark"};
+    if (g_getenv("OCTOSHIELD_TEST_SCREENSHOTS") != NULL)
+        g_assert_cmpint(g_mkdir_with_parents("build/screenshots", 0755), ==, 0);
+    for (gsize theme = 0; theme < G_N_ELEMENTS(schemes); theme++) {
+        adw_style_manager_set_color_scheme(test_app.style_manager, schemes[theme]);
+        for (gsize i = 0; i < G_N_ELEMENTS(pages); i++) {
+            GtkListBoxRow *row = gtk_list_box_get_row_at_index(test_app.navigation, (int)i);
+            gtk_list_box_select_row(test_app.navigation, row);
+            g_assert_cmpstr(gtk_stack_get_visible_child_name(test_app.pages), ==, pages[i]);
+            g_autofree gchar *path = g_strdup_printf("build/screenshots/OctoShield-%s-%s.png", pages[i], labels[theme]);
+            save_widget_png(GTK_WIDGET(test_app.window), path);
+        }
+    }
+    gtk_list_box_select_row(test_app.navigation, gtk_list_box_get_row_at_index(test_app.navigation, 0));
+    adw_style_manager_set_color_scheme(test_app.style_manager, ADW_COLOR_SCHEME_DEFAULT);
+}
+
 static void test_icon_decoding(void)
 {
     /* Theme lookup alone can succeed without an SVG loader, while GTK renders
@@ -149,7 +226,7 @@ static void test_icon_decoding(void)
     static const char *const names[] = {
         "dialog-information-symbolic", "dialog-password-symbolic",
         "document-open-recent-symbolic", "drive-removable-media-symbolic",
-        "edit-undo-symbolic", "help-browser-symbolic",
+        "edit-undo-symbolic", "help-browser-symbolic", "help-about-symbolic",
         "media-playback-stop-symbolic", "network-wireless-symbolic",
         "network-workgroup-symbolic", "network-transmit-receive-symbolic",
         "notifications-disabled-symbolic", "preferences-system-notifications-symbolic",
@@ -233,19 +310,23 @@ int main(int argc, char **argv)
     test_executable = g_canonicalize_filename(argv[0], NULL);
     g_test_init(&argc, &argv, NULL);
     adw_init();
-    test_app.application = adw_application_new("org.octoleo.OctoShield.Test", G_APPLICATION_NON_UNIQUE);
+    test_app.application = adw_application_new(OCTOSHIELD_APPLICATION_ID ".Test", G_APPLICATION_NON_UNIQUE);
     g_autoptr(GError) error = NULL;
     g_assert_true(g_application_register(G_APPLICATION(test_app.application), NULL, &error));
     activate(G_APPLICATION(test_app.application), &test_app);
     g_test_add_func("/ui/window/all-pages", test_window);
     g_test_add_func("/ui/window/accounts-panel-entry", test_accounts_entry);
     g_test_add_func("/ui/window/icons-decode-with-installed-loaders", test_icon_decoding);
+    g_test_add_func("/ui/window/unchanged-brand-assets-follow-theme", test_brand_resources_and_theme);
+    g_test_add_func("/ui/window/about-identity", test_about_identity);
+    g_test_add_func("/ui/window/screenshots-real-pages-light-and-dark", test_page_screenshots);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);
     g_test_add_func("/ui/process/bounded-oversized-event", test_oversize);
     g_test_add_func("/ui/process/correlated-prompts-and-visible-review", test_confirmations);
     int result = g_test_run();
+    branding_clear(&test_app);
     gtk_window_destroy(test_app.window);
     g_ptr_array_unref(test_app.operation_widgets);
     g_object_unref(test_app.application);

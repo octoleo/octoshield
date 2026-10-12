@@ -3,10 +3,10 @@
   "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <policyconfig>
-  <vendor>OctoLeo</vendor>
-  <vendor_url>https://github.com/octoleo/octoshield</vendor_url>
-  <icon_name>org.octoleo.OctoShield</icon_name>
-  <action id="org.octoleo.octoshield.admin">
+  <vendor>Vast Development Method</vendor>
+  <vendor_url>https://www.vdm.io</vendor_url>
+  <icon_name>io.vdm.OctoShield</icon_name>
+  <action id="io.vdm.OctoShield.admin">
     <description>Change an OctoShield security setting</description>
     <message>Authentication is required to apply this OctoShield security change.</message>
     <defaults>

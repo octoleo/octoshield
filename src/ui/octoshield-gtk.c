@@ -28,6 +28,9 @@
 #define MAX_PROTOCOL_LINE (64U * 1024U)
 #define MAX_LOG_CHARACTERS 180000
 #define MAX_REVIEW_BYTES (256U * 1024U)
+#define OCTOSHIELD_APPLICATION_ID "io.vdm.OctoShield"
+#define BRAND_RESOURCE_DARK "/io/vdm/OctoShield/branding/OctoShield-dark.png"
+#define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
 #define OCTOSHIELD_VERSION "0.2.0"
@@ -35,6 +38,66 @@
 
 typedef struct App App;
 typedef struct Operation Operation;
+
+/* A fixed-size native image container controls layout without creating resized
+ * bitmap assets. GtkPicture scales the original embedded PNG for the display. */
+typedef struct {
+    GtkWidget parent_instance;
+    GtkWidget *picture;
+    int width;
+    int height;
+} OctoshieldBrand;
+
+typedef GtkWidgetClass OctoshieldBrandClass;
+G_DEFINE_TYPE(OctoshieldBrand, octoshield_brand, GTK_TYPE_WIDGET)
+
+static void octoshield_brand_measure(GtkWidget *widget, GtkOrientation orientation,
+                                     int for_size, int *minimum, int *natural,
+                                     int *minimum_baseline, int *natural_baseline)
+{
+    (void)for_size;
+    OctoshieldBrand *brand = (OctoshieldBrand *)widget;
+    *minimum = *natural = orientation == GTK_ORIENTATION_HORIZONTAL ? brand->width : brand->height;
+    *minimum_baseline = *natural_baseline = -1;
+}
+
+static void octoshield_brand_size_allocate(GtkWidget *widget, int width, int height, int baseline)
+{
+    OctoshieldBrand *brand = (OctoshieldBrand *)widget;
+    gtk_widget_allocate(brand->picture, width, height, baseline, NULL);
+}
+
+static void octoshield_brand_snapshot(GtkWidget *widget, GtkSnapshot *snapshot)
+{
+    OctoshieldBrand *brand = (OctoshieldBrand *)widget;
+    gtk_widget_snapshot_child(widget, brand->picture, snapshot);
+}
+
+static void octoshield_brand_dispose(GObject *object)
+{
+    OctoshieldBrand *brand = (OctoshieldBrand *)object;
+    g_clear_pointer(&brand->picture, gtk_widget_unparent);
+    G_OBJECT_CLASS(octoshield_brand_parent_class)->dispose(object);
+}
+
+static void octoshield_brand_class_init(OctoshieldBrandClass *class)
+{
+    GtkWidgetClass *widget_class = GTK_WIDGET_CLASS(class);
+    widget_class->measure = octoshield_brand_measure;
+    widget_class->size_allocate = octoshield_brand_size_allocate;
+    widget_class->snapshot = octoshield_brand_snapshot;
+    gtk_widget_class_set_accessible_role(widget_class, GTK_ACCESSIBLE_ROLE_PRESENTATION);
+    G_OBJECT_CLASS(class)->dispose = octoshield_brand_dispose;
+}
+
+static void octoshield_brand_init(OctoshieldBrand *brand)
+{
+    brand->picture = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(brand->picture), GTK_CONTENT_FIT_CONTAIN);
+    gtk_picture_set_can_shrink(GTK_PICTURE(brand->picture), TRUE);
+    gtk_picture_set_alternative_text(GTK_PICTURE(brand->picture), "OctoShield lion and shield");
+    gtk_widget_set_parent(brand->picture, GTK_WIDGET(brand));
+}
 
 typedef struct {
     const char *id;
@@ -143,6 +206,10 @@ struct App {
     GtkWindow *window;
     AdwToastOverlay *toasts;
     GtkStack *pages;
+    GtkListBox *navigation;
+    AdwStyleManager *style_manager;
+    GPtrArray *brand_pictures;
+    gulong theme_handler;
     GtkTextBuffer *log;
     GtkTextView *log_view;
     GtkExpander *details;
@@ -160,6 +227,41 @@ static void operation_maybe_finish(Operation *operation);
 static void update_actions(App *app);
 static void read_next(Reader *reader);
 static void show_confirmation(Operation *operation, guint64 id, const char *text);
+
+static const char *brand_resource(App *app)
+{
+    return adw_style_manager_get_dark(app->style_manager) ? BRAND_RESOURCE_DARK : BRAND_RESOURCE_LIGHT;
+}
+
+static void branding_changed(AdwStyleManager *manager, GParamSpec *property, gpointer data)
+{
+    (void)manager;
+    (void)property;
+    App *app = data;
+    for (guint i = 0; i < app->brand_pictures->len; i++)
+        gtk_picture_set_resource(g_ptr_array_index(app->brand_pictures, i), brand_resource(app));
+}
+
+static GtkWidget *brand_widget(App *app, int width, int height)
+{
+    OctoshieldBrand *brand = g_object_new(octoshield_brand_get_type(), NULL);
+    brand->width = width;
+    brand->height = height;
+    gtk_widget_set_halign(GTK_WIDGET(brand), GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(GTK_WIDGET(brand), GTK_ALIGN_CENTER);
+    gtk_picture_set_resource(GTK_PICTURE(brand->picture), brand_resource(app));
+    g_ptr_array_add(app->brand_pictures, brand->picture);
+    return GTK_WIDGET(brand);
+}
+
+static void branding_clear(App *app)
+{
+    if (app->theme_handler != 0) {
+        g_signal_handler_disconnect(app->style_manager, app->theme_handler);
+        app->theme_handler = 0;
+    }
+    g_clear_pointer(&app->brand_pictures, g_ptr_array_unref);
+}
 
 static const Action *find_action(const char *id)
 {
@@ -800,15 +902,37 @@ static void accounts_clicked(GtkButton *button, gpointer data)
         g_subprocess_wait_async(process, NULL, accounts_waited, NULL);
 }
 
+static GtkWidget *about_window(App *app)
+{
+    static const char *developers[] = {"Vast Development Method", NULL};
+    GtkWidget *about = adw_about_window_new();
+    gtk_window_set_transient_for(GTK_WINDOW(about), app->window);
+    gtk_window_set_modal(GTK_WINDOW(about), TRUE);
+    adw_about_window_set_application_name(ADW_ABOUT_WINDOW(about), "OctoShield");
+    adw_about_window_set_application_icon(ADW_ABOUT_WINDOW(about), OCTOSHIELD_APPLICATION_ID);
+    adw_about_window_set_developer_name(ADW_ABOUT_WINDOW(about), "Vast Development Method");
+    adw_about_window_set_developers(ADW_ABOUT_WINDOW(about), developers);
+    adw_about_window_set_version(ADW_ABOUT_WINDOW(about), OCTOSHIELD_VERSION);
+    adw_about_window_set_website(ADW_ABOUT_WINDOW(about), "https://www.vdm.io");
+    adw_about_window_set_comments(ADW_ABOUT_WINDOW(about), "Laptop protection for Ubuntu and GNOME.\nPart of the Octoleo suite.");
+    adw_about_window_set_license_type(ADW_ABOUT_WINDOW(about), GTK_LICENSE_APACHE_2_0);
+    adw_about_window_set_copyright(ADW_ABOUT_WINDOW(about), "© 2026 Vast Development Method");
+    return about;
+}
+
+static void about_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    gtk_window_present(GTK_WINDOW(about_window(data)));
+}
+
 static void build_overview(App *app)
 {
     GtkWidget *page = page_new(app, "overview", "A prepared laptop. A clearer picture.",
                                "Review your protections before the conference, then adjust individual controls when you return to the office.");
     GtkWidget *hero = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 18);
     gtk_widget_add_css_class(hero, "shield-hero");
-    GtkWidget *icon = gtk_image_new_from_icon_name("security-high-symbolic");
-    gtk_image_set_pixel_size(GTK_IMAGE(icon), 52);
-    gtk_box_append(GTK_BOX(hero), icon);
+    gtk_box_append(GTK_BOX(hero), brand_widget(app, 104, 120));
     GtkWidget *copy = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
     gtk_widget_set_hexpand(copy, TRUE);
     gtk_box_append(GTK_BOX(copy), text_label("Start with an inspection", "title-2"));
@@ -923,16 +1047,17 @@ static void navigation_selected(GtkListBox *list, GtkListBoxRow *row, gpointer d
 static GtkWidget *build_sidebar(App *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_size_request(box, 190, -1);
+    gtk_widget_set_size_request(box, 208, -1);
     gtk_widget_add_css_class(box, "shield-sidebar");
     GtkWidget *brand = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_set_margin_start(brand, 18);
     gtk_widget_set_margin_top(brand, 22);
     gtk_widget_set_margin_bottom(brand, 15);
-    gtk_box_append(GTK_BOX(brand), gtk_image_new_from_icon_name("security-high-symbolic"));
+    gtk_box_append(GTK_BOX(brand), brand_widget(app, 40, 46));
     gtk_box_append(GTK_BOX(brand), text_label("OctoShield", "title-3"));
     gtk_box_append(GTK_BOX(box), brand);
     GtkWidget *list = gtk_list_box_new();
+    app->navigation = GTK_LIST_BOX(list);
     gtk_widget_add_css_class(list, "navigation-sidebar");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
     static const char *const navigation[][3] = {
@@ -961,7 +1086,7 @@ static GtkWidget *build_sidebar(App *app)
     GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_vexpand(spacer, TRUE);
     gtk_box_append(GTK_BOX(box), spacer);
-    GtkWidget *footer = text_label("OCTOLEO SUITE\nRuns as your desktop user", "dim-label");
+    GtkWidget *footer = text_label("Octoleo suite\nVast Development Method", "dim-label");
     gtk_widget_set_margin_start(footer, 18);
     gtk_widget_set_margin_end(footer, 14);
     gtk_widget_set_margin_bottom(footer, 22);
@@ -1074,6 +1199,10 @@ static void activate(GApplication *application, gpointer data)
     gtk_widget_set_size_request(GTK_WIDGET(app->window), 820, 600);
     g_signal_connect(app->window, "close-request", G_CALLBACK(window_close_requested), app);
     app->operation_widgets = g_ptr_array_new();
+    app->brand_pictures = g_ptr_array_new();
+    app->style_manager = adw_style_manager_get_default();
+    adw_style_manager_set_color_scheme(app->style_manager, ADW_COLOR_SCHEME_DEFAULT);
+    app->theme_handler = g_signal_connect(app->style_manager, "notify::dark", G_CALLBACK(branding_changed), app);
     app->pages = GTK_STACK(gtk_stack_new());
     gtk_stack_set_transition_type(app->pages, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(app->pages, 130);
@@ -1082,7 +1211,12 @@ static void activate(GApplication *application, gpointer data)
     app->toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *header = adw_header_bar_new();
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), adw_window_title_new("OctoShield", "Laptop protection · OctoLeo"));
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), adw_window_title_new("OctoShield", "Laptop protection · Octoleo"));
+    GtkWidget *about = gtk_button_new_from_icon_name("help-about-symbolic");
+    gtk_widget_set_tooltip_text(about, "About OctoShield");
+    gtk_accessible_update_property(GTK_ACCESSIBLE(about), GTK_ACCESSIBLE_PROPERTY_LABEL, "About OctoShield", -1);
+    g_signal_connect(about, "clicked", G_CALLBACK(about_clicked), app);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), about);
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), action_button(app, "status", "Inspect system", FALSE));
     gtk_box_append(GTK_BOX(outer), header);
     GtkWidget *body = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -1151,9 +1285,10 @@ int main(int argc, char **argv)
     }
     App app = {0};
     app.smoke_test = smoke_test;
-    app.application = adw_application_new("org.octoleo.OctoShield", smoke_test ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
+    app.application = adw_application_new(OCTOSHIELD_APPLICATION_ID, smoke_test ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.application, "activate", G_CALLBACK(activate), &app);
     int result = g_application_run(G_APPLICATION(app.application), argc, argv);
+    branding_clear(&app);
     if (app.operation_widgets != NULL)
         g_ptr_array_unref(app.operation_widgets);
     g_object_unref(app.application);

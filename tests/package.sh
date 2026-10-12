@@ -20,6 +20,7 @@ equal() { [[ $1 == "$2" ]] || fail "$3 (got: $1)"; }
 require xmllint
 require desktop-file-validate
 require dpkg-deb
+require appstreamcli
 
 # These helpers generate activation scripts even when passed --no-scripts.
 # Unit files are staged by Make; all lifecycle behavior is maintained explicitly.
@@ -27,20 +28,42 @@ if grep -Eq '^[[:space:]]+dh_installsystemd(user)?([[:space:]]|$)' "$repo/debian
     fail 'systemd debhelper invocations would add unwanted service lifecycle scripts'
 fi
 
-desktop-file-validate "$repo/data/org.octoleo.OctoShield.desktop"
-for document in "$repo"/data/*.xml "$repo"/data/*.policy "$repo"/data/*.svg; do
+desktop-file-validate "$repo/data/io.vdm.OctoShield.desktop"
+for document in "$repo"/data/*.xml "$repo"/data/*.policy "$repo"/data/branding/*.xml; do
     xmllint --nonet --noout "$document"
 done
-policy=$repo/data/org.octoleo.octoshield.policy
+metadata=$repo/data/io.vdm.OctoShield.metainfo.xml
+appstreamcli validate --no-net "$metadata"
+equal "$(xmllint --xpath 'string(/component/id)' "$metadata")" io.vdm.OctoShield 'application identity'
+equal "$(xmllint --xpath 'string(/component/name)' "$metadata")" OctoShield 'application display name'
+equal "$(xmllint --xpath 'string(/component/developer/@id)' "$metadata")" io.vdm 'developer identity'
+equal "$(xmllint --xpath 'string(/component/developer/name)' "$metadata")" 'Vast Development Method' 'application developer'
+equal "$(xmllint --xpath 'string(/component/url[@type="homepage"])' "$metadata")" https://www.vdm.io 'company homepage'
+equal "$(xmllint --xpath 'string(/component/launchable[@type="desktop-id"])' "$metadata")" io.vdm.OctoShield.desktop 'desktop launchable identity'
+equal "$(xmllint --xpath 'count(/component/screenshots/screenshot)' "$metadata")" 6 'store screenshot catalog'
+equal "$(xmllint --xpath 'count(/component/screenshots/screenshot[@type="default"])' "$metadata")" 1 'one default store screenshot'
+metadata_version=$(xmllint --xpath 'string(/component/releases/release[1]/@version)' "$metadata")
+equal "$metadata_version" "$(dpkg-parsechangelog -l "$repo/debian/changelog" -S Version)" 'metadata and package release versions'
+for index in 1 2 3 4 5 6; do
+    screenshot=$(xmllint --xpath "string(/component/screenshots/screenshot[$index]/image[@type='source'])" "$metadata")
+    [[ $screenshot =~ ^https://github.com/octoleo/octoshield/releases/download/v${metadata_version//./\\.}/OctoShield-(overview|protections|usb|office|monitoring|recovery)-(light|dark)\.png$ ]] || fail 'screenshot URL does not match a captured release asset'
+done
+for theme in light dark; do
+    branding=$repo/data/branding/OctoShield-$theme.png
+    [[ -f $branding && ! -L $branding ]] || fail "missing provided $theme branding asset"
+    equal "$(od -An -tx1 -N8 "$branding" | tr -d ' \n')" 89504e470d0a1a0a 'original branding must be a PNG'
+done
+policy=$repo/data/io.vdm.OctoShield.policy
 equal "$(xmllint --xpath 'count(/policyconfig/action)' "$policy")" 1 'exactly one authorization action'
-equal "$(xmllint --xpath 'string(/policyconfig/action/@id)' "$policy")" org.octoleo.octoshield.admin 'fixed policy action'
+equal "$(xmllint --xpath 'string(/policyconfig/action/@id)' "$policy")" io.vdm.OctoShield.admin 'fixed policy action'
 equal "$(xmllint --xpath 'string(/policyconfig/action/annotate[@key="org.freedesktop.policykit.exec.path"])' "$policy")" /usr/libexec/octoshield-helper 'fixed privileged executable'
 equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_active)' "$policy")" auth_admin 'fresh administrator authorization'
 equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_inactive)' "$policy")" no 'inactive sessions denied'
 equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_any)' "$policy")" no 'other sessions denied'
 equal "$(xmllint --xpath 'count(/policyconfig/action/annotate[@key="org.freedesktop.policykit.exec.allow_gui"])' "$policy")" 0 'GUI process must not gain privileges'
-grep -Fx 'Exec=octoshield-gtk' "$repo/data/org.octoleo.OctoShield.desktop" >/dev/null || fail 'desktop launcher does not launch the normal-user GUI'
-grep -Fx 'Terminal=false' "$repo/data/org.octoleo.OctoShield.desktop" >/dev/null || fail 'desktop entry unexpectedly opens a terminal'
+grep -Fx 'Exec=octoshield-gtk' "$repo/data/io.vdm.OctoShield.desktop" >/dev/null || fail 'desktop launcher does not launch the normal-user GUI'
+grep -Fx 'Terminal=false' "$repo/data/io.vdm.OctoShield.desktop" >/dev/null || fail 'desktop entry unexpectedly opens a terminal'
+grep -Fx 'Icon=io.vdm.OctoShield' "$repo/data/io.vdm.OctoShield.desktop" >/dev/null || fail 'desktop icon identity differs from the application'
 
 cat >"$fixture/mock-bin/systemctl" <<'MOCK'
 #!/bin/sh
@@ -107,14 +130,21 @@ for path in \
     usr/lib/octoshield/src/lib/core.sh \
     usr/lib/octoshield/src/lib/api.sh \
     usr/lib/octoshield/src/notify.sh \
-    usr/share/applications/org.octoleo.OctoShield.desktop \
-    usr/share/icons/hicolor/scalable/apps/org.octoleo.OctoShield.svg \
-    usr/share/metainfo/org.octoleo.OctoShield.metainfo.xml \
-    usr/share/polkit-1/actions/org.octoleo.octoshield.policy \
+    usr/share/applications/io.vdm.OctoShield.desktop \
+    usr/share/pixmaps/io.vdm.OctoShield.png \
+    usr/share/octoshield/branding/OctoShield-light.png \
+    usr/share/octoshield/branding/OctoShield-dark.png \
+    usr/share/metainfo/io.vdm.OctoShield.metainfo.xml \
+    usr/share/polkit-1/actions/io.vdm.OctoShield.policy \
     usr/lib/systemd/system/octoshield-monitor.service \
     usr/lib/systemd/user/octoshield-notify.service; do
     [[ -f $fixture/root/$path && ! -L $fixture/root/$path ]] || fail "missing regular package file $path"
 done
+cmp "$repo/data/branding/OctoShield-light.png" "$fixture/root/usr/share/pixmaps/io.vdm.OctoShield.png" || fail 'launcher does not preserve the provided light branding'
+for theme in light dark; do
+    cmp "$repo/data/branding/OctoShield-$theme.png" "$fixture/root/usr/share/octoshield/branding/OctoShield-$theme.png" || fail "packaged $theme branding differs from its source"
+done
+[[ -z $(find "$fixture/root/usr/share" -name 'org.octoleo*' -print) ]] || fail 'obsolete application namespace remains in the package'
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type d ! -perm -0005 -print) ]] || fail 'library directories must be readable/searchable by desktop users'
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type f ! -perm -0004 -print) ]] || fail 'runtime library must be readable by desktop users'
 [[ -z $(find "$fixture/root/usr" -perm /0022 -print) ]] || fail 'package paths must not be writable by non-root users'
@@ -134,5 +164,5 @@ fi
 if grep -Eq '^[[:space:]]*(ufw|usbguard|apt-get|octoshield|/usr/bin/octoshield)[[:space:]]' "$fixture/control/postinst"; then
     fail 'package install unexpectedly applies hardening or installs control packages'
 fi
-cmp "$policy" "$fixture/root/usr/share/polkit-1/actions/org.octoleo.octoshield.policy" || fail 'packaged PolicyKit boundary differs from the reviewed source'
+cmp "$policy" "$fixture/root/usr/share/polkit-1/actions/io.vdm.OctoShield.policy" || fail 'packaged PolicyKit boundary differs from the reviewed source'
 printf 'PASS: %s payload, ownership, dependency, service, and maintainer-script checks.\n' "$archive"
