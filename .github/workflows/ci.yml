@@ -28,7 +28,7 @@ jobs:
       - name: Install test and package dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq util-linux debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils xvfb xauth dbus-daemon
+          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq util-linux debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false

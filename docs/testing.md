@@ -31,7 +31,7 @@ The backend suite covers declined confirmations, failed backups/packages/native 
 
 ```bash
 sudo apt-get install pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev \
-    xvfb xauth dbus-daemon
+    xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
 make gui ui-test ui-display-test
 
 dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo \

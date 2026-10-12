@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 static App test_app;
 static gchar *test_executable;
@@ -138,6 +139,47 @@ static void test_accounts_entry(void)
     g_assert_null(accounts_argv[3]);
 }
 
+static void test_icon_decoding(void)
+{
+    /* Theme lookup alone can succeed without an SVG loader, while GTK renders
+     * a broken-image placeholder. Decode the actual backing file for every
+     * symbolic icon the frontend uses, including the monitoring activity icon.
+     * These names deliberately come from Adwaita, not optional application
+     * packages such as GNOME System Monitor. */
+    static const char *const names[] = {
+        "dialog-information-symbolic", "dialog-password-symbolic",
+        "document-open-recent-symbolic", "drive-removable-media-symbolic",
+        "edit-undo-symbolic", "help-browser-symbolic",
+        "media-playback-stop-symbolic", "network-wireless-symbolic",
+        "network-workgroup-symbolic", "network-transmit-receive-symbolic",
+        "notifications-disabled-symbolic", "preferences-system-notifications-symbolic",
+        "preferences-system-symbolic", "security-high-symbolic",
+        "software-update-available-symbolic", "system-lock-screen-symbolic",
+        "text-x-generic-symbolic", "view-grid-symbolic", "view-refresh-symbolic"
+    };
+    GtkIconTheme *theme = gtk_icon_theme_get_for_display(gtk_widget_get_display(GTK_WIDGET(test_app.window)));
+    for (gsize i = 0; i < G_N_ELEMENTS(names); i++) {
+        g_test_message("Decoding installed icon %s", names[i]);
+        g_autoptr(GtkIconPaintable) icon = gtk_icon_theme_lookup_icon(theme, names[i], NULL,
+                                                                   32, 1, GTK_TEXT_DIR_LTR,
+                                                                   GTK_ICON_LOOKUP_FORCE_SYMBOLIC);
+        g_assert_nonnull(icon);
+        g_assert_cmpstr(gtk_icon_paintable_get_icon_name(icon), ==, names[i]);
+        GFile *file = gtk_icon_paintable_get_file(icon);
+        g_assert_nonnull(file);
+        g_autoptr(GError) error = NULL;
+        g_autoptr(GFileInputStream) input = g_file_read(file, NULL, &error);
+        g_assert_no_error(error);
+        g_assert_nonnull(input);
+        g_autoptr(GdkPixbuf) pixbuf = gdk_pixbuf_new_from_stream_at_scale(G_INPUT_STREAM(input),
+                                                                      32, 32, TRUE, NULL, &error);
+        g_assert_no_error(error);
+        g_assert_nonnull(pixbuf);
+        g_assert_cmpint(gdk_pixbuf_get_width(pixbuf), >, 0);
+        g_assert_cmpint(gdk_pixbuf_get_height(pixbuf), >, 0);
+    }
+}
+
 static void test_success(void)
 {
     launch_fixture("success");
@@ -197,6 +239,7 @@ int main(int argc, char **argv)
     activate(G_APPLICATION(test_app.application), &test_app);
     g_test_add_func("/ui/window/all-pages", test_window);
     g_test_add_func("/ui/window/accounts-panel-entry", test_accounts_entry);
+    g_test_add_func("/ui/window/icons-decode-with-installed-loaders", test_icon_decoding);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);
