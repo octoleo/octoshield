@@ -28,6 +28,18 @@ existing allowances before adding new ones and never resets or disables the
 firewall as an intermediate step. Original settings are saved for explicit
 restoration; external configuration drift is surfaced before replacement.
 
+Only permanent allowances enter UFW's saved policy. Finite permissions require
+an enabled, running status observer before application and are inserted into
+IPv4/IPv6 UFW user chains after reload with a kernel UTC time match. Its inclusive
+`--datestop` is the saved deadline minus one second. Missing time-match support
+fails closed: there is no untimed fallback. The rule stops granting new access
+at its deadline even when the observer or application is absent; established
+connections retain the normal stateful policy. The observer cleans up expired
+rules under the operation lock, independently of deadline enforcement. Reload
+or reboot withdraws grants sooner, and expired access cannot reopen from disk.
+Reactivating a still-unexpired grant requires explicit Apply. Native `ufw status`
+omits runtime permissions; OctoShield verifies kernel rules and their deadlines.
+
 USB approvals belong to the effective USB profile. Temporary approvals expire
 on disconnect, daemon restart, or profile switch. Already connected devices
 are reevaluated when switching. Unknown devices remain blocked while approval

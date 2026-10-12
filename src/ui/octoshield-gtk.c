@@ -117,10 +117,10 @@ typedef struct {
 /* This registry is also the parity map for the terminal interface. */
 static const Action actions[] = {
     {"status", "Inspect system", "Firewall, listening ports, services and encryption information.", NULL, TRUE, FALSE, {"status", NULL}},
-    {"firewall", "Network firewall", "Block unsolicited incoming traffic on Wi-Fi and Ethernet.", "Review and enable the UFW firewall policy. Existing inbound access may stop working. Docker and other container-published ports need separate review.", TRUE, TRUE, {"apply", "firewall", NULL}},
+    {"firewall", "Network firewall", "Apply the Conference firewall profile on Wi-Fi and Ethernet.", "Apply the Conference profile's incoming policy while allowing outgoing connections. The helper previews the policy and existing inbound rules before changing them. Container-published ports need separate review.", TRUE, TRUE, {"apply", "firewall", NULL}},
     {"usb-policy", "USB authorization", "Enroll trusted devices and block unfamiliar USB hardware.", "Disconnect untrusted devices now. Keep your required keyboard, mouse and trusted adapters connected. You will review the actual USB policy before enrollment; an incorrectly enrolled input device could lock you out.", TRUE, TRUE, {"apply", "usb", NULL}},
-    {"network", "Connection privacy", "Review automatic connections and local network discovery.", "Restrict automatic connections and network discovery. Saved connections and local name resolution may change; use Office access to restore an individual trusted connection later.", TRUE, TRUE, {"apply", "network", NULL}},
-    {"services", "Listening services", "Review SSH, discovery, printing and Bluetooth exposure.", "The helper will show the installed services affected and ask to disable that set. Remote sessions, Bluetooth input devices and printing may disconnect when their services are stopped.", TRUE, TRUE, {"apply", "services", NULL}},
+    {"network", "Connection privacy", "Apply the Conference profile's connection and discovery settings.", "Apply the Conference profile's automatic connection and discovery choices. Saved connections and local name resolution may change; Access & exceptions can restore an individual trusted connection.", TRUE, TRUE, {"apply", "network", NULL}},
+    {"services", "Listening services", "Apply the Conference profile's service settings.", "The helper previews how the Conference profile changes installed services. Remote sessions, Bluetooth input devices and printing may disconnect when their services are stopped.", TRUE, TRUE, {"apply", "services", NULL}},
     {"sudo", "Fresh administrator authentication", "Reduce reuse of cached sudo credentials.", "Require fresh authentication for sudo operations. You may be asked for your password more often. The helper checks its configuration before installing it.", TRUE, TRUE, {"apply", "sudo", NULL}},
     {"updates", "Security updates", "Enable Ubuntu's unattended security update mechanism.", "Install or configure unattended security updates. Package changes can take several minutes. Keep this window open while the package manager finishes.", TRUE, TRUE, {"apply", "updates", NULL}},
     {"apparmor", "Application confinement", "Enable the available AppArmor security service.", "Enable the installed AppArmor confinement mechanism. This does not create profiles for unconfined applications or guarantee that every application is confined.", TRUE, TRUE, {"apply", "apparmor", NULL}},
@@ -136,8 +136,8 @@ static const Action actions[] = {
     {"notify-disable", "Disable desktop notifications", "Stop notifications for this user without changing policy.", "Disable the notification service for this user. The system collector and preventive controls continue independently.", FALSE, TRUE, {"monitor", "disable-desktop", NULL}},
     {"notify-status", "Desktop notification status", "Inspect this user's notification service.", NULL, FALSE, FALSE, {"monitor", "status", NULL}},
     {"backups", "List configuration backups", "Show recorded system changes and recovery transactions.", NULL, TRUE, FALSE, {"backups", NULL}},
-    {"recovery", "Read recovery guide", "Inspect the installed recovery and backup instructions.", NULL, FALSE, FALSE, {"recovery", NULL}}
-    ,{"update-check", "Check for OctoShield updates", "Check the official GitHub release for a newer Debian package.", NULL, FALSE, FALSE, {"updates", "check", NULL}}
+    {"recovery", "Read recovery guide", "Inspect the installed recovery and backup instructions.", NULL, FALSE, FALSE, {"recovery", NULL}},
+    {"update-check", "Check for OctoShield updates", "Check the official GitHub release for a newer Debian package.", NULL, FALSE, FALSE, {"updates", "check", NULL}}
 };
 
 /* GNOME 46 and 50 ship this exact invocation in their Users desktop entry:
@@ -795,9 +795,9 @@ static void input_action_clicked(GtkButton *button, gpointer data)
         args[0] = "usb"; args[1] = "allow"; args[2] = first; count = 3;
         if (gtk_switch_get_active(binding->permanent)) {
             args[3] = "--permanent"; count = 4;
-            impact = g_strdup_printf("Review USB device %s and add a persistent authorization rule. Approve only hardware you trust; a device can expose keyboard or network interfaces as well as storage.", first);
+            impact = g_strdup_printf("Review USB device %s and remember its authorization only for the effective USB profile named in the helper's confirmation. Other profiles receive no permission. A device can expose keyboard or network interfaces as well as storage.", first);
         } else {
-            impact = g_strdup_printf("Review USB device %s and authorize its current connection only. Reconnecting or restarting requires another authorization. This does not scan files or prove the device is safe.", first);
+            impact = g_strdup_printf("Review USB device %s and allow this connection until unplugging, restarting or switching USB profiles. This does not scan files or prove the device is safe.", first);
         }
         title = "Authorize USB device";
         break;
@@ -1093,7 +1093,7 @@ static void profile_clicked(GtkButton *button, gpointer data)
         break;
     case PROFILE_CREATE:
         args[1] = "create"; args[2] = gtk_editable_get_text(binding->fields[0]); args[3] = profile; count = 4;
-        title = "Create a profile"; impact = "Copy this profile's settings to a new name. Apply the new profile when you are ready.";
+        title = "Create a profile"; impact = "Copy this profile's settings and remembered USB permissions to a new name. The original profile remains unchanged. Apply the new profile when you are ready.";
         break;
     case PROFILE_DELETE:
         args[1] = "delete"; args[2] = profile; count = 3; title = "Delete this profile";
@@ -1117,7 +1117,7 @@ static void profile_clicked(GtkButton *button, gpointer data)
         args[4] = gtk_drop_down_get_selected(binding->choice) == 0 ? "tcp" : "udp";
         args[5] = gtk_editable_get_text(binding->fields[1]); args[6] = gtk_editable_get_text(binding->fields[2]);
         args[7] = gtk_editable_get_text(binding->fields[3]); count = 8;
-        title = "Save firewall exception"; impact = "Save this incoming exception in the selected profile. Apply that firewall profile to activate it. A source of any permits every source; prefer a specific trusted address or subnet.";
+        title = "Save firewall exception"; impact = "Save this incoming exception, then apply the selected firewall profile. Temporary rules expire at their deadline or earlier when the firewall reloads or the machine restarts. A source of any permits every source; prefer a trusted address or subnet.";
         break;
     case PROFILE_RULE_REMOVE:
         args[1] = "rule-remove"; args[2] = profile; args[3] = gtk_editable_get_text(binding->fields[0]); count = 4;
@@ -1437,7 +1437,7 @@ static void handle_data_log(App *app, const char *text)
             gint64 expires = expires_node != NULL && JSON_NODE_HOLDS_VALUE(expires_node) && json_node_get_value_type(expires_node) == G_TYPE_INT64 ? json_node_get_int(expires_node) : -1;
             g_autoptr(GDateTime) when = expires > 0 ? g_date_time_new_from_unix_local(expires) : NULL;
             g_autofree gchar *expiry = when != NULL ? g_date_time_format(when, "%Y-%m-%d %H:%M") : g_strdup(expires == 0 ? "no expiry" : "expiry unknown");
-            g_string_append_printf(configuration, "%s: %s port %" G_GINT64_FORMAT " from %s on %s · %s\n", string_member(rule, "id", "unknown"), string_member(rule, "protocol", "unknown"), number, string_member(rule, "source", "unknown"), string_member(rule, "interface", "unknown"), expiry);
+            g_string_append_printf(configuration, "%s: %s port %" G_GINT64_FORMAT " from %s on %s · %s%s\n", string_member(rule, "id", "unknown"), string_member(rule, "protocol", "unknown"), number, string_member(rule, "source", "unknown"), string_member(rule, "interface", "unknown"), expiry, expires > 0 ? " or earlier on firewall reload/reboot" : "");
         }
         gtk_label_set_text(app->profile_details, configuration->str);
         g_string_free(configuration, TRUE);
@@ -1538,7 +1538,7 @@ static void build_protections(App *app)
     group_add(group, control_row("Saved settings", "Active profiles cannot be deleted.", buttons));
     GtkWidget *name = input_row(group, "New profile name · for example client-visit");
     GtkWidget *name_fields[] = {name, NULL};
-    group_add(group, control_row("Copy selected profile", NULL, profile_button(app, "Create profile", PROFILE_CREATE, app->edit_profile, NULL, NULL, NULL, name_fields)));
+    group_add(group, control_row("Copy selected profile", "Includes its settings and remembered USB permissions.", profile_button(app, "Create profile", PROFILE_CREATE, app->edit_profile, NULL, NULL, NULL, name_fields)));
     static const char *const settings[][2] = {{"network.autoconnect", "Previously trusted automatic connections"}, {"network.discovery", "Local network discovery"}, {"services.printing", "Printing service"}, {"services.bluetooth", "Bluetooth service"}, {"services.ssh", "Incoming SSH service"}, {"services.discovery", "Discovery service"}, {"services.samba", "File sharing service"}, {"services.remote_desktop", "System remote desktop service"}, {"monitor.enabled", "Security event monitoring"}};
     static const char *const boolean_choices[] = {"Enabled", "Disabled", NULL};
     static const char *const service_choices[] = {"Enabled", "Disabled", "Previous setting", NULL};
@@ -1604,7 +1604,7 @@ static void build_usb(App *app)
 static void build_office(App *app)
 {
     GtkWidget *page = page_new(app, "office", "Profile access & exceptions", "Keep your protective profile while allowing the particular connection or service you need. Outgoing SSH does not require an incoming exception.");
-    GtkWidget *group = group_new(page, "Incoming firewall exception", "Rules belong to the selected profile. Save changes, then apply its firewall settings. Sources support IPv4 and IPv6; use any only when you intend unrestricted sources.");
+    GtkWidget *group = group_new(page, "Incoming firewall exception", "Save changes, then apply this firewall profile. Temporary access ends at its deadline or earlier on firewall reload or reboot. Sources support IPv4 and IPv6; any permits every source.");
     GtkDropDown *profile = GTK_DROP_DOWN(profile_selector(app));
     group_add(group, control_row("Firewall profile", NULL, GTK_WIDGET(profile)));
     GtkWidget *port = input_row(group, "Port · 1–65535");
@@ -1614,7 +1614,7 @@ static void build_office(App *app)
     GtkWidget *subnet = input_row(group, "Source · 192.168.1.0/24, 2001:db8::/64, or any");
     GtkWidget *interface = input_row(group, "Network interface · for example wlan0, or any");
     gtk_editable_set_text(GTK_EDITABLE(interface), "any");
-    GtkWidget *duration = input_row(group, "Expires after minutes · 0 keeps the rule, maximum 10080");
+    GtkWidget *duration = input_row(group, "Duration in minutes · 0 = permanent, maximum 10080");
     gtk_editable_set_text(GTK_EDITABLE(duration), "60");
     GtkWidget *fields[] = {port, subnet, interface, duration, NULL};
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -1629,12 +1629,12 @@ static void build_office(App *app)
     gtk_box_append(GTK_BOX(page), profile_button(app, "Remove exception…", PROFILE_RULE_REMOVE, profile, NULL, NULL, NULL, rule_fields));
     group = group_new(page, "Reconnect to a trusted saved network", "Inspect the system first to identify the exact saved connection UUID.");
     GtkWidget *uuid = input_row(group, "Saved connection UUID");
-    gtk_box_append(GTK_BOX(page), input_button(app, "Review automatic connection…", INPUT_OFFICE_NETWORK, uuid, NULL, NULL, NULL));
+    gtk_box_append(GTK_BOX(page), input_button(app, "Enable automatic connection…", INPUT_OFFICE_NETWORK, uuid, NULL, NULL, NULL));
     group = group_new(page, "Restore a service", "Starting a listening service and allowing its firewall traffic are separate decisions.");
     static const char *const services[] = {"SSH · ssh.service", "Local discovery · avahi-daemon.service", "Bluetooth · bluetooth.service", "Printing · cups.service", NULL};
     GtkWidget *service = gtk_drop_down_new_from_strings(services);
     group_add(group, control_row("Service", NULL, service));
-    gtk_box_append(GTK_BOX(page), input_button(app, "Review service restoration…", INPUT_OFFICE_SERVICE, NULL, NULL, NULL, service));
+    gtk_box_append(GTK_BOX(page), input_button(app, "Restore service…", INPUT_OFFICE_SERVICE, NULL, NULL, NULL, service));
     group = group_new(page, "Inspect before changing access", NULL);
     group_add(group, action_row(app, "status", "Inspect", "dialog-information-symbolic"));
 }
@@ -1671,8 +1671,8 @@ static void build_recovery(App *app)
     group_add(group, action_row(app, "backups", "List", "document-open-recent-symbolic"));
     GtkWidget *transaction = input_row(group, "Backup transaction ID · copy from the backup list");
     gtk_box_append(GTK_BOX(page), input_button(app, "Inspect transaction", INPUT_BACKUP_SHOW, transaction, NULL, NULL, NULL));
-    group = group_new(page, "Restore your desktop baseline", "This restores the original recorded GNOME preferences; use Office access for narrow system exceptions.");
-    group_add(group, action_row(app, "desktop-restore", "Review restore…", "edit-undo-symbolic"));
+    group = group_new(page, "Restore your desktop baseline", "This restores the original recorded GNOME preferences; use Access & exceptions for narrow system exceptions.");
+    group_add(group, action_row(app, "desktop-restore", "Restore…", "edit-undo-symbolic"));
     gtk_box_append(GTK_BOX(page), text_label("If a system operation fails after an earlier step completed, some changes may already be in effect. Keep the operation details and inspect the recorded transaction before retrying or recovering.", "dim-label"));
 }
 
