@@ -34,6 +34,9 @@ jobs:
           persist-credentials: false
       - name: Lint, compile and test CLI and native interface
         run: |
+          # The container runs as root while checkout files are runner-owned.
+          # Trust only this workflow's exact checkout, never a wildcard path.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           make check ui-test
           bash scripts/version.sh --check
           bash tests/package.sh
