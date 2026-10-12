@@ -5,7 +5,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
   <name>OctoShield</name>
-  <summary>Review and configure Ubuntu laptop protections</summary>
+  <summary>Manage Ubuntu laptop security profiles and live protection status</summary>
   <description>
     <p>Prepare your Ubuntu laptop for conferences, shared networks, and everyday
     work. OctoShield brings established Linux security controls into a native
@@ -15,10 +15,13 @@
     required. Installing the application does not turn on security controls or
     automatically trust connected USB devices.</p>
     <ul>
+      <li>Switch editable Conference, Public, Office and Home profiles globally
+      or for one protection, with explicit overrides and verified live status.</li>
       <li>Configure a host firewall for Wi-Fi and Ethernet, with narrowly scoped
-      exceptions for trusted office networks.</li>
+      IPv4/IPv6 port, protocol, source and interface exceptions and optional expiry.</li>
       <li>Review and enroll trusted USB devices with USBGuard. Keep unknown
-      devices blocked until you explicitly approve temporary or permanent access.</li>
+      devices blocked until you approve temporary or profile-specific access;
+      reevaluate connected devices when switching profiles.</li>
       <li>Limit automatic network connections and unnecessary services, and
       configure GNOME screen locking and removable-media behavior.</li>
       <li>Review AppArmor confinement, automatic security updates, and sudo
@@ -27,6 +30,10 @@
       restrained security notifications in your desktop session.</li>
       <li>Inspect saved action history and recovery guidance, and make selected
       office adjustments without globally undoing your protections.</li>
+      <li>Inspect container exposure, Thunderbolt and USB4 protection indicators,
+      Secure Boot and encryption status, with unavailable results made explicit.</li>
+      <li>Check official releases on request and upgrade with the normal system
+      package installer while retaining profiles, policies and recovery snapshots.</li>
     </ul>
     <p>The desktop application runs as your normal user. A narrowly scoped
     PolicyKit helper performs reviewed system changes, while desktop preferences
@@ -56,32 +63,32 @@
     <keyword>Ubuntu</keyword>
     <keyword>Octoleo</keyword>
   </keywords>
-  <!-- Captured application images are attached by the v1.0.0 release workflow.
+  <!-- Captured application images are attached by the v1.1.0 release workflow.
        Public store indexing also requires anonymously accessible release assets. -->
   <screenshots>
     <screenshot type="default">
       <caption>Review your laptop's protections from the light overview (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-overview-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-overview-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-overview-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-overview-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Choose and review individual system protections (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-protections-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-protections-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Review USB devices before authorizing access (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-usb-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-usb-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-office-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-office-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-monitoring-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-monitoring-dark.png</image>
     </screenshot>
   </screenshots>
   <provides>
@@ -93,6 +100,24 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="1.1.0" date="2026-10-12">
+      <description>
+        <p>Manage everyday and conference protection with editable profiles,
+        verified system status and the same controls in GNOME and the CLI.</p>
+        <ul>
+          <li>Switch Conference, Public, Office and Home profiles globally or
+          per control; create custom profiles and restore captured baselines.</li>
+          <li>Configure scoped IPv4/IPv6 firewall exceptions and expiry while
+          retaining outgoing access and avoiding firewall resets on switching.</li>
+          <li>Remember USB approvals for the effective profile, reevaluate
+          connected devices on switching and revoke remembered trust.</li>
+          <li>Inspect additional container, Thunderbolt/USB4, Secure Boot and
+          encryption exposure with explicit unknown and incomplete states.</li>
+          <li>Check official release downloads and upgrade the existing Debian
+          installation while retaining policies, preferences and snapshots.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-10-12">
       <description>
         <p>The first stable OctoShield release provides installable Debian

@@ -19,7 +19,7 @@ Use `/usr/bin/octoshield` for the packaged CLI and `/usr/local/bin/octoshield` f
 
 An older standalone installation may have placed service overrides under `/etc/systemd/system` or `/etc/systemd/user`. Those override the package's vendor units and can still point at `/usr/local`. Keep the standalone files until you have deliberately reapplied monitoring with the packaged version and verified the effective unit paths. Do not blindly remove `/etc` service overrides.
 
-Package upgrades replace the program without resetting your protection settings or automatically restarting existing monitoring. After reviewing the update, restart active monitoring and the user notifier to load the new program:
+Package upgrades replace the existing `octoshield` package without resetting protection settings, profiles, preferences or snapshots. Download the matching newer `.deb` and open it with your desktop package installer, or run the matching APT command from the README; administrator authentication belongs to the package manager. No prior uninstall is needed. The status observer is automatically introduced on upgrade from 1.0.0 and pauses during later package replacement. Opening the upgraded app refreshes an already-active notifier in your own session without enabling disabled notifications. The collector reloads on an explicit restart or reboot. To refresh an active collector, or refresh notifications from the CLI:
 
 ```bash
 sudo systemctl try-restart octoshield-monitor.service
@@ -45,6 +45,20 @@ systemctl --user disable --now octoshield-notify.service
 ```
 
 After removal, an offline user's previous enablement may remain as a dangling link at `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/graphical-session.target.wants/octoshield-notify.service`. Inspect it with `readlink` and remove only that exact link if it is dangling and points to the removed packaged unit. Retain working standalone or custom unit links; do not remove the entire user systemd directory.
+
+## Profiles, overrides and restoration
+
+Version 1.1 keeps 1.0.0 policies as they are until you explicitly adopt a profile. The profile selector is desired configuration; the live indicators report what was actually observed. A partial or failed switch can leave different areas in different states. Read each result before retrying. The observer deliberately does not treat a successful command as proof that all protections match.
+
+Use `octoshield profile show NAME` to inspect saved choices and `octoshield profile apply NAME CONTROL` to change only one area. Saved edits are pending until applied. `octoshield profile restore CONTROL` restores that area's captured pre-profile baseline; `octoshield profile restore` attempts available baselines for all managed areas after review. USB restoration returns to the retained pre-profile authorization policy, not to unrestricted USB. Existing active connections are not forcibly terminated by firewall switching.
+
+Profiles and original-control snapshots live privately beneath `/var/lib/octoshield/profiles`; USB profile policies live beneath `/var/lib/octoshield/usb`. They are root-owned data and are not shell scripts. Do not delete them as a first troubleshooting step. Package updates and removal retain them. Baselines capture the state before profile management; for an existing 1.0.0 user, that may already be the hardened conference configuration, not an older office configuration that was never saved.
+
+After a native control is successfully restored, a later first adoption captures its then-current settings as the next baseline. Customized UFW before/after rule files require manual review before adoption; OctoShield does not claim that its standard profile owns arbitrary administrator-added filtering chains.
+
+If OctoShield reports external changes or an interrupted application, inspect the native policy and private action history. Do not blindly replace the recorded baseline or edit its expected fingerprints to bypass the conflict. Reconcile the specific native settings with a known transaction or use the targeted recovery procedures below. Global profile changes span several native tools and are not atomic; unaffected areas remain enforced if another area fails.
+
+The status cache is ephemeral at `/run/octoshield/status.json`. If it is stale, inspect `sudo journalctl -u octoshield-status.service -n 50 --no-pager` and `systemctl status octoshield-status.service`. After resolving the cause, restart only that observer with `sudo systemctl restart octoshield-status.service`. Stopping it does not disable UFW or USBGuard, but it prevents fresh status and automatic cleanup of timed profile exceptions. Review existing exceptions before intentionally disabling or removing it. Deadline processing resumes when the observer runs, subject to the operation lock and native-policy conflict checks.
 
 ## Graphical startup and authentication
 
@@ -157,7 +171,9 @@ sudo ls -l /var/lib/octoshield/usb
 
 Repair the specific rule/configuration, or restore the relevant saved `/etc/usbguard/rules.conf` and `/etc/usbguard/usbguard-daemon.conf` with their original root ownership and private modes. Remove the temporary boot argument and reboot normally. Check `sudo systemctl is-active usbguard.service` and `octoshield usb list` before relying on protection. Merely stopping USBGuard can leave already-blocked devices unauthorized; reconnect/reboot through the trusted recovery path when necessary.
 
-To revoke permanent trust, first inspect both current devices and persisted policy:
+For a managed profile, use `octoshield usb forget DEVICE_ID` to revoke the attached device's remembered trust in the effective USB profile and block its current attachment. Other profiles retain their own decisions. Inspect the device again after reconnecting. Keep input, hub and mounted-storage consequences in mind.
+
+For legacy/manual recovery outside profile management, first inspect both current devices and persisted policy:
 
 ```bash
 octoshield usb list

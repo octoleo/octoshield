@@ -1,3 +1,22 @@
+octoshield (1.1.0) unstable; urgency=medium
+
+  * Add editable Conference, Public, Office and Home profiles, custom copies,
+    global switching, individual control overrides and explicit restoration.
+  * Show verified live protection status, profile mismatches and unavailable
+    observations through shared native desktop and Whiptail interfaces.
+  * Manage scoped IPv4/IPv6 firewall exceptions with optional expiry; retain
+    outgoing access and switch active policies without resetting UFW.
+  * Scope USB approvals to the effective profile, reevaluate attached devices,
+    expire temporary trust on switching and provide explicit trust revocation.
+  * Inspect container exposure, Thunderbolt/USB4, Secure Boot and encryption;
+    notify unlocked sessions of blocked devices and network changes.
+  * Add explicit official-release checks and in-place Debian upgrades that
+    preserve policies, profiles, user preferences and recovery snapshots.
+  * Start the status observer without selecting a protection profile; verify
+    genuine upgrades from published 1.0.0 packages in the Ubuntu CI matrix.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Mon, 12 Oct 2026 20:29:45 +0000
+
 octoshield (1.0.0) unstable; urgency=medium
 
   * Release the native GNOME application and Whiptail command-line interface

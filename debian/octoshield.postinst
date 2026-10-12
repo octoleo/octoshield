@@ -24,6 +24,27 @@ if [ -z "${DPKG_ROOT:-}" ]; then
     esac
 fi
 
+# This observer reports existing settings; it never selects a protection
+# profile. Upgrade an already configured observer without overriding disable or
+# mask choices. 1.0.0 did not ship this unit, so enable it on that migration too.
+if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
+    case "$1" in
+        configure)
+            if [ -z "${2:-}" ] || dpkg --compare-versions "$2" lt 1.1.0; then
+                systemctl enable octoshield-status.service >/dev/null 2>&1 || true
+            fi
+            if systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; then
+                systemctl start octoshield-status.service >/dev/null 2>&1 || true
+            fi
+            ;;
+        abort-upgrade | abort-remove | abort-deconfigure)
+            if systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; then
+                systemctl start octoshield-status.service >/dev/null 2>&1 || true
+            fi
+            ;;
+    esac
+fi
+
 #DEBHELPER#
 
 exit 0
