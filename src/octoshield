@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# This file is both the downloaded bootstrap and the installed CLI entry point.
+set -Eeuo pipefail
+umask 077
+IFS=$' \t\n'
+unset BASH_ENV ENV CDPATH
+if ((EUID == 0)); then
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+fi
+
+readonly OCTOSHIELD_VERSION=0.1.0
+
+bootstrap::help() {
+    cat <<'HELP'
+Octoshield 0.1.0 — Ubuntu laptop protection
+
+Usage: octoshield [setup|status|install|backups|--help|--version]
+
+  install     Install the tool, then open its interactive setup.
+  setup       Choose individual protections in a local terminal.
+  status      Inspect the current protection status.
+  backups     List private system configuration snapshots (sudo required).
+
+With no arguments, a downloaded bootstrap installs and starts setup;
+an installed copy opens the setup menu. Run locally, outside an SSH session.
+Documentation: https://github.com/octoleo/octoshield
+HELP
+}
+
+bootstrap::run() (
+    local commit temporary path
+    local -a files=(
+        src/octoshield src/lib/core.sh src/lib/controls.sh src/lib/usb.sh
+        src/lib/desktop.sh src/lib/monitor.sh src/lib/install.sh src/lib/cli.sh
+        src/monitor.c src/notify.sh systemd/octoshield-monitor.service
+        systemd/octoshield-notify.service README.md LICENSE docs/recovery.md
+    )
+    (($# == 0)) || [[ $# -eq 1 && $1 == install ]] || {
+        printf 'Download the tool with no arguments to install it first.\n' >&2
+        return 2
+    }
+    command -v curl >/dev/null || {
+        printf 'Install curl and ca-certificates using Ubuntu apt, then run again.\n' >&2
+        return 1
+    }
+    # Resolve once, then fetch every file from that same immutable Git commit.
+    if ! commit=$(curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time 60 \
+        -H 'Accept: application/vnd.github.sha' \
+        'https://api.github.com/repos/octoleo/octoshield/commits/main'); then
+        printf '%s\n' \
+            'Cannot download Octoshield. Check connectivity and repository visibility.' \
+            'For a private repository, authenticate GitHub CLI and use:' \
+            '  gh repo clone octoleo/octoshield' \
+            '  cd octoshield && bash src/octoshield install' >&2
+        return 1
+    fi
+    [[ $commit =~ ^[0-9a-f]{40}$ ]] || {
+        printf 'GitHub did not return a valid immutable commit identifier.\n' >&2
+        return 1
+    }
+    temporary=$(mktemp -d "${TMPDIR:-/tmp}/octoshield-download.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$temporary"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for path in "${files[@]}"; do
+        if [[ $path == */* ]]; then mkdir -p -- "$temporary/${path%/*}" || return 1; fi
+        curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 90 \
+            "https://raw.githubusercontent.com/octoleo/octoshield/$commit/$path" \
+            --output "$temporary/$path" || return 1
+    done
+    printf 'Downloaded Octoshield commit %s. Starting installation.\n' "$commit" >&2
+    /usr/bin/bash "$temporary/src/octoshield" install
+)
+
+case "${1:-}" in
+    --version)
+        printf 'Octoshield %s\n' "$OCTOSHIELD_VERSION"
+        exit 0
+        ;;
+esac
+
+# Resolve only our actual script location; never trust an inherited source path.
+octoshield_self=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || octoshield_self=
+octoshield_candidate=${octoshield_self%/*}
+if [[ -n $octoshield_self && -f $octoshield_candidate/lib/core.sh ]]; then
+    readonly OCTOSHIELD_ROOT=${octoshield_candidate%/*}
+    for octoshield_module in core controls usb desktop monitor install cli; do
+        # shellcheck source=/dev/null
+        source "$OCTOSHIELD_ROOT/src/lib/$octoshield_module.sh"
+    done
+    unset octoshield_self octoshield_candidate octoshield_module
+    cli::main "$@"
+else
+    case "${1:-}" in
+        --help | -h) bootstrap::help ;;
+        *) bootstrap::run "$@" ;;
+    esac
+fi
