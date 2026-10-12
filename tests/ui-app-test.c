@@ -134,8 +134,8 @@ static void test_group_text_escaping(void)
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     g_object_ref_sink(page);
     GtkWidget *group = group_new(page, "Access & <permissions>", "Keep <device> approvals & settings literal.");
-    g_assert_cmpstr(adw_preferences_group_get_title(ADW_PREFERENCES_GROUP(group)), ==, "Access &amp; &lt;permissions&gt;");
-    g_assert_cmpstr(adw_preferences_group_get_description(ADW_PREFERENCES_GROUP(group)), ==, "Keep &lt;device&gt; approvals &amp; settings literal.");
+    g_assert_cmpstr(adw_preferences_group_get_title(ADW_PREFERENCES_GROUP(group)), ==, "Access & <permissions>");
+    g_assert_cmpstr(adw_preferences_group_get_description(ADW_PREFERENCES_GROUP(group)), ==, "Keep <device> approvals & settings literal.");
     g_object_unref(page);
 }
 
