@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # GNOME desktop policy. Source this module; call desktop::{apply,restore,status}
 # from the logged-in, unprivileged user's session (never from sudo/root).
 # The first apply records a private, non-executable TSV baseline. Every saved

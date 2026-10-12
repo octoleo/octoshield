@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: Apache-2.0
 # Bats invokes command mocks through the production dispatch table.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 
 setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"

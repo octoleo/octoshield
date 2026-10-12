@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # All privileged operations are mocks. Files are confined to BATS_TEST_TMPDIR.
 # ShellCheck cannot follow functions installed as mocks by Bats setup.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 
 setup() {
     bats_require_minimum_version 1.5.0

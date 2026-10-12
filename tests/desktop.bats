@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: Apache-2.0
 
 # Bats invokes these test-local stubs indirectly and deliberately isolates tests.
-# shellcheck disable=SC2317,SC2030,SC2031
+# shellcheck disable=SC2317,SC2329,SC2030,SC2031
 setup() {
     # The fake backend is isolated from the user's actual dconf database.
     export XDG_STATE_HOME="$BATS_TEST_TMPDIR/state"
