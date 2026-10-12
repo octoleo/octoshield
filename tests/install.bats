@@ -248,13 +248,15 @@ mock_bootstrap_download() {
 }
 
 @test 'standalone bootstrap help and version do not require modules or the network' {
+    local expected_version
+    expected_version=$(bash "$BATS_TEST_DIRNAME/../scripts/version.sh")
     cp "$BATS_TEST_DIRNAME/../src/octoshield" "$BATS_TEST_TMPDIR/standalone"
     run bash "$BATS_TEST_TMPDIR/standalone" --help
     [ "$status" -eq 0 ]
     [[ $output == *'Usage: octoshield'* ]]
     run bash "$BATS_TEST_TMPDIR/standalone" --version
     [ "$status" -eq 0 ]
-    [ "$output" = 'OctoShield 0.2.0' ]
+    [ "$output" = "OctoShield $expected_version" ]
 }
 
 @test 'standalone bootstrap rejects unsupported arguments without network activity' {
