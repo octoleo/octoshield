@@ -59,6 +59,8 @@ Use the emitted filename for a different package version or architecture. These 
 
 The **Test lint and package** workflow downloads the already published matching 1.0.0 archive, checks a pinned SHA-256, installs it, then upgrades to the new package in each disposable Ubuntu container. It also reinstalls the new version, removes and purges it. Fixtures verify retention of native configuration, an existing monitor enablement choice, profile state, user preferences, a private recovery snapshot and optional security-package state. This is separate from mocked lifecycle checks. The status observer is the only service introduced automatically. Do not run the destructive lifecycle runner on a workstation; it requires an explicit disposable-system flag and CI marker.
 
+Each matrix container also installs its distribution's UFW package without activating firewall policy. `bash tests/ufw-vendor.sh` checks the actual vendor hook files read-only, verifies their configuration stays unchanged, and rejects an administrator-modified temporary copy. The same native UFW files are then checksum-checked throughout the package lifecycle test. This catches distribution template/layout differences that isolated command mocks cannot establish.
+
 CI is configured for Ubuntu 24.04 and 26.04 amd64 containers, plus a native window smoke test. Successful container checks do **not** establish real systemd/PolicyKit/GNOME integration, live firewall behavior, actual USB authorization, suspend/resume behavior, or notification delivery on either Ubuntu release. Initial development used an Ubuntu 24.04 container; live Ubuntu 26 hardware validation remains outstanding.
 
 ## Hardware acceptance checklist
