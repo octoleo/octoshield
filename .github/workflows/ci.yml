@@ -6,13 +6,20 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the current version from main after all checks pass'
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never interrupt an upload or publication because another main push arrives.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -133,42 +140,70 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish tagged Debian packages
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish versioned Debian packages
+    if: >-
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish)
     needs: [check, apt-repository]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: octoshield-release-publication
+      cancel-in-progress: false
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}
+      available: ${{ steps.publish.outputs.available }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify release tag matches package version
+      - name: Verify current main before running publication code
+        id: gate
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
-          bash scripts/version.sh --check "$RELEASE_TAG"
+          main_sha=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')
+          if test "$(git rev-parse HEAD)" != "$main_sha"; then
+            echo 'Publication skipped: this run is no longer the current main commit.'
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(bash scripts/version.sh)
+          if test "$GITHUB_REF_TYPE" = tag; then
+            bash scripts/version.sh --check "$GITHUB_REF_NAME"
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo 'current=true' >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.gate.outputs.current == 'true'
         with:
           pattern: octoshield-ubuntu-*-amd64
           path: release
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.gate.outputs.current == 'true'
         with:
           name: octoshield-release-assets
           path: assets
       - name: Publish packages, screenshots and application assets
+        id: publish
+        if: steps.gate.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.gate.outputs.tag }}
         run: |
-          gh release create "$RELEASE_TAG" release/*.deb release/SHA256SUMS-* assets/*.tar.gz assets/SHA256SUMS-assets assets/release-assets/gallery/*.png assets/release-assets/data/io.vdm.OctoShield.metainfo.xml --verify-tag --generate-notes --title "OctoShield $RELEASE_TAG"
+          bash scripts/publish-release.sh "$RELEASE_TAG" "$(git rev-parse HEAD)" release assets
 
   apt-publish:
     name: Publish signed APT updates (optional)
-    if: startsWith(github.ref, 'refs/tags/v') && vars.APT_PUBLISH_ENABLED == 'true'
+    if: needs.release.outputs.available == 'true' && vars.APT_PUBLISH_ENABLED == 'true'
     needs: release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -190,9 +225,17 @@ jobs:
       - name: Verify reviewed current release before accessing signing material
         id: release-gate
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          main_sha=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')
+          if test "$(git rev-parse HEAD)" != "$main_sha"; then
+            echo 'APT publishing skipped: a newer main commit is available.'
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           main_version=$(git show refs/remotes/origin/main:src/octoshield | sed -n 's/^readonly OCTOSHIELD_VERSION=//p')
           if test "$RELEASE_TAG" != "v$main_version"; then
             echo 'APT publishing skipped: this is no longer the version on main.'
@@ -218,17 +261,22 @@ jobs:
       - name: Install signing and catalogue tooling
         if: steps.configuration.outputs.configured == 'true'
         run: sudo apt-get install --yes --no-install-recommends apt-utils gnupg appstream jq
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download the published release for APT distribution
         if: steps.configuration.outputs.configured == 'true'
-        with:
-          pattern: octoshield-ubuntu-*-amd64
-          path: packages
-          merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: steps.configuration.outputs.configured == 'true'
-        with:
-          name: octoshield-release-assets
-          path: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          mkdir packages assets
+          gh release download "$RELEASE_TAG" --dir packages --pattern '*.deb' --pattern 'SHA256SUMS-ubuntu*'
+          gh release download "$RELEASE_TAG" --dir assets --pattern 'octoshield-assets-*.tar.gz' --pattern SHA256SUMS-assets
+          (cd packages && sha256sum --check SHA256SUMS-ubuntu*)
+          (cd assets && sha256sum --check SHA256SUMS-assets)
+          tar -C assets -xzf "assets/octoshield-assets-${RELEASE_TAG#v}.tar.gz"
+          (cd assets/release-assets && sha256sum --check SHA256SUMS)
+          jq -e --arg commit "$(git rev-parse HEAD)" --arg version "${RELEASE_TAG#v}" \
+            '.source.commit == $commit and .version == $version' assets/release-assets/manifest.json
       - name: Build and verify signed update repository
         if: steps.configuration.outputs.configured == 'true'
         env:

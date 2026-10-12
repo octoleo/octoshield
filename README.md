@@ -17,12 +17,12 @@ Read the [feature guide](docs/features.md) for the complete capability overview 
 
 ### Desktop application and CLI: install the package
 
-The repository is private. Sign in to GitHub with access to [octoleo/octoshield](https://github.com/octoleo/octoshield). During pull-request review, open the successful **Test lint and package** run for `feat/desktop-debian-package` in [Actions](https://github.com/octoleo/octoshield/actions), download the matching artifact below, and extract its ZIP. Pushing a reviewed `v*` version tag triggers release builds under [Releases](https://github.com/octoleo/octoshield/releases); a branch artifact is a review build, not a published release.
+Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version [1.0.0](https://github.com/octoleo/octoshield/releases/tag/v1.0.0) provides these packages:
 
-| Ubuntu / architecture | Actions artifact | Package install command for version 0.2.0 |
+| Ubuntu / architecture | Download | Package install command for version 1.0.0 |
 | --- | --- | --- |
-| Ubuntu 24.04 / amd64 | `octoshield-ubuntu-24.04-amd64` | `sudo apt install ./octoshield_0.2.0_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 / amd64 | `octoshield-ubuntu-26.04-amd64` | `sudo apt install ./octoshield_0.2.0_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.0.0/octoshield_1.0.0_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.0.0/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.0.0_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.0.0/octoshield_1.0.0_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.0.0/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.0.0_ubuntu26.04_amd64.deb` |
 
 Choose the package matching **both your Ubuntu release and CPU architecture**:
 
@@ -54,18 +54,17 @@ octoshield
 
 If you previously installed the standalone version, `/usr/local/bin/octoshield` may take precedence in your shell. The package leaves that installation intact and reports it. Use **`/usr/bin/octoshield`** to select the packaged CLI explicitly; the app always uses the packaged helper. See [migration and removal](docs/recovery.md#package-upgrades-coexistence-and-removal).
 
-### Standalone CLI: authenticated checkout
+### Standalone CLI: source checkout
 
-For CLI-only use, install from a reviewed checkout. With Git and an authenticated GitHub CLI available:
+For CLI-only use, install from the public release checkout. With Git available:
 
 ```bash
-gh repo clone octoleo/octoshield
+git clone --branch v1.0.0 --depth 1 https://github.com/octoleo/octoshield.git
 cd octoshield
-git switch feat/desktop-debian-package
 bash src/octoshield install
 ```
 
-If needed, install checkout tools with `sudo apt-get install git gh` and authenticate with `gh auth login`. After the branch is merged, use `main` instead. The standalone installer compiles only the C monitor, installs `/usr/local/bin/octoshield` and `/usr/local/lib/octoshield`, and immediately opens guided terminal setup. It does not install the graphical application or its libraries. On a machine without GNOME, system controls remain usable and GNOME-only actions report the missing session.
+If needed, install Git with `sudo apt-get install git`. The standalone installer compiles only the C monitor, installs `/usr/local/bin/octoshield` and `/usr/local/lib/octoshield`, and immediately opens guided terminal setup. It does not install the graphical application or its libraries. On a machine without GNOME, system controls remain usable and GNOME-only actions report the missing session.
 
 Run from a **normal local terminal**, without prefixing the entire tool with `sudo`. System changes request elevation; user settings remain in your session. Hardening is refused over SSH. Subsequent runs need only `octoshield`.
 
@@ -75,7 +74,7 @@ The original public bootstrap command remains the CLI-only entry point:
 bash <(curl -fsSL "https://raw.githubusercontent.com/octoleo/octoshield/refs/heads/main/src/octoshield")
 ```
 
-This unauthenticated URL does **not** work while the repository is private. It also reads `main`, so it cannot install unmerged branch changes. Repository visibility is not changed by this project. Use the authenticated checkout until the relevant code is merged and the URL is accessible to you. The bootstrap resolves `main` once and downloads every implementation file from that immutable commit; this provides consistency, not independent code signing. There is no `--ref` switch: use a reviewed checkout for a different branch or commit.
+The bootstrap follows `main`, which may contain changes newer than the latest release. It resolves `main` once and downloads every implementation file from that immutable commit; this provides consistency, not independent code signing. There is no `--ref` switch: use the release checkout above to install a specific release.
 
 Re-run the same standalone installation procedure to update its program files. System policy and trusted-device rules remain in place. See [recovery](docs/recovery.md) before switching between standalone and package installations.
 
@@ -90,7 +89,7 @@ Open OctoShield and use its sidebar:
 | USB devices | List device state, review a numeric device ID, allow it temporarily/permanently, or block the current attachment. |
 | Office access | Grant one subnet-restricted TCP exception, enable one connection's autoconnect, or restore a supported service. |
 | Monitoring | Enable/disable collection, inspect status/logs, and control this user's notifications. |
-| Recovery | Read recovery guidance, list backup transactions, and inspect their action history. |
+| Recovery | Read configuration recovery guidance, list saved change transactions, and inspect their action history. |
 
 The GUI is a native application, not a terminal embedded in a window. A fixed privileged helper executes the same Bash control functions used by the CLI. It presents plain-text results and explicit confirmation requests; raw output cannot become shell commands. Detailed output appears at operation boundaries, so package installation can remain busy without displaying every line immediately. USB enrollment presents the generated device policy before asking you to trust it. Leave the window open until an operation finishes; you can decline a pending confirmation without applying its next step.
 
@@ -195,6 +194,8 @@ Disabling desktop notifications does not disable the firewall, USB policy, or sy
 
 `octoshield desktop restore` restores only the saved GNOME settings from before first apply. System snapshots are private and are not automatically reapplied; see [docs/recovery.md](docs/recovery.md) for targeted recovery, partial failures, and USB lockout instructions.
 
+`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.0.0.
+
 ## Scope and limits
 
 This is preventive host hardening with limited event visibility, not an intrusion-detection guarantee. Disk encryption and Secure Boot are **inspected only**, not configured. USB devices can interact during early boot or before USBGuard starts; OctoShield does not configure an initramfs device policy. It cannot defeat invasive physical attacks, firmware compromise, malicious already-trusted devices, or vulnerabilities in permitted software. Browser/password/SSH vaults reduce credential exposure but do not make the browser or operating system immune to compromise.
@@ -217,6 +218,12 @@ make ui-test
 ```
 
 `make package` builds the `.deb` after Debian build dependencies are installed. Other targets include `make test`, `make lint`, `make format`, and `make sanitize`. See [testing](docs/testing.md), [packaging](docs/packaging.md), [distribution and release preparation](docs/distribution.md), [contribution guidelines](CONTRIBUTING.md), and [security reporting](SECURITY.md).
+
+### Publish the next release
+
+On a review branch, increment the version with `bash scripts/version.sh --bump patch` (or `minor` / `major`), review the generated release notes and run `bash scripts/version.sh --check`. For an exact version, use `--set X.Y.Z`. Merge the reviewed change into `main`: once all tests and package checks pass, CI creates the version tag and publishes the Debian packages under [Releases](https://github.com/octoleo/octoshield/releases). A version that is already published is left unchanged.
+
+To retry publication of the current version, open **Actions → Test lint and package → Run workflow**, choose `main`, and enable `publish`. Leaving `publish` disabled runs tests and produces review artifacts only. GitHub supplies the release token automatically; no custom release secret is needed. Optional signed APT hosting has separate configuration. See the [release procedure](docs/distribution.md#versions-and-release-publication) for commands and safeguards.
 
 Native interfaces: [NetworkManager configuration](https://networkmanager.dev/docs/api/latest/NetworkManager.conf.html), [nmcli](https://networkmanager.dev/docs/api/latest/nmcli.html), [Ubuntu automatic updates](https://ubuntu.com/server/docs/how-to/software/automatic-updates/), and [USBGuard documentation](https://usbguard.github.io/documentation/).
 

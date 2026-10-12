@@ -15,17 +15,17 @@ sudo apt-get install build-essential debhelper pkg-config \
 dpkg-buildpackage -us -uc -b
 ```
 
-`make package` is the repository's convenience target for the package build. For version 0.2.0 on amd64, a local build emits `../octoshield_0.2.0_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `0.2.0`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
+`make package` is the repository's convenience target for the package build. For version 1.0.0 on amd64, a local build emits `../octoshield_1.0.0_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `1.0.0`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
 
 Inspect and install a locally built package in a disposable test system:
 
 ```bash
-dpkg-deb --info ../octoshield_0.2.0_amd64.deb
-dpkg-deb --contents ../octoshield_0.2.0_amd64.deb
-sudo apt install ../octoshield_0.2.0_amd64.deb
+dpkg-deb --info ../octoshield_1.0.0_amd64.deb
+dpkg-deb --contents ../octoshield_1.0.0_amd64.deb
+sudo apt install ../octoshield_1.0.0_amd64.deb
 ```
 
-These example filenames describe the amd64 0.2.0 build; use the actual emitted filename for another version or architecture.
+These example filenames describe the amd64 1.0.0 build; use the actual emitted filename for another version or architecture.
 
 ## Program ownership and lifecycle
 
@@ -45,20 +45,20 @@ The package declares GUI runtime dependencies. The independent `bash src/octoshi
 
 ## Download and publication model
 
-Before merge, use the package workflow artifacts attached to the reviewed branch/PR's successful Actions run. Select the Ubuntu-release and architecture label that matches the target laptop. Artifacts are downloadable review builds with the retention shown by GitHub; they are not automatically a public release.
+Installable stable packages are public downloads under [GitHub Releases](https://github.com/octoleo/octoshield/releases/latest). Select the Ubuntu-release and architecture label that matches the target laptop. Before merge, reviewers can also use package artifacts attached to a successful branch/PR Actions run. Those artifacts expire according to GitHub's displayed retention and are review builds rather than published releases.
 
 The **Test lint and package** workflow currently builds this matrix:
 
 | Build | Actions artifact | Distributed package |
 | --- | --- | --- |
-| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_0.2.0_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_0.2.0_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_1.0.0_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_1.0.0_ubuntu26.04_amd64.deb` |
 
 Artifacts and releases use separate `SHA256SUMS-ubuntu24.04` and `SHA256SUMS-ubuntu26.04` files. After extraction/download, run the matching command, for example `sha256sum -c SHA256SUMS-ubuntu24.04`. These detect content changes, not independent publisher identity.
 
-The repository remains private. Access to workflow artifacts and release assets follows the repository's GitHub permissions. Creating a release does not make the repository public, and an unauthenticated raw `main` bootstrap cannot fetch a private checkout.
+After a push to `main`, CI publishes a new current version only after the complete test/package matrix and repository checks pass. It creates the matching `vX.Y.Z` tag and attaches both `.deb` files, checksums, and application assets. An already published version is not overwritten; merge a version increment to release subsequent changes. Pull requests remain test-only. Manual **Run workflow** builds are also test-only unless `publish` is explicitly enabled on `main`.
 
-Pushing a `v*` tag such as `v0.2.0` triggers release automation, which builds packages for the configured matrix and attaches assets to the GitHub release. Branch and pull-request builds validate/package code without publishing a release. Tag only a reviewed, validated commit whose version matches the Debian changelog; do not treat an unmerged PR artifact as a release. Creating these workflow files does not itself publish a release.
+Use `bash scripts/version.sh --bump patch`, `--bump minor`, `--bump major`, or `--set X.Y.Z` on a review branch, then update release notes and merge after review. Publication uses GitHub's automatic `GITHUB_TOKEN`; no personal access token, store account, or APT signing secret is needed to make the `.deb` downloadable. See the [release procedure](distribution.md#versions-and-release-publication).
 
 The native metadata identifies the developer as **Vast Development Method**, the application as **OctoShield**, and its desktop ID as `io.vdm.OctoShield`. The [distribution guide](distribution.md) describes release assets, semantic version maintenance, the automatic GitHub release token, and optional signed APT hosting. Direct package release needs no application-store credentials. APT publication separately requires the publisher's signing key and an explicitly configured client source.
 

@@ -56,32 +56,32 @@
     <keyword>Ubuntu</keyword>
     <keyword>Octoleo</keyword>
   </keywords>
-  <!-- Captured application images are attached by the v0.2.0 release workflow.
+  <!-- Captured application images are attached by the v1.0.0 release workflow.
        Public store indexing also requires anonymously accessible release assets. -->
   <screenshots>
     <screenshot type="default">
       <caption>Review your laptop's protections from the light overview (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-overview-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-overview-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-overview-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-overview-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Choose and review individual system protections (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-protections-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-protections-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Review USB devices before authorizing access (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-usb-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-usb-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-office-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-office-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-monitoring-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.0.0/OctoShield-monitoring-dark.png</image>
     </screenshot>
   </screenshots>
   <provides>
@@ -93,6 +93,24 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="1.0.0" date="2026-10-12">
+      <description>
+        <p>The first stable OctoShield release provides installable Debian
+        packages for Ubuntu 24.04 and 26.04, with native GNOME and Whiptail
+        interfaces backed by the same security-control modules.</p>
+        <ul>
+          <li>Review firewall, USB authorization, network, service, sudo,
+          security-update, AppArmor, and desktop protections before applying
+          changes with explicit administrator authorization.</li>
+          <li>Configure trusted office access, inspect security events, and
+          retain private configuration recovery records.</li>
+          <li>Follow the system's light or dark appearance and integrate
+          application information and optional signed APT updates.</li>
+          <li>Install, upgrade, and remove the application without silently
+          enabling hardening or discarding administrator-selected protections.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-12">
       <description>
         <p>Introducing the native OctoShield desktop application and Debian
