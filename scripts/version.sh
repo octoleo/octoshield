@@ -12,6 +12,43 @@ version::valid() {
     [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
+version::increment() {
+    # Increment decimal strings without converting the whole component to a
+    # machine integer: valid semantic versions can exceed Bash's integer range.
+    local value=$1 suffix='' digit
+    while [[ $value == *9 ]]; do
+        suffix="0$suffix"
+        value=${value%?}
+    done
+    if [[ -z $value ]]; then
+        printf '1%s\n' "$suffix"
+    else
+        digit=${value: -1}
+        printf '%s%s%s\n' "${value%?}" "$((digit + 1))" "$suffix"
+    fi
+}
+
+version::bump() {
+    local root=$1 component=$2 major minor patch
+    IFS=. read -r major minor patch <<<"$VERSION_CURRENT"
+    case "$component" in
+        patch) patch=$(version::increment "$patch") ;;
+        minor)
+            minor=$(version::increment "$minor")
+            patch=0
+            ;;
+        major)
+            major=$(version::increment "$major")
+            minor=0
+            patch=0
+            ;;
+        *)
+            version::error 'Usage: scripts/version.sh --bump patch|minor|major' || return 2
+            ;;
+    esac
+    version::set "$root" "$major.$minor.$patch"
+}
+
 version::one() {
     local file=$1 expression=$2
     local -a matches
@@ -178,12 +215,13 @@ version::main() {
         '') (($# == 0)) || return 2 ;;
         --check) (($# <= 2)) || return 2 ;;
         --set) (($# == 2)) || {
-            version::error 'Usage: scripts/version.sh --set X.Y.Z'
-            return 2
+            version::error 'Usage: scripts/version.sh --set X.Y.Z' || return 2
+        } ;;
+        --bump) (($# == 2)) || {
+            version::error 'Usage: scripts/version.sh --bump patch|minor|major' || return 2
         } ;;
         *)
-            version::error 'Usage: scripts/version.sh [--check [vX.Y.Z] | --set X.Y.Z]'
-            return 2
+            version::error 'Usage: scripts/version.sh [--check [vX.Y.Z] | --set X.Y.Z | --bump patch|minor|major]' || return 2
             ;;
     esac
     version::check "$root" || return 1
@@ -197,6 +235,7 @@ version::main() {
             printf 'Version %s is consistent.\n' "$VERSION_CURRENT"
             ;;
         --set) version::set "$root" "$2" ;;
+        --bump) version::bump "$root" "$2" ;;
     esac
 }
 

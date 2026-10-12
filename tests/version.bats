@@ -105,6 +105,68 @@ snapshot() {
     [ "$(snapshot)" = "$before" ]
 }
 
+@test 'patch minor and major bumps reset subordinate components and preserve history' {
+    local expected component
+    run bash "$VERSION_REPO/scripts/version.sh" --set "$VERSION_NEXT"
+    [ "$status" -eq 0 ]
+    for component in patch minor major; do
+        case "$component" in
+            patch) expected=900.4.3 ;;
+            minor) expected=900.5.0 ;;
+            major) expected=901.0.0 ;;
+        esac
+        run bash "$VERSION_REPO/scripts/version.sh" --bump "$component"
+        [ "$status" -eq 0 ]
+        run bash "$VERSION_REPO/scripts/version.sh" --check "v$expected"
+        [ "$status" -eq 0 ]
+        run bash "$VERSION_REPO/src/octoshield" --version
+        [ "$status" -eq 0 ]
+        [ "$output" = "OctoShield $expected" ]
+        grep -Fq "octoshield ($VERSION_NEXT)" "$VERSION_REPO/debian/changelog"
+        grep -Fq "<release version=\"$VERSION_NEXT\"" "$VERSION_REPO/data/io.vdm.OctoShield.metainfo.xml"
+    done
+}
+
+@test 'malformed bump components and wrong argument counts never edit files' {
+    local before value
+    before=$(snapshot)
+    for value in '' PATCH Major prerelease 1 'patch;echo nope' $'patch\n'; do
+        run bash "$VERSION_REPO/scripts/version.sh" --bump "$value"
+        [ "$status" -eq 2 ]
+        [[ $output == *'--bump patch|minor|major'* ]]
+        [ "$(snapshot)" = "$before" ]
+    done
+    run bash "$VERSION_REPO/scripts/version.sh" --bump
+    [ "$status" -eq 2 ]
+    [ "$(snapshot)" = "$before" ]
+    run bash "$VERSION_REPO/scripts/version.sh" --bump patch extra
+    [ "$status" -eq 2 ]
+    [ "$(snapshot)" = "$before" ]
+}
+
+@test 'bumps cannot overflow signed machine integers and propagate decimal carry' {
+    run bash "$VERSION_REPO/scripts/version.sh" --set 900.4.9223372036854775807
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --bump patch
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --check v900.4.9223372036854775808
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --set 99999999999999999999.99999999999999999999.99999999999999999999
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --bump patch
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --check v99999999999999999999.99999999999999999999.100000000000000000000
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --bump minor
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --check v99999999999999999999.100000000000000000000.0
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --bump major
+    [ "$status" -eq 0 ]
+    run bash "$VERSION_REPO/scripts/version.sh" --check v100000000000000000000.0.0
+    [ "$status" -eq 0 ]
+}
+
 @test 'downgrades and missing maintainer identity do not edit files' {
     local before
     before=$(snapshot)
