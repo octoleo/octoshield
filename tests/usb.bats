@@ -79,6 +79,11 @@ setup() {
                 touch "$BATS_TEST_TMPDIR/generated"
                 ;;
             list-devices) printf '%s\n' "$TEST_DEVICE" ;;
+            list-rules) cat "$USB_CONFIG_DIR/rules.conf" ;;
+            get-parameter)
+                case "$2" in ImplicitPolicyTarget) printf 'block\n' ;; InsertedDevicePolicy) printf 'apply-policy\n' ;; esac
+                ;;
+            append-rule) printf '%s\n' "$2" >>"$USB_CONFIG_DIR/rules.conf" ;;
             allow-device | block-device) [[ ${TEST_DEVICE_FAIL:-no} != yes ]] ;;
             *) return 1 ;;
         esac
@@ -220,10 +225,15 @@ setup() {
 }
 
 @test "permanent authorization explicitly requested and backed up" {
+    usb::apply
+    : >"$TEST_CALLS"
     run usb::allow 7 --permanent
     [ "$status" -eq 0 ]
-    grep -Fx 'usbguard allow-device --permanent 7' "$TEST_CALLS"
+    grep -Fx 'usbguard allow-device 7' "$TEST_CALLS"
+    grep -Fx 'usbguard append-rule allow id 1234:abcd hash "abcd" via-port "1-1"' "$TEST_CALLS"
     grep -Fx "backup $USB_CONFIG_DIR/rules.conf" "$TEST_CALLS"
+    [ "$(cat "$USB_STATE_DIR/active-profile")" = legacy ]
+    grep -Fx 'allow id 1234:abcd hash "abcd" via-port "1-1"' "$USB_STATE_DIR/legacy.rules"
 }
 
 @test "unrecognized allow options and extra block arguments are refused" {
