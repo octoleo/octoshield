@@ -1186,7 +1186,7 @@ static void update_status_row(StatusRow *row, JsonObject *root)
     const char *label = "Unknown";
     const char *icon = "dialog-question-symbolic";
     const char *css = "dim-label";
-    if (g_str_equal(state, "active")) { label = "Active"; icon = "emblem-ok-symbolic"; css = "success"; }
+    if (g_str_equal(state, "active")) { label = "Active"; icon = "object-select-symbolic"; css = "success"; }
     else if (g_str_equal(state, "inactive")) { label = "Inactive"; icon = "media-playback-stop-symbolic"; css = "warning"; }
     else if (g_str_equal(state, "partial")) { label = "Needs attention"; icon = "dialog-warning-symbolic"; css = "warning"; }
     else if (g_str_equal(state, "unsupported")) { label = "Not available"; icon = "dialog-information-symbolic"; }
