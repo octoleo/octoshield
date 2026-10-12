@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+# Purge removes only package-owned service enablement. Security configuration,
+# USB device rules, and private recovery snapshots deliberately remain intact.
+if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
+    case "$1" in
+        purge)
+            systemctl disable octoshield-monitor.service >/dev/null 2>&1 || true
+            systemctl --global disable octoshield-notify.service >/dev/null 2>&1 || true
+            ;;
+    esac
+    case "$1" in
+        remove | purge)
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            ;;
+    esac
+fi
+
+#DEBHELPER#
+
+exit 0

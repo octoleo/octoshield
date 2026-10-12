@@ -1,8 +1,9 @@
-name: Test and lint
+name: Test lint and package
 
 on:
   push:
     branches: [main, 'feat/**', 'fix/**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -22,21 +23,83 @@ jobs:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - name: Install test dependencies
+      - name: Install test and package dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq util-linux
+          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq util-linux debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils xvfb xauth dbus-daemon
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Lint, compile and run isolated tests
-        run: make check
+      - name: Lint, compile and test CLI and native interface
+        run: |
+          make check ui-test
+          bash tests/package.sh
+      - name: Test native windows and asynchronous operations
+        run: make ui-display-test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-ui-screenshots-ubuntu-${{ matrix.ubuntu }}
+          path: build/ui-*.png
+          if-no-files-found: ignore
       - name: Check C memory and undefined behavior
         run: make sanitize
-      - name: Run user-session fixtures without root
+      - name: Run user-session fixtures and native app without root
         run: |
           useradd --create-home octoshield-test
           chmod -R a+rX "$GITHUB_WORKSPACE"
-          runuser -u octoshield-test -- bats tests/desktop.bats
+          runuser -u octoshield-test -- bats tests/desktop.bats tests/user-api.bats
+          runuser -u octoshield-test -- dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo build/octoshield-gtk --smoke-test
+      - name: Build and inspect Debian archive
+        run: |
+          dpkg-buildpackage -us -uc -b
+          version=$(dpkg-parsechangelog -S Version)
+          bash tests/package.sh "../octoshield_${version}_amd64.deb"
+      - name: Verify actual install, upgrade and removal in disposable container
+        run: |
+          version=$(dpkg-parsechangelog -S Version)
+          bash tests/package-lifecycle.sh --disposable-system "../octoshield_${version}_amd64.deb"
+      - name: Prepare downloadable artifacts
+        env:
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+        run: |
+          mkdir -p dist
+          version=$(dpkg-parsechangelog -S Version)
+          cp "../octoshield_${version}_amd64.deb" "dist/octoshield_${version}_ubuntu${UBUNTU_VERSION}_amd64.deb"
+          cd dist
+          sha256sum *.deb > "SHA256SUMS-ubuntu${UBUNTU_VERSION}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: octoshield-ubuntu-${{ matrix.ubuntu }}-amd64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish tagged Debian packages
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: test "$RELEASE_TAG" = "v$(dpkg-parsechangelog -S Version)"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: octoshield-ubuntu-*-amd64
+          path: release
+          merge-multiple: true
+      - name: Publish packages and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release/*.deb release/SHA256SUMS-* --verify-tag --generate-notes --title "OctoShield $RELEASE_TAG"

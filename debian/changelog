@@ -1,0 +1,7 @@
+octoshield (0.2.0) unstable; urgency=medium
+
+  * Add native GNOME desktop controls alongside the existing terminal interface.
+  * Package the application, least-privilege helper, desktop integration, and
+    optional monitoring without enabling hardening during package installation.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Mon, 12 Oct 2026 12:00:00 +0000

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop octoshield-monitor.service >/dev/null 2>&1 || true
+        fi
+        # Stop only our notification service in running user managers. No user
+        # configuration, firewall policy, USB rules, or backups are removed.
+        if command -v loginctl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+            loginctl list-users --no-legend --no-pager 2>/dev/null |
+                while read -r uid _rest; do
+                    case "$uid" in '' | *[!0-9]*) continue ;; esac
+                    systemctl --user --machine="$uid@.host" stop octoshield-notify.service >/dev/null 2>&1 || true
+                done
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
