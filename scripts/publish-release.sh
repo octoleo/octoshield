@@ -39,7 +39,10 @@ publish::release() {
         publish::error 'Could not inspect draft releases; refusing to create a duplicate.'
         return 1
     }
-    jq -e 'type == "array" and all(.[]; type == "array")' "$PUBLISH_TEMP/releases.json" >/dev/null || return 1
+    jq -e 'type == "array" and all(.[]; type == "array")' "$PUBLISH_TEMP/releases.json" >/dev/null || {
+        publish::error 'GitHub returned an unexpected release list shape.'
+        return 1
+    }
     jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' "$PUBLISH_TEMP/releases.json" >"$PUBLISH_TEMP/matches.json"
     count=$(jq 'length' "$PUBLISH_TEMP/matches.json")
     [[ $count != 0 ]] || return 4
@@ -48,8 +51,31 @@ publish::release() {
         return 1
     }
     id=$(jq -r '.[0].id' "$PUBLISH_TEMP/matches.json")
-    [[ $id =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ $id =~ ^[1-9][0-9]*$ ]] || {
+        publish::error 'GitHub returned an invalid release identifier.'
+        return 1
+    }
     publish::get "repos/$GH_REPO/releases/$id" "$output"
+}
+
+publish::created_release() {
+    local tag=$1 output=$2 attempt result
+    # GitHub may acknowledge draft creation before its list/read endpoints can
+    # see it. Retry only that temporary absence, never authentication or errors.
+    for attempt in 1 2 3 4 5; do
+        result=0
+        publish::release "$tag" "$output" || result=$?
+        if ((result == 0)); then return 0; fi
+        if ((result != 4)); then
+            publish::error 'Could not inspect the created draft; it remains unpublished for a safe retry.'
+            return 1
+        fi
+        if ((attempt < 5)); then
+            printf 'Created draft is not visible yet (attempt %s/5); checking again.\n' "$attempt" >&2
+            sleep 1
+        fi
+    done
+    publish::error 'Created draft was not visible after five checks; rerun publication to resume it safely.'
 }
 
 publish::tag_commit() {
@@ -304,7 +330,7 @@ publish::main() (
         publish::notes "$tag" "$commit" >"$PUBLISH_TEMP/notes.md"
         gh release create "$tag" --repo "$GH_REPO" --draft --target "$commit" \
             --title "OctoShield $tag" --notes-file "$PUBLISH_TEMP/notes.md" || return 1
-        publish::release "$tag" "$PUBLISH_TEMP/release.json" || return 1
+        publish::created_release "$tag" "$PUBLISH_TEMP/release.json" || return 1
     fi
     publish::draft "$PUBLISH_TEMP/release.json" "$tag" "$commit" || return 1
     # GitHub may delay creating the tag until a draft is published. An existing
