@@ -202,9 +202,9 @@ setup() {
     profiles::dispatch rule-add conference 88 tcp any any 0 >/dev/null
     : >"$CALLS"
     profile_controls::expire conference
-    grep -q 'to any port 443' "$CALLS"
-    run grep 'to any port 88' "$CALLS"
+    run grep -E '^ufw (allow|reload|default|--force)' "$CALLS"
     [ "$status" -eq 1 ]
+    [ "$(jq '.policy.rules[0].port' "$CORE_STATE/profiles/controls/firewall.json")" -eq 443 ]
     profiles::_result firewall applied verified conference
     result=$(profile_controls::verify firewall)
     [ "$(jq -r .state <<<"$result")" = partial ]
@@ -334,15 +334,76 @@ RULES
     printf '{"octoshield-status.service":{"enabled":"enabled","active":"active"}}' >"$UNITS"
     profiles::dispatch rule-add conference 443 tcp any any 60 >/dev/null
     profile_controls::apply firewall conference
+    # Simulate the changed native snapshot after a reload removed timed grants.
+    snapshot=$(profile_controls::snapshot firewall | jq -c '.status+="\nReloaded"')
+    profile_controls::snapshot() { printf '%s\n' "$snapshot"; }
     profile_controls::_runtime_narrowed() { return 0; }
-    profile_controls::_firewall_apply() { printf '%s\n' "$2" >"$BATS_TEST_TMPDIR/reapplied-policy.json"; }
+    : >"$CALLS"
     profile_controls::expire conference
-    [ "$(jq '.rules|length' "$BATS_TEST_TMPDIR/reapplied-policy.json")" -eq 0 ]
     [ "$(jq '.policy.rules|length' "$CORE_STATE/profiles/controls/firewall.json")" -eq 0 ]
+    [ ! -s "$CALLS" ]
 }
+
 @test 'missing primary service cannot be reported as enabled' {
     profiles::dispatch set office services.printing enabled
     run profile_controls::apply services office
     [ "$status" -ne 0 ]
     [[ $output == *'primary service is not installed'* ]]
+}
+@test 'expiry reconciles a full policy without rebuilding or adding native firewall rules' {
+    # Exercise the full supported profile size, including a pending edit which
+    # must not become an applied permission during expiry housekeeping.
+    policy=$(jq -cn '{rules:[range(1;257)|{id:("r1-1-"+tostring),port:(10000+.),protocol:"tcp",source:"any",interface:"any",expires_at:(if .==1 then 1 else 0 end)}]}')
+    profile_controls::_capture firewall
+    snapshot=$(profile_controls::snapshot firewall)
+    saved=$(profile_controls::_read firewall | jq -c --argjson policy "$policy" --argjson observed "$snapshot" '.policy=$policy|.observed=$observed')
+    profile_controls::_write firewall "$saved"
+    before=$(cat "$CORE_STATE/profiles/controls/firewall.json")
+    profile_firewall::verify() {
+        jq -e '.rules|length==255 and all(.[];.expires_at==0)' <<<"$1" >/dev/null
+    }
+    : >"$CALLS"
+    profile_controls::expire conference
+    [ "$(jq '.policy.rules|length' "$CORE_STATE/profiles/controls/firewall.json")" -eq 255 ]
+    run grep -E '^ufw (allow|reload|default|--force)' "$CALLS"
+    [ "$status" -eq 1 ]
+    [ "$(jq -r .expected "$CORE_STATE/profiles/controls/firewall.json")" = "$(jq -r .expected <<<"$before")" ]
+}
+@test 'failed expiry verification or observation race keeps expired records retryable' {
+    profile_controls::apply firewall conference
+    saved=$(profile_controls::_read firewall | jq -c '.policy.rules=[{id:"r1-1-1",port:443,protocol:"tcp",source:"any",interface:"any",expires_at:1}]')
+    profile_controls::_write firewall "$saved"
+    original=$(cat "$CORE_STATE/profiles/controls/firewall.json")
+    FAIL=verify
+    run profile_controls::expire conference
+    [ "$status" -ne 0 ]
+    [ "$(cat "$CORE_STATE/profiles/controls/firewall.json")" = "$original" ]
+    profile_controls::expiry_due
+    FAIL=''
+    profile_firewall::verify() {
+        printf active >"$FIREWALL"
+        printf 'external edit\n' >>"$PROFILE_ETC/ufw/user.rules"
+    }
+    run profile_controls::expire conference
+    [ "$status" -ne 0 ]
+    [ "$(cat "$CORE_STATE/profiles/controls/firewall.json")" = "$original" ]
+    profile_controls::expiry_due
+}
+@test 'expiry resumes an interrupted profile-document save without activating future pending edits' {
+    profile_controls::apply firewall conference
+    profiles::_result firewall applied verified conference
+    document=$(profiles::state | jq -c '.profiles.conference.firewall.rules=[{id:"r1-1-1",port:443,protocol:"tcp",source:"any",interface:"any",expires_at:1},{id:"r1-1-2",port:88,protocol:"tcp",source:"any",interface:"any",expires_at:0}]')
+    profiles::_save "$document"
+    # Adapter metadata is already reconciled while the editable document still
+    # contains an expired row, as after interruption between atomic saves.
+    profile_controls::expiry_due
+    : >"$CALLS"
+    profiles::expire
+    [ "$(profiles::get conference firewall | jq '.rules|length')" -eq 1 ]
+    [ "$(profiles::get conference firewall | jq '.rules[0].port')" -eq 88 ]
+    [ "$(jq '.policy.rules|length' "$CORE_STATE/profiles/controls/firewall.json")" -eq 0 ]
+    run profile_controls::expiry_due
+    [ "$status" -ne 0 ]
+    run grep -E '^ufw (allow|reload|default|--force)' "$CALLS"
+    [ "$status" -eq 1 ]
 }

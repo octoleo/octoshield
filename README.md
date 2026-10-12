@@ -84,7 +84,7 @@ Re-run the same standalone installation procedure to update its program files. S
 
 Conference and Public begin with restrictive discovery and service settings. Office and Home retain incoming-deny firewall protection and disabled discovery, while restoring original printing, Bluetooth and saved Wi-Fi autoconnect choices. Home is not an unprotected mode. Firewall, USB, network privacy, services and monitoring can each follow the selected global profile or another profile. Security updates, AppArmor, sudo authentication and screen locking remain independent baseline protections.
 
-Use the profile controls in the application or open `octoshield profile` for the guided Whiptail manager. Before adopting USB profiles, complete physical device enrollment through **Activate USB protection** / `octoshield apply usb`. Firewall profiles require UFW to be installed. Existing 1.0.0 settings remain effective until you explicitly select a profile; they are not guessed from the last command you ran.
+Use the profile controls in the application or open `octoshield profile` for the guided Whiptail manager. Initial USB protection requires physical device enrollment, available through **Activate USB protection** / `octoshield apply usb` or the first profile switch. Firewall preparation offers to install UFW when missing, with a separate confirmation before policy changes. Existing 1.0.0 settings remain effective until you explicitly select a profile; they are not guessed from the last command you ran.
 
 ```bash
 octoshield status
@@ -105,7 +105,7 @@ octoshield profile apply workshop
 octoshield profile show workshop
 ```
 
-Use your actual network/interface. Rules accept TCP or UDP, an IPv4/IPv6 address or CIDR, and an interface name; `any` explicitly permits any source or interface. A zero-minute duration creates a permanent allowance in UFW's saved policy. A finite duration starts its deadline when saved and requires an enabled, running status observer before application. Its runtime-only kernel rule has a UTC deadline and stops admitting new connections when that deadline arrives, even if the observer stops or OctoShield is uninstalled. Unsupported kernel time matching refuses the grant rather than creating an untimed exception. A firewall reload or reboot removes temporary permissions sooner, and expired permissions cannot reopen from UFW's saved rules at boot. Apply the profile explicitly to restore any still-unexpired permissions after reload/reboot. The observer reports state and cleans up expired rules; a delayed cleanup does not extend their kernel-enforced deadline.
+Use your actual network/interface. Rules accept TCP or UDP, an IPv4/IPv6 address or CIDR, and an interface name; `any` explicitly permits any source or interface. A zero-minute duration creates a permanent allowance in UFW's saved policy. A finite duration starts its deadline when saved and requires an enabled, running status observer before application. Its runtime-only kernel rule has a UTC deadline and stops admitting new connections when that deadline arrives, even if the observer stops or OctoShield is uninstalled. Unsupported kernel time matching refuses the grant rather than creating an untimed exception. A firewall reload or reboot removes temporary permissions sooner, and expired permissions cannot reopen from UFW's saved rules at boot. Apply the profile explicitly to restore any still-unexpired permissions after reload/reboot. The observer verifies expired permissions are closed and reconciles their saved metadata; inert kernel rules remain until the next Apply or reload. Delayed reconciliation does not extend their deadline.
 
 `ufw status` lists persisted UFW exceptions and does **not** include these runtime-only timed permissions. Use OctoShield's status and `octoshield profile show workshop` to inspect the observed state and configured deadlines; OctoShield checks the kernel rules too. Saved edits and removals take effect when the firewall profile is reapplied. Profile switching never uses `ufw reset` or deliberately disables an active firewall; it removes old exceptions before adding the destination's rules. Established connections are not forcibly terminated.
 
@@ -130,11 +130,11 @@ The GUI is a native application, not a terminal embedded in a window. A fixed pr
 
 ## Individual baseline controls
 
-These commands remain available for initial setup and deliberate individual hardening. Once profiles manage an area, prefer profile edits and switches so its intended state and restoration baseline stay coherent. The original `apply firewall` action below is separate from switching an existing firewall profile.
+These commands remain available for initial setup and deliberate individual hardening. `apply firewall`, `apply network` and `apply services` select Conference for that control through the shared profile engine. Use profile edits and switches to keep intended settings and restoration baselines coherent.
 
 | Control | Behavior and practical effect |
 | --- | --- |
-| `firewall` | Prepares/installs UFW while network access is available, then asks you to disconnect before final confirmation. Backs up and **resets existing UFW rules**; enables IPv4/IPv6 filtering, denies unsolicited inbound and forwarded traffic, permits outgoing traffic, and enables low-level logging. UFW is briefly disabled during reset; existing inbound exceptions are removed. |
+| `firewall` | Prepares/installs UFW when needed, saves the original policy, and applies the Conference firewall profile after review. Enables IPv4/IPv6 filtering, denies unsolicited inbound and forwarded traffic, permits outgoing traffic, and replaces inbound exceptions with the profile's rules. Never uses `ufw reset` or deliberately disables an active firewall during a switch. |
 | `usb` | Enrolls the physically reviewed connected device set with port-bound USBGuard rules. Unknown storage, keyboards, network adapters, and other USB devices remain blocked pending administrator authorization. USBGuard's D-Bus bridge is masked; policy IPC is root-only. |
 | `network` | Disables autoconnect for existing Wi-Fi profiles, enables private stable Wi-Fi MAC addresses and randomized scanning, and disables LLMNR/mDNS in existing profiles and defaults. Reconnect manually to apply profile changes. IPv6 remains enabled. |
 | `services` | Stops and masks installed SSH services/socket, Avahi, CUPS services/socket/path, Bluetooth daemon, Samba, and system GNOME remote desktop. Printing, Bluetooth input and inbound SSH may stop. Per-user sharing services require separate review. |
@@ -164,7 +164,7 @@ octoshield apply monitor
 octoshield monitor enable-desktop
 ```
 
-Run the controls you choose; this list is not an unattended installer. Disruptive controls request confirmation; system actions create private change records. `status` shows service state, listening ports, connection profiles, AppArmor kernel state, Secure Boot information when `mokutil` is present, and storage topology. An active service is not proof of complete protection; verify effective policy and hardware behavior.
+Run the controls you choose; this list is not an unattended installer. Disruptive controls request confirmation; system actions create private change records. `status` reads the verified protection summaries and exposure findings; `inspect` requests a fresh privileged inspection. An active service is not proof of complete protection; verify effective policy and hardware behavior.
 
 ```bash
 sudo ufw status verbose
