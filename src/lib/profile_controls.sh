@@ -3,6 +3,7 @@
 # Native adapters retain a first-adoption baseline and refuse to overwrite drift.
 PROFILE_ETC=/etc
 PROFILE_RUN=/run
+PROFILE_SHARE=/usr/share/ufw
 
 profile_controls::_directory() { printf '%s/profiles/controls\n' "$CORE_STATE"; }
 profile_controls::_read() {
@@ -558,21 +559,36 @@ profile_controls::expire() {
 # Refuse adoption when package-owned base rules were changed instead of silently
 # reporting that an earlier unconditional ACCEPT is protected by default-deny.
 profile_controls::_standard_ufw_hooks() {
-    local manifest name path expected actual
+    local manifest name path vendor relative expected actual vendor_hash
     if [[ -e $(profile_controls::_directory)/firewall.json ]]; then
         # First adoption checked the vendor files before removing the four
         # discovery grants. Subsequent changes must match our recorded policy.
         profile_controls::conflict firewall
         return
     fi
-    manifest=$(dpkg-query -W -f='${Conffiles}' ufw) || return 1
+    # UFW installs these hooks through ucf/postinst, not dpkg Conffiles. Verify
+    # their package-owned templates against dpkg's payload checksums, then compare
+    # installed hooks to those verified templates. A modified vendor template
+    # must never make an equally modified hook look like a safe factory default.
+    manifest=$(dpkg-query --control-show ufw md5sums) || return 1
     for name in before.rules before6.rules after.rules after6.rules before.init after.init; do
         path="$PROFILE_ETC/ufw/$name"
         [[ -e $path || -L $path ]] || continue
         [[ -f $path && ! -L $path ]] || return 1
-        expected=$(awk -v path="/etc/ufw/$name" '$1==path {print $2}' <<<"$manifest") || return 1
+        case "$name" in *.rules) relative="iptables/$name" ;; *) relative=$name ;; esac
+        vendor="$PROFILE_SHARE/$relative"
+        [[ -f $vendor && ! -L $vendor ]] || {
+            core::die "The UFW vendor template for $name is missing or unsafe; reinstall ufw before profile adoption."
+            return 1
+        }
+        expected=$(awk -v path="usr/share/ufw/$relative" '$2==path {print $1}' <<<"$manifest") || return 1
         [[ $expected =~ ^[a-f0-9]{32}$ ]] || {
-            core::die "Review unmanaged UFW hook $name before profile adoption."
+            core::die "Package integrity data is missing for the UFW $name vendor template; reinstall ufw before profile adoption."
+            return 1
+        }
+        vendor_hash=$(md5sum -- "$vendor") || return 1
+        [[ ${vendor_hash%% *} == "$expected" ]] || {
+            core::die "The UFW vendor template for $name differs from the installed package. Review it or reinstall ufw before profile adoption."
             return 1
         }
         actual=$(md5sum -- "$path") || return 1

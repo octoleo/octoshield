@@ -51,6 +51,24 @@ setup() {
     profile_firewall::temporary_apply() { :; }
     iptables-save() { printf ':ufw-user-input - [99:20]\n-A INPUT -j ufw-before-input\n'; }
     ip6tables-save() { printf ':ufw6-user-input - [10:30]\n-A INPUT -j ufw6-before-input\n'; }
+    make_vendor_hooks() {
+        local name relative hash
+        PROFILE_SHARE="$BATS_TEST_TMPDIR/share/ufw"
+        HOOK_MANIFEST="$BATS_TEST_TMPDIR/ufw.md5sums"
+        mkdir -p "$PROFILE_SHARE/iptables"
+        : >"$HOOK_MANIFEST"
+        for name in before.rules before6.rules after.rules after6.rules before.init after.init; do
+            case "$name" in *.rules) relative="iptables/$name" ;; *) relative=$name ;; esac
+            printf 'vendor %s\n' "$name" >"$PROFILE_SHARE/$relative"
+            cp "$PROFILE_SHARE/$relative" "$PROFILE_ETC/ufw/$name"
+            hash=$(md5sum "$PROFILE_SHARE/$relative")
+            printf '%s  usr/share/ufw/%s\n' "${hash%% *}" "$relative" >>"$HOOK_MANIFEST"
+        done
+        dpkg-query() {
+            [[ $* == '--control-show ufw md5sums' ]] || return 1
+            cat "$HOOK_MANIFEST"
+        }
+    }
     ufw() {
         printf 'ufw %s\n' "$*" >>"$CALLS"
         [[ $FAIL != "ufw $*" ]] || return 1
@@ -210,8 +228,8 @@ setup() {
     [ "$(jq -r .state <<<"$result")" = partial ]
 }
 @test 'nonstandard UFW before rules require review instead of false protection claim' {
+    make_vendor_hooks
     printf 'modified rule\n' >"$PROFILE_ETC/ufw/before.rules"
-    dpkg-query() { printf '/etc/ufw/before.rules 00000000000000000000000000000000\n'; }
     run profile_controls::_standard_ufw_hooks
     [ "$status" -ne 0 ]
     [[ $output == *'administrator changes'* ]]
@@ -406,4 +424,34 @@ RULES
     [ "$status" -ne 0 ]
     run grep -E '^ufw (allow|reload|default|--force)' "$CALLS"
     [ "$status" -eq 1 ]
+}
+@test 'stock ucf-managed UFW hooks validate through payload templates without Conffiles entries' {
+    make_vendor_hooks
+    profile_controls::_standard_ufw_hooks
+    # Read-only adoption validation must not invoke UFW or rewrite factory files.
+    [ ! -s "$CALLS" ]
+    cmp "$PROFILE_SHARE/iptables/before.rules" "$PROFILE_ETC/ufw/before.rules"
+}
+@test 'matching administrator edits to both vendor template and hook fail package integrity verification' {
+    make_vendor_hooks
+    printf 'modified vendor rule\n' >"$PROFILE_SHARE/iptables/before.rules"
+    cp "$PROFILE_SHARE/iptables/before.rules" "$PROFILE_ETC/ufw/before.rules"
+    run profile_controls::_standard_ufw_hooks
+    [ "$status" -ne 0 ]
+    [[ $output == *'differs from the installed package'* ]]
+    [ ! -s "$CALLS" ]
+}
+@test 'missing package checksum or symlink vendor templates fail closed' {
+    make_vendor_hooks
+    cp "$HOOK_MANIFEST" "$HOOK_MANIFEST.saved"
+    : >"$HOOK_MANIFEST"
+    run profile_controls::_standard_ufw_hooks
+    [ "$status" -ne 0 ]
+    [[ $output == *'integrity data is missing'* ]]
+    cp "$HOOK_MANIFEST.saved" "$HOOK_MANIFEST"
+    mv "$PROFILE_SHARE/iptables/before.rules" "$PROFILE_SHARE/iptables/before.saved"
+    ln -s before.saved "$PROFILE_SHARE/iptables/before.rules"
+    run profile_controls::_standard_ufw_hooks
+    [ "$status" -ne 0 ]
+    [[ $output == *'missing or unsafe'* ]]
 }
