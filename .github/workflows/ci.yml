@@ -148,8 +148,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          bash scripts/version.sh --check "$RELEASE_TAG"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          bash scripts/version.sh --check "$RELEASE_TAG"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: octoshield-ubuntu-*-amd64
@@ -187,22 +187,28 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify reviewed release and signing configuration
-        id: configuration
+      - name: Verify reviewed current release before accessing signing material
+        id: release-gate
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
-          APT_SIGNING_KEY_FINGERPRINT: ${{ vars.APT_SIGNING_KEY_FINGERPRINT }}
-          APT_REPOSITORY_URL: ${{ vars.APT_REPOSITORY_URL }}
         run: |
-          bash scripts/version.sh --check "$RELEASE_TAG"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
           main_version=$(git show refs/remotes/origin/main:src/octoshield | sed -n 's/^readonly OCTOSHIELD_VERSION=//p')
           if test "$RELEASE_TAG" != "v$main_version"; then
             echo 'APT publishing skipped: this is no longer the version on main.'
-            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'current=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          bash scripts/version.sh --check "$RELEASE_TAG"
+          echo 'current=true' >> "$GITHUB_OUTPUT"
+      - name: Check optional signing configuration
+        id: configuration
+        if: steps.release-gate.outputs.current == 'true'
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_KEY_FINGERPRINT: ${{ vars.APT_SIGNING_KEY_FINGERPRINT }}
+          APT_REPOSITORY_URL: ${{ vars.APT_REPOSITORY_URL }}
+        run: |
           if test -z "$APT_SIGNING_KEY" || test -z "$APT_SIGNING_KEY_FINGERPRINT" || test -z "$APT_REPOSITORY_URL"; then
             echo 'APT publishing skipped: signing key, fingerprint and public URL must all be configured.'
             echo 'configured=false' >> "$GITHUB_OUTPUT"
