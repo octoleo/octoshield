@@ -1,0 +1,36 @@
+[Unit]
+Description=Octoshield security event monitor
+After=systemd-journald.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/octoshield monitor run
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+RuntimeDirectory=octoshield
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictNamespaces=yes
+MemoryMax=96M
+TasksMax=24
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target
