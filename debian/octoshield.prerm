@@ -2,20 +2,60 @@
 set -e
 
 case "$1" in
+    remove | upgrade | failed-upgrade | deconfigure)
+        if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
+        # Never wait here: an active control may itself be waiting for APT's
+        # package lock. Refuse replacement rather than deadlock or kill it.
+        state=/var/lib/octoshield
+        maintenance=/run/octoshield-package-maintenance
+        if [ -L "$state" ] || { [ -e "$state" ] && [ ! -d "$state" ]; }; then
+            printf '%s\n' 'OctoShield: refusing package changes because its state directory is invalid.' >&2
+            exit 1
+        fi
+        if [ ! -d "$state" ]; then mkdir -m 0700 "$state"; fi
+        if [ "$(stat -c '%u:%a' "$state")" != '0:700' ] || [ -L "$state/lock" ] ||
+            { [ -e "$state/lock" ] && [ ! -f "$state/lock" ]; }; then
+            printf '%s\n' 'OctoShield: its private state/lock needs administrator review before package changes.' >&2
+            exit 1
+        fi
+        exec 9>"$state/lock"
+        if ! flock -n 9; then
+            printf '%s\n' \
+                'OctoShield: a protection change is still running; package changes were refused.' \
+                'Let the operation finish, then retry APT. Do not force-kill it.' >&2
+            exit 1
+        fi
+        if [ -L "$maintenance" ] || { [ -e "$maintenance" ] && [ ! -f "$maintenance" ]; }; then
+            printf '%s\n' 'OctoShield: the package-maintenance marker needs administrator review.' >&2
+            exit 1
+        fi
+        # Blocks new system operations after this script releases its lock and
+        # until postinst/postrm reaches the appropriate completion/abort phase.
+        (
+            umask 077
+            : >"$maintenance"
+        )
+        ;;
+esac
+
+case "$1" in
     remove)
         if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl stop octoshield-monitor.service >/dev/null 2>&1 || true
         fi
-        # Stop only our notification service in running user managers. No user
+        # Disable only our notification service in running user managers. No user
         # configuration, firewall policy, USB rules, or backups are removed.
         if command -v loginctl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
             loginctl list-users --no-legend --no-pager 2>/dev/null |
                 while read -r uid _rest; do
                     case "$uid" in '' | *[!0-9]*) continue ;; esac
-                    systemctl --user --machine="$uid@.host" stop octoshield-notify.service >/dev/null 2>&1 || true
+                    systemctl --user --machine="$uid@.host" disable --now octoshield-notify.service >/dev/null 2>&1 || true
                 done
         fi
+        printf '%s\n' \
+            'OctoShield: removing the app stops its monitoring; previously approved security settings and private backups remain.' \
+            'Offline users may retain notification enablement preferences. No home directories or custom units are deleted.' >&2
         ;;
 esac
 

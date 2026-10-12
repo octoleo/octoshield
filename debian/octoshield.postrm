@@ -17,6 +17,14 @@ if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
     esac
 fi
 
+if [ -z "${DPKG_ROOT:-}" ]; then
+    case "$1" in
+        remove | purge | failed-upgrade | abort-install | abort-upgrade)
+            rm -f -- /run/octoshield-package-maintenance
+            ;;
+    esac
+fi
+
 #DEBHELPER#
 
 exit 0

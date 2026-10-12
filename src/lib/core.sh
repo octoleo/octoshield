@@ -5,6 +5,7 @@
 CORE_STATE=/var/lib/octoshield
 CORE_TRANSACTION=
 CORE_APT_UPDATED=0
+CORE_PACKAGE_MAINTENANCE=/run/octoshield-package-maintenance
 
 core::log() { printf 'OctoShield: %s\n' "$*" >&2; }
 core::die() {
@@ -55,8 +56,16 @@ core::supported_os() {
 }
 
 # One process owns all system mutations. User settings use their own user lock.
+core::package_available() {
+    [[ ! -e $CORE_PACKAGE_MAINTENANCE && ! -L $CORE_PACKAGE_MAINTENANCE ]] || {
+        core::die 'An OctoShield package update or removal is in progress. Finish or repair the APT operation before changing protections; see the recovery guide if it was interrupted.'
+        return 1
+    }
+}
+
 core::begin() {
     core::require_root || return 1
+    core::package_available || return 1
     umask 077
     [[ ! -L $CORE_STATE ]] || {
         core::die 'State directory must not be a symlink.'
@@ -68,6 +77,12 @@ core::begin() {
         core::die 'Another OctoShield operation is running.'
         return 1
     }
+    # A package operation may have acquired the same lock after our first check.
+    # Its marker outlives the maintainer script while dpkg replaces program files.
+    if ! core::package_available; then
+        exec 9>&-
+        return 1
+    fi
     CORE_TRANSACTION="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     install -d -m 0700 "$CORE_STATE/backups/$CORE_TRANSACTION/original" || return 1
     core::record "BEGIN $*"
