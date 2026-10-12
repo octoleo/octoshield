@@ -3,7 +3,7 @@ Upstream-Name: OctoShield
 Source: https://github.com/octoleo/octoshield
 
 Files: *
-Copyright: 2026 OctoLeo contributors
+Copyright: 2026 Vast Development Method and Octoleo contributors
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ License: Apache-2.0
  On Debian systems, the complete text of the Apache License, Version 2.0
  can be found in /usr/share/common-licenses/Apache-2.0.
 
-Files: data/org.octoleo.OctoShield.metainfo.xml
-Copyright: 2026 OctoLeo contributors
+Files: data/io.vdm.OctoShield.metainfo.xml
+Copyright: 2026 Vast Development Method and Octoleo contributors
 License: CC0-1.0
  To the extent possible under law, the author has waived all copyright and
  related or neighboring rights to this metadata.

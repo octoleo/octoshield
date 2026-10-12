@@ -18,9 +18,16 @@ build/octoshield-monitor: src/monitor.c
 
 gui: build/octoshield-gtk
 
-build/octoshield-gtk: src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h
+build/octoshield-resources.c: data/branding/octoshield.gresource.xml data/branding/OctoShield-light.png data/branding/OctoShield-dark.png
 	mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) $$(pkg-config --cflags $(UI_PACKAGES)) src/ui/octoshield-gtk.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
+	glib-compile-resources --sourcedir=data/branding --generate-source --target=$@ $<
+
+build/octoshield-resources.o: build/octoshield-resources.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -Wno-overlength-strings -fPIE $$(pkg-config --cflags gio-2.0) -c $< -o $@
+
+build/octoshield-gtk: src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h build/octoshield-resources.o
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) $$(pkg-config --cflags $(UI_PACKAGES)) src/ui/octoshield-gtk.c src/ui/protocol.c build/octoshield-resources.o $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
 
 build/test-ui: tests/ui-test.c src/ui/protocol.c src/ui/protocol.h
 	mkdir -p build
@@ -30,13 +37,13 @@ ui-test test-gui: gui build/test-ui
 	build/test-ui
 	bats tests/gui/*.bats
 
-build/test-ui-app: tests/ui-app-test.c src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h
+build/test-ui-app: tests/ui-app-test.c src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h build/octoshield-resources.o
 	mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) -Isrc/ui $$(pkg-config --cflags $(UI_PACKAGES)) tests/ui-app-test.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) -Isrc/ui $$(pkg-config --cflags $(UI_PACKAGES)) tests/ui-app-test.c src/ui/protocol.c build/octoshield-resources.o $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
 
-build/test-ui-lifecycle: tests/gui/lifecycle.c src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h
+build/test-ui-lifecycle: tests/gui/lifecycle.c src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h build/octoshield-resources.o
 	mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) -Isrc/ui $$(pkg-config --cflags $(UI_PACKAGES)) tests/gui/lifecycle.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) -Isrc/ui $$(pkg-config --cflags $(UI_PACKAGES)) tests/gui/lifecycle.c src/ui/protocol.c build/octoshield-resources.o $(LDFLAGS) -o $@ $$(pkg-config --libs $(UI_PACKAGES))
 
 ui-display-test: build/test-ui-app build/test-ui-lifecycle
 	dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 build/test-ui-app
@@ -69,10 +76,12 @@ install: all gui
 	@for unit in octoshield-monitor.service octoshield-notify.service; do sed 's@/usr/local/@/usr/@g' "systemd/$$unit" >"$(DESTDIR)/usr/lib/octoshield/systemd/$$unit"; done
 	install -D -m 0644 "$(DESTDIR)/usr/lib/octoshield/systemd/octoshield-monitor.service" "$(DESTDIR)/usr/lib/systemd/system/octoshield-monitor.service"
 	install -D -m 0644 "$(DESTDIR)/usr/lib/octoshield/systemd/octoshield-notify.service" "$(DESTDIR)/usr/lib/systemd/user/octoshield-notify.service"
-	install -D -m 0644 data/org.octoleo.OctoShield.desktop "$(DESTDIR)/usr/share/applications/org.octoleo.OctoShield.desktop"
-	install -D -m 0644 data/org.octoleo.OctoShield.svg "$(DESTDIR)/usr/share/icons/hicolor/scalable/apps/org.octoleo.OctoShield.svg"
-	install -D -m 0644 data/org.octoleo.OctoShield.metainfo.xml "$(DESTDIR)/usr/share/metainfo/org.octoleo.OctoShield.metainfo.xml"
-	install -D -m 0644 data/org.octoleo.octoshield.policy "$(DESTDIR)/usr/share/polkit-1/actions/org.octoleo.octoshield.policy"
+	install -D -m 0644 data/io.vdm.OctoShield.desktop "$(DESTDIR)/usr/share/applications/io.vdm.OctoShield.desktop"
+	install -D -m 0644 data/branding/OctoShield-light.png "$(DESTDIR)/usr/share/pixmaps/io.vdm.OctoShield.png"
+	install -D -m 0644 data/branding/OctoShield-light.png "$(DESTDIR)/usr/share/octoshield/branding/OctoShield-light.png"
+	install -D -m 0644 data/branding/OctoShield-dark.png "$(DESTDIR)/usr/share/octoshield/branding/OctoShield-dark.png"
+	install -D -m 0644 data/io.vdm.OctoShield.metainfo.xml "$(DESTDIR)/usr/share/metainfo/io.vdm.OctoShield.metainfo.xml"
+	install -D -m 0644 data/io.vdm.OctoShield.policy "$(DESTDIR)/usr/share/polkit-1/actions/io.vdm.OctoShield.policy"
 
 package:
 	dpkg-buildpackage -us -uc -b

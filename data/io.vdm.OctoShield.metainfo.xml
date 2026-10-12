@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>io.vdm.OctoShield</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>OctoShield</name>
+  <summary>Review and configure Ubuntu laptop protections</summary>
+  <description>
+    <p>Prepare your Ubuntu laptop for conferences, shared networks, and everyday
+    work. OctoShield brings established Linux security controls into a native
+    GNOME application, with a complete terminal interface for administrators.</p>
+    <p>Review each protection before applying it. OctoShield explains proposed
+    changes and asks for administrator authentication when system access is
+    required. Installing the application does not turn on security controls or
+    automatically trust connected USB devices.</p>
+    <ul>
+      <li>Configure a host firewall for Wi-Fi and Ethernet, with narrowly scoped
+      exceptions for trusted office networks.</li>
+      <li>Review and enroll trusted USB devices with USBGuard. Keep unknown
+      devices blocked until you explicitly approve temporary or permanent access.</li>
+      <li>Limit automatic network connections and unnecessary services, and
+      configure GNOME screen locking and removable-media behavior.</li>
+      <li>Review AppArmor confinement, automatic security updates, and sudo
+      authentication settings using Ubuntu's native security mechanisms.</li>
+      <li>Monitor meaningful firewall, USB, and authentication events, and enable
+      restrained security notifications in your desktop session.</li>
+      <li>Inspect saved action history and recovery guidance, and make selected
+      office adjustments without globally undoing your protections.</li>
+    </ul>
+    <p>The desktop application runs as your normal user. A narrowly scoped
+    PolicyKit helper performs reviewed system changes, while desktop preferences
+    remain in your own session. System changes are recorded with recovery
+    snapshots; interrupted operations may need manual review.</p>
+    <p>OctoShield is maintained by Vast Development Method as part of the Octoleo
+    suite. It supports Ubuntu 24.04 and 26.04 and uses Bash and C. Its controls
+    reduce exposure but do not guarantee protection against every attack or
+    identify passive network surveillance.</p>
+  </description>
+  <launchable type="desktop-id">io.vdm.OctoShield.desktop</launchable>
+  <developer id="io.vdm">
+    <name>Vast Development Method</name>
+  </developer>
+  <url type="homepage">https://www.vdm.io</url>
+  <url type="help">https://github.com/octoleo/octoshield/blob/main/README.md</url>
+  <url type="bugtracker">https://github.com/octoleo/octoshield/issues</url>
+  <url type="vcs-browser">https://github.com/octoleo/octoshield</url>
+  <categories>
+    <category>System</category>
+    <category>Security</category>
+  </categories>
+  <keywords>
+    <keyword>firewall</keyword>
+    <keyword>USB authorization</keyword>
+    <keyword>laptop security</keyword>
+    <keyword>Ubuntu</keyword>
+    <keyword>Octoleo</keyword>
+  </keywords>
+  <!-- Captured application images are attached by the v0.2.0 release workflow.
+       Public store indexing also requires anonymously accessible release assets. -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>Review your laptop's protections from the light overview (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-overview-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-overview-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Choose and review individual system protections (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-protections-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Review USB devices before authorizing access (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-usb-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-office-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v0.2.0/OctoShield-monitoring-dark.png</image>
+    </screenshot>
+  </screenshots>
+  <provides>
+    <binary>octoshield-gtk</binary>
+    <binary>octoshield</binary>
+  </provides>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <releases>
+    <release version="0.2.0" date="2026-10-12">
+      <description>
+        <p>Introducing the native OctoShield desktop application and Debian
+        package, alongside the standalone command-line interface.</p>
+        <ul>
+          <li>Review protections, USB approvals, office access, monitoring, and
+          recovery information in a native GNOME interface.</li>
+          <li>Use the same tested security-control modules from the desktop
+          application or terminal, with explicit administrator authorization.</li>
+          <li>Follow the desktop's light or dark appearance with the official
+          OctoShield branding.</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -1,9 +1,10 @@
 Source: octoshield
 Section: admin
 Priority: optional
-Maintainer: OctoLeo <octoleo@users.noreply.github.com>
+Maintainer: Vast Development Method <octoleo@users.noreply.github.com>
 Build-Depends:
  debhelper-compat (= 13),
+ appstream,
  bats,
  desktop-file-utils,
  jq,
@@ -14,7 +15,7 @@ Build-Depends:
  pkg-config
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
-Homepage: https://github.com/octoleo/octoshield
+Homepage: https://www.vdm.io
 Vcs-Git: https://github.com/octoleo/octoshield.git
 Vcs-Browser: https://github.com/octoleo/octoshield
 
@@ -47,3 +48,5 @@ Description: Ubuntu laptop protection with a native GNOME interface
  installation does not enable security controls or enroll USB devices. The
  desktop application runs as the logged-in user and delegates narrowly scoped
  operations to a fixed PolicyKit-authorized helper.
+ .
+ Maintained by Vast Development Method as part of the Octoleo suite.

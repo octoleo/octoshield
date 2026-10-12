@@ -57,8 +57,8 @@ apt-get install --yes --no-install-recommends "$archive"
 /usr/bin/octoshield --version
 [[ -x /usr/bin/octoshield-gtk && -x /usr/libexec/octoshield-helper ]] || fail 'desktop executable or fixed privileged helper is missing'
 [[ $(stat -c '%u:%g:%a' /usr/libexec/octoshield-helper) == 0:0:755 ]] || fail 'privileged helper ownership or permissions are incorrect'
-grep -Fq '<allow_active>auth_admin</allow_active>' /usr/share/polkit-1/actions/org.octoleo.octoshield.policy || fail 'fresh administrator authentication is not required'
-grep -Fq '<annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/octoshield-helper</annotate>' /usr/share/polkit-1/actions/org.octoleo.octoshield.policy || fail 'PolicyKit helper path mismatch'
+grep -Fq '<allow_active>auth_admin</allow_active>' /usr/share/polkit-1/actions/io.vdm.OctoShield.policy || fail 'fresh administrator authentication is not required'
+grep -Fq '<annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/octoshield-helper</annotate>' /usr/share/polkit-1/actions/io.vdm.OctoShield.policy || fail 'PolicyKit helper path mismatch'
 linked_libraries=$(ldd /usr/bin/octoshield-gtk) || fail 'desktop executable is not a valid dynamically linked binary'
 if grep -Fq 'not found' <<<"$linked_libraries"; then fail 'desktop shared-library dependency is missing'; fi
 # A forbidden action exercises the installed private helper and JSON boundary
