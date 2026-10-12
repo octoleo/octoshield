@@ -129,13 +129,24 @@ static void test_window(void)
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-overview.png");
 }
 
+static gboolean widget_has_label_text(GtkWidget *widget, const char *text)
+{
+    if (GTK_IS_LABEL(widget) && g_str_equal(gtk_label_get_text(GTK_LABEL(widget)), text))
+        return TRUE;
+    for (GtkWidget *child = gtk_widget_get_first_child(widget); child != NULL; child = gtk_widget_get_next_sibling(child))
+        if (widget_has_label_text(child, text)) return TRUE;
+    return FALSE;
+}
+
 static void test_group_text_escaping(void)
 {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     g_object_ref_sink(page);
     GtkWidget *group = group_new(page, "Access & <permissions>", "Keep <device> approvals & settings literal.");
-    g_assert_cmpstr(adw_preferences_group_get_title(ADW_PREFERENCES_GROUP(group)), ==, "Access & <permissions>");
-    g_assert_cmpstr(adw_preferences_group_get_description(ADW_PREFERENCES_GROUP(group)), ==, "Keep <device> approvals & settings literal.");
+    /* Adwaita versions differ in whether property getters retain markup or
+     * return rendered text. Check what the actual labels display instead. */
+    g_assert_true(widget_has_label_text(group, "Access & <permissions>"));
+    g_assert_true(widget_has_label_text(group, "Keep <device> approvals & settings literal."));
     g_object_unref(page);
 }
 
@@ -363,7 +374,7 @@ static void test_icon_decoding(void)
      * packages such as GNOME System Monitor. */
     static const char *const names[] = {
         "dialog-information-symbolic", "dialog-password-symbolic",
-        "dialog-question-symbolic", "dialog-warning-symbolic", "emblem-ok-symbolic",
+        "dialog-question-symbolic", "dialog-warning-symbolic", "object-select-symbolic",
         "document-open-recent-symbolic", "drive-removable-media-symbolic",
         "edit-undo-symbolic", "help-browser-symbolic", "help-about-symbolic",
         "media-playback-stop-symbolic", "network-wireless-symbolic",
