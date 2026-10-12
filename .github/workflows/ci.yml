@@ -28,13 +28,14 @@ jobs:
       - name: Install test and package dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq util-linux debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils appstream xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+          apt-get install --yes --no-install-recommends ca-certificates git build-essential shellcheck shfmt bats jq python3 apt-utils gnupg util-linux debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils appstream xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Lint, compile and test CLI and native interface
         run: |
           make check ui-test
+          bash scripts/version.sh --check
           bash tests/package.sh
       - name: Test native windows and asynchronous operations
         run: make ui-display-test
@@ -46,6 +47,24 @@ jobs:
             build/ui-*.png
             build/screenshots/*.png
           if-no-files-found: ignore
+      - name: Assemble versioned application assets
+        run: |
+          mkdir -p dist
+          bash scripts/release-assets.sh dist/release-assets
+          version=$(dpkg-parsechangelog -S Version)
+          tar -C dist -czf "dist/octoshield-assets-${version}.tar.gz" release-assets
+          cd dist
+          sha256sum octoshield-assets-*.tar.gz > SHA256SUMS-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.ubuntu == '24.04'
+        with:
+          name: octoshield-release-assets
+          path: |
+            dist/release-assets/
+            dist/octoshield-assets-*.tar.gz
+            dist/SHA256SUMS-assets
+          if-no-files-found: error
+          retention-days: 30
       - name: Check C memory and undefined behavior
         run: make sanitize
       - name: Run user-session fixtures and native app without root
@@ -75,14 +94,45 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: octoshield-ubuntu-${{ matrix.ubuntu }}-amd64
-          path: dist/*
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS-ubuntu*
+          if-no-files-found: error
+          retention-days: 30
+
+  apt-repository:
+    name: Verify APT update repository
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install repository tooling
+        run: sudo apt-get install --yes --no-install-recommends apt-utils gnupg appstream jq
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: octoshield-ubuntu-*-amd64
+          path: packages
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: octoshield-release-assets
+          path: assets
+      - name: Build inspectable repository without publishing credentials
+        run: bash scripts/apt-repository.sh --input packages --assets assets/release-assets --output apt-test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: octoshield-apt-repository-test
+          path: apt-test/
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: Publish tagged Debian packages
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: check
+    needs: [check, apt-repository]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -90,18 +140,103 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify release tag matches package version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: test "$RELEASE_TAG" = "v$(dpkg-parsechangelog -S Version)"
+        run: |
+          bash scripts/version.sh --check "$RELEASE_TAG"
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: octoshield-ubuntu-*-amd64
           path: release
           merge-multiple: true
-      - name: Publish packages and checksums
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: octoshield-release-assets
+          path: assets
+      - name: Publish packages, screenshots and application assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" release/*.deb release/SHA256SUMS-* --verify-tag --generate-notes --title "OctoShield $RELEASE_TAG"
+          gh release create "$RELEASE_TAG" release/*.deb release/SHA256SUMS-* assets/*.tar.gz assets/SHA256SUMS-assets assets/release-assets/gallery/*.png assets/release-assets/data/io.vdm.OctoShield.metainfo.xml --verify-tag --generate-notes --title "OctoShield $RELEASE_TAG"
+
+  apt-publish:
+    name: Publish signed APT updates (optional)
+    if: startsWith(github.ref, 'refs/tags/v') && vars.APT_PUBLISH_ENABLED == 'true'
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: octoshield-apt-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify reviewed release and signing configuration
+        id: configuration
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_KEY_FINGERPRINT: ${{ vars.APT_SIGNING_KEY_FINGERPRINT }}
+          APT_REPOSITORY_URL: ${{ vars.APT_REPOSITORY_URL }}
+        run: |
+          bash scripts/version.sh --check "$RELEASE_TAG"
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          main_version=$(git show refs/remotes/origin/main:src/octoshield | sed -n 's/^readonly OCTOSHIELD_VERSION=//p')
+          if test "$RELEASE_TAG" != "v$main_version"; then
+            echo 'APT publishing skipped: this is no longer the version on main.'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test -z "$APT_SIGNING_KEY" || test -z "$APT_SIGNING_KEY_FINGERPRINT" || test -z "$APT_REPOSITORY_URL"; then
+            echo 'APT publishing skipped: signing key, fingerprint and public URL must all be configured.'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install signing and catalogue tooling
+        if: steps.configuration.outputs.configured == 'true'
+        run: sudo apt-get install --yes --no-install-recommends apt-utils gnupg appstream jq
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.configuration.outputs.configured == 'true'
+        with:
+          pattern: octoshield-ubuntu-*-amd64
+          path: packages
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.configuration.outputs.configured == 'true'
+        with:
+          name: octoshield-release-assets
+          path: assets
+      - name: Build and verify signed update repository
+        if: steps.configuration.outputs.configured == 'true'
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          APT_SIGNING_KEY_FINGERPRINT: ${{ vars.APT_SIGNING_KEY_FINGERPRINT }}
+          APT_REPOSITORY_URL: ${{ vars.APT_REPOSITORY_URL }}
+        run: |
+          bash scripts/apt-repository.sh --input packages --assets assets/release-assets --output apt-public
+          test -f apt-public/dists/noble/InRelease
+          test -f apt-public/dists/resolute/InRelease
+          test ! -e apt-public/UNSIGNED-TEST-ONLY
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        if: steps.configuration.outputs.configured == 'true'
+        with:
+          path: apt-public
+      - name: Publish authenticated APT repository
+        id: deployment
+        if: steps.configuration.outputs.configured == 'true'
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
