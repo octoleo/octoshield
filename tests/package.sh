@@ -21,6 +21,12 @@ require xmllint
 require desktop-file-validate
 require dpkg-deb
 
+# These helpers generate activation scripts even when passed --no-scripts.
+# Unit files are staged by Make; all lifecycle behavior is maintained explicitly.
+if grep -Eq '^[[:space:]]+dh_installsystemd(user)?([[:space:]]|$)' "$repo/debian/rules"; then
+    fail 'systemd debhelper invocations would add unwanted service lifecycle scripts'
+fi
+
 desktop-file-validate "$repo/data/org.octoleo.OctoShield.desktop"
 for document in "$repo"/data/*.xml "$repo"/data/*.policy "$repo"/data/*.svg; do
     xmllint --nonet --noout "$document"
@@ -118,8 +124,11 @@ done
 for script in postinst prerm postrm; do
     [[ -f $fixture/control/$script ]] || fail "missing package lifecycle script $script"
     /bin/sh -n "$fixture/control/$script"
+    if grep -Fq 'Automatically added by dh_installsystemd' "$fixture/control/$script"; then
+        fail "unexpected generated systemd lifecycle snippet in $script"
+    fi
 done
-if grep -Eq '(systemctl|deb-systemd-invoke).*(start|restart|enable)|deb-systemd-helper.*(enable|unmask)' "$fixture/control/postinst"; then
+if grep -Eq 'deb-systemd-(invoke|helper)|(systemctl).*(start|restart|enable)' "$fixture/control/postinst"; then
     fail 'generated postinst unexpectedly changes service activation state'
 fi
 if grep -Eq '^[[:space:]]*(ufw|usbguard|apt-get|octoshield|/usr/bin/octoshield)[[:space:]]' "$fixture/control/postinst"; then

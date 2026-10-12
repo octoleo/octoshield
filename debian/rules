@@ -18,12 +18,13 @@ endif
 override_dh_auto_install:
 	dh_auto_install --destdir=$(CURDIR)/debian/octoshield -- install
 
-# Enablement and removal are handled explicitly: even --no-enable generates
-# unmask/re-enable snippets on upgrades, which could change the operator's choice.
-# Existing monitoring remains running until the operator explicitly restarts it.
+# Make's install target already stages both vendor units. Do not invoke either
+# systemd helper: --no-enable still emits unmask/re-enable scripts, and these
+# helpers do not support suppressing autoscripts with the generic --no-scripts
+# option. Our explicit maintainer scripts preserve the operator's choices.
 override_dh_installsystemd:
-	dh_installsystemd --no-scripts octoshield-monitor.service
+	@:
 
 # Desktop notifications remain an opt-in user choice; removal stops our sessions.
 override_dh_installsystemduser:
-	dh_installsystemduser --no-scripts octoshield-notify.service
+	@:
