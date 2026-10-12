@@ -1,11 +1,58 @@
 # Recovery and narrow adjustments
 
-Use a local terminal. If network hardening fails, disconnect Wi-Fi/Ethernet and inspect the failure before reconnecting. A failed operation can leave partial changes: Octoshield returns failure and keeps the change record; it does not promise an automatic system-wide rollback. Installation stages the application separately and attempts to retain the previous installed program when publishing fails.
+Use a local terminal. If network hardening fails, disconnect Wi-Fi/Ethernet and inspect the failure before reconnecting. A failed operation can leave partial changes: OctoShield returns failure and keeps the change record; it does not promise an automatic system-wide rollback. Standalone installation stages the application separately and attempts to retain the previous installed program when publishing fails.
+
+## Package upgrades, coexistence, and removal
+
+The Debian package owns `/usr/bin/octoshield`, `/usr/bin/octoshield-gtk`, `/usr/lib/octoshield`, and its fixed PolicyKit helper at `/usr/libexec/octoshield-helper`. A standalone installation owns `/usr/local/bin/octoshield` and `/usr/local/lib/octoshield`. Package operations do not silently delete that standalone copy.
+
+Inspect command resolution and monitoring units before switching installations:
+
+```bash
+type -a octoshield
+/usr/bin/octoshield --version
+systemctl cat octoshield-monitor.service
+systemctl --user cat octoshield-notify.service
+```
+
+Use `/usr/bin/octoshield` for the packaged CLI and `/usr/local/bin/octoshield` for the standalone CLI. The graphical app always uses the packaged helper. Both act on the same host protections and private backup area; they are not isolated security profiles. Do not run changes concurrently or alternate incompatible versions.
+
+An older standalone installation may have placed service overrides under `/etc/systemd/system` or `/etc/systemd/user`. Those override the package's vendor units and can still point at `/usr/local`. Keep the standalone files until you have deliberately reapplied monitoring with the packaged version and verified the effective unit paths. Do not blindly remove `/etc` service overrides.
+
+Package upgrades replace the program without resetting your protection settings or automatically restarting existing monitoring. After reviewing the update, restart active monitoring and the user notifier to load the new program:
+
+```bash
+sudo systemctl try-restart octoshield-monitor.service
+systemctl --user try-restart octoshield-notify.service
+```
+
+To remove the desktop package:
+
+```bash
+sudo apt remove octoshield
+```
+
+Removal stops the package's monitoring services and removes its application; it does **not** undo UFW rules, USBGuard trust, GNOME settings, service masks, update/sudo settings, or private backups. Purging also is not an “unharden” operation. A retained standalone installation can still manage protections; otherwise reinstall the package or use the native system tools and targeted procedures below. Check any pre-existing standalone service overrides separately.
+
+## Graphical startup and authentication
+
+Start `octoshield-gtk` as the normal logged-in GNOME user to see startup diagnostics. Do not run the application with `sudo`. A package built for another Ubuntu release or CPU architecture is not a supported workaround for missing runtime libraries; install the matching build with APT.
+
+System changes use GNOME's PolicyKit authentication dialog. If authentication is unavailable, check that you have an active local GNOME session and the package's PolicyKit helper/policy are installed. The terminal interface remains available through `/usr/bin/octoshield`. GNOME settings and notification actions require your real user session, not a root terminal or SSH session.
+
+The Recovery page displays transaction action history, not raw configuration snapshots containing network secrets. For an interrupted or failed operation, inspect that history and apply only the relevant recovery below. Keep the application open until the backend finishes; declining an outstanding confirmation cancels the next step but does not undo earlier changes from that operation.
 
 ## Find the relevant system snapshot
 
 ```bash
 octoshield backups
+```
+
+The GUI Recovery page offers the same listing and an action-history view. From the CLI, inspect one selected transaction without exposing its saved configuration files:
+
+```bash
+read -r -p 'Transaction ID to inspect: ' snapshot_id
+octoshield backup-show "$snapshot_id"
 ```
 
 System transactions are stored under `/var/lib/octoshield/backups/DATE-PID/` with root-only access. The actual identifier is printed after each operation. Each transaction contains:
@@ -70,7 +117,7 @@ Restore or remove `/etc/NetworkManager/conf.d/90-octoshield.conf` according to i
 
 ## USB enrollment interrupted
 
-During first enrollment, Octoshield temporarily masks `usbguard.service` and persistently masks `usbguard-dbus.service`. Until a reviewed policy starts successfully, USB protection is **not active**. Its private progress markers are under `/var/lib/octoshield/usb/`.
+During first enrollment, OctoShield temporarily masks `usbguard.service` and persistently masks `usbguard-dbus.service`. Until a reviewed policy starts successfully, USB protection is **not active**. Its private progress markers are under `/var/lib/octoshield/usb/`.
 
 After resolving the package or policy error, remove untrusted devices and resume from your normal terminal:
 
@@ -78,7 +125,7 @@ After resolving the package or policy error, remove untrusted devices and resume
 octoshield apply usb
 ```
 
-An enrolled installation reuses its existing approved rules. Do not delete its enrollment marker to “fix” an error: doing so could lead to unintended re-enrollment. The D-Bus bridge stays masked intentionally; Octoshield uses root-only policy IPC. Existing unmanaged USBGuard installations require manual integration and are not overwritten.
+An enrolled installation reuses its existing approved rules. Do not delete its enrollment marker to “fix” an error: doing so could lead to unintended re-enrollment. The D-Bus bridge stays masked intentionally; OctoShield uses root-only policy IPC. Existing unmanaged USBGuard installations require manual integration and are not overwritten.
 
 ## USB input lockout
 
@@ -115,7 +162,7 @@ For other units such as Samba, inspect the recorded state and unmask only the re
 
 ## Sudo, updates, and AppArmor
 
-From an existing trusted administrator shell, restore the saved `/etc/sudoers.d/99-octoshield` if its marker says `existing`; remove that one drop-in if the marker says `absent` and you intentionally want the previous timeout. Validate with `visudo --check` before closing your administrator shell. Octoshield does not remove existing passwordless grants.
+From an existing trusted administrator shell, restore the saved `/etc/sudoers.d/99-octoshield` if its marker says `existing`; remove that one drop-in if the marker says `absent` and you intentionally want the previous timeout. Validate with `visudo --check` before closing your administrator shell. OctoShield does not remove existing passwordless grants.
 
 Automatic-update settings live in `/etc/apt/apt.conf.d/90-octoshield`. Restore/remove only this drop-in according to its snapshot marker, then inspect `apt-config dump`. Timer enablement is separate runtime state; review the timers before changing them. AppArmor activation retains installed profile modes; diagnose a specific denied application using its logs instead of disabling AppArmor globally.
 
