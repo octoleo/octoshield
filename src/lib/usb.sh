@@ -7,6 +7,7 @@ USB_STATE_DIR=/var/lib/octoshield/usb
 USB_LOG_DIR=/var/log/usbguard
 USB_UNIT_DIR=/etc/systemd/system
 USB_SYS_DIR=/sys
+USB_PROC_DIR=/proc
 
 # Profile files are data, never shell programs. The root helper serializes every
 # mutation with the application's operation lock before entering this module.
@@ -443,10 +444,43 @@ usb::profile_enroll() {
     core::record "Physically reviewed USB device set enrolled only for inactive profile $name."
 }
 
+# Device IDs are allocated again when USBGuard restarts. Bind every interactive
+# decision to this daemon invocation and boot as well as its private identity.
+# This digest is a stale-selection guard, not a credential or device attestation.
+usb::_attachment_context() {
+    local boot invocation
+    IFS= read -r boot <"$USB_PROC_DIR/sys/kernel/random/boot_id" || return 1
+    invocation=$(systemctl show --property=InvocationID --value usbguard.service) || return 1
+    [[ $boot =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ && $invocation =~ ^[a-f0-9]{32}$ ]] || return 1
+    printf '%s:%s\n' "$boot" "$invocation"
+}
+
+usb::_attachment_token() {
+    local id=$1 device=$2 context=${3-} identity digest
+    usb::_validate_id "$id" && [[ $device == "$id: "* ]] || return 1
+    [[ -n $context ]] || context=$(usb::_attachment_context) || return 1
+    usb::_identity "$device" || return 1
+    identity=${device#"$id: "}
+    identity=${identity#* }
+    # Include every validated descriptor, excluding only the allow/block state.
+    digest=$(printf '%s\n%s\n%s\n' "$context" "$id" "$identity" | sha256sum) || return 1
+    printf '%s\n' "${digest%% *}"
+}
+
+usb::_approval_matches() {
+    local id=$1 device=$2 token=$3 profile=$4 current
+    [[ $token =~ ^[a-f0-9]{64}$ ]] && usb::_profile_name "$profile" || return 1
+    current=$(usb::active_profile) || return 1
+    if [[ $current != "$profile" || $(usb::_attachment_token "$id" "$device") != "$token" ]]; then
+        core::die 'The USB device or active profile changed. Refresh connected devices and choose again; no new approval was granted.'
+        return 1
+    fi
+}
+
 usb::devices_json() {
     core::require_root || return
-    local devices profile policy line id state canonical remembered category rows='' count=0
-    profile=$(usb::active_profile) && policy=$(usb::_profile_policy "$profile") && devices=$(usbguard list-devices) || return
+    local devices profile policy line id state canonical remembered category context token rows='' count=0
+    profile=$(usb::active_profile) && policy=$(usb::_profile_policy "$profile") && context=$(usb::_attachment_context) && devices=$(usbguard list-devices) || return
     while IFS= read -r line; do
         [[ -n $line ]] || continue
         ((count += 1))
@@ -464,14 +498,19 @@ usb::devices_json() {
             *' 09:'*) category=hub ;;
         esac
         canonical=$(usb::_canonical "$line") || return
+        token=$(usb::_attachment_token "$id" "$line" "$context") || return
         remembered=false
         grep -Fxq -- "$canonical" <<<"$policy" && remembered=true
-        rows+=$(jq -cn --argjson id "$id" --arg state "$state" --arg category "$category" \
+        rows+=$(jq -cn --argjson id "$id" --arg token "$token" --arg state "$state" --arg category "$category" \
             --arg name "$USB_DEVICE_NAME" --arg vendor_product "$USB_DEVICE_VID" \
             --arg port "$USB_DEVICE_PORT" --arg profile "$profile" --argjson remembered "$remembered" \
-            '{id:$id,state:$state,category:$category,name:($name | gsub("[\u0000-\u001f\u007f]";"") | .[0:128]),vendor_product:$vendor_product,port:$port,profile:$profile,remembered:$remembered}') || return
+            '($name | gsub("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]";"") | .[0:128]) as $safe_name |
+             {id:$id,token:$token,state:$state,category:$category,name:$safe_name,label:(if $safe_name == "" then "USB device" else $safe_name end),vendor_product:$vendor_product,port:$port,profile:$profile,remembered:$remembered}') || return
         rows+=$'\n'
     done <<<"$devices"
+    # A restart during collection could otherwise associate new numeric IDs
+    # with the old daemon invocation. Never publish an inconsistent inventory.
+    [[ $(usb::_attachment_context) == "$context" && $(usb::active_profile) == "$profile" ]] || return 1
     jq -s '.' <<<"$rows"
 }
 
@@ -681,7 +720,7 @@ usb::_device() {
 }
 
 usb::_change() {
-    local operation=$1 id=$2 permanent=$3 before after profile canonical policy path
+    local operation=$1 id=$2 permanent=$3 token=${4-} expected_profile=${5-} before after profile canonical policy path
     core::require_root || return
     usb::_validate_id "$id" || return
     systemctl is-active --quiet usbguard.service || {
@@ -689,6 +728,9 @@ usb::_change() {
         return 1
     }
     before=$(usb::_device "$id") || return
+    if [[ -n $token ]]; then
+        usb::_managed && usb::_approval_matches "$id" "$before" "$token" "$expected_profile" || return 1
+    fi
     printf '%s\n' "$before" | LC_ALL=C sed -n l || return
     if [[ $operation == block ]]; then
         core::confirm 'Block this device until it is reconnected or policy is reapplied? Blocking your keyboard, input hub or network adapter may interrupt access.' || return 1
@@ -700,15 +742,16 @@ usb::_change() {
             core::die 'USB runtime policy differs from the active profile. Reapply the profile before remembering a device.'
             return 1
         }
-        core::confirm "Remember this physically verified device on this port ONLY in USB profile $profile? Other profiles will still block it. Device descriptors are not cryptographic identity." || return 1
+        [[ -n $token ]] || core::confirm "Remember this physically verified device on this port ONLY in USB profile $profile? Other profiles will still block it. Device descriptors are not cryptographic identity." || return 1
     else
-        core::confirm 'Allow this physically verified device this time? Approval ends on reconnection, daemon restart or profile switch unless the destination profile already remembers it.' || return 1
+        [[ -n $token ]] || core::confirm 'Allow this physically verified device this time? Approval ends on reconnection, daemon restart or profile switch unless the destination profile already remembers it.' || return 1
     fi
     after=$(usb::_device "$id") || return
     [[ $before == "$after" ]] || {
         core::die 'Device identity/state changed during review. List devices and retry.'
         return 1
     }
+    [[ -z $token ]] || usb::_approval_matches "$id" "$after" "$token" "$expected_profile" || return 1
     if [[ $permanent == yes ]]; then
         usb::_adopt || return
         path="$USB_STATE_DIR/profiles/$profile.rules"
@@ -725,6 +768,7 @@ usb::_change() {
             core::die 'Device changed while saving approval. No temporary authorization was granted; inspect the saved rule.'
             return 1
         }
+        [[ -z $token ]] || usb::_approval_matches "$id" "$after" "$token" "$expected_profile" || return 1
         usbguard allow-device "$id" && usb::_verified_policy "$policy" &&
             cmp -s "$USB_CONFIG_DIR/rules.conf" <(printf '%s\n' "$policy") || return 1
         rm -f -- "$USB_STATE_DIR/profile-pending" || return
@@ -734,10 +778,11 @@ usb::_change() {
     core::record "USB device $id: $operation (permanent=$permanent)."
 }
 
-usb::forget() {
-    local id=${1-} before after profile policy line canonical retained='' path
-    [[ $# == 1 ]] && core::require_root && usb::_validate_id "$id" && usb::_managed || return 1
+usb::_forget() {
+    local id=$1 token=${2-} expected_profile=${3-} before after profile policy line canonical retained='' path
+    core::require_root && usb::_validate_id "$id" && usb::_managed || return 1
     before=$(usb::_device "$id") && canonical=$(usb::_canonical "$before") && profile=$(usb::active_profile) && policy=$(usb::_profile_policy "$profile") || return
+    [[ -z $token ]] || usb::_approval_matches "$id" "$before" "$token" "$expected_profile" || return 1
     usb::_verified_policy "$policy" || return 1
     printf '%s\n' "$before" | LC_ALL=C sed -n l
     core::confirm "Forget this device ONLY in USB profile $profile and block it now? Other profiles are unchanged; input devices and docks can interrupt access." || return 1
@@ -749,6 +794,7 @@ usb::forget() {
     done <<<"$policy"
     after=$(usb::_device "$id") || return
     [[ $after == "$before" ]] || return 1
+    [[ -z $token ]] || usb::_approval_matches "$id" "$after" "$token" "$expected_profile" || return 1
     usb::_adopt || return
     path="$USB_STATE_DIR/profiles/$profile.rules"
     [[ $profile != legacy ]] || path="$USB_STATE_DIR/legacy.rules"
@@ -758,6 +804,34 @@ usb::forget() {
     # removing a remembered rule. This also expires other temporary approvals.
     USB_PROFILE_PREVIEW_NAME=
     usb::profile_preflight "$profile" && usb::profile_apply "$profile"
+}
+
+usb::forget() {
+    [[ $# == 1 ]] || return 1
+    usb::_forget "$1"
+}
+
+# The desktop displays the exact bounded inventory before sending this explicit
+# decision over its administrator-authorized broker. Approval omits its duplicate
+# textual review; revocation retains warnings about disrupting input/storage.
+# Native identity, profile, storage and policy checks remain. The token conveys
+# no authority and cannot replace root access.
+usb::approve() {
+    [[ $# == 4 && $2 =~ ^[a-f0-9]{64}$ ]] && usb::_validate_id "$1" && usb::_profile_name "$3" || return 1
+    case "$4" in
+        once) usb::_change allow "$1" no "$2" "$3" ;;
+        profile) usb::_change allow "$1" yes "$2" "$3" ;;
+        *) return 1 ;;
+    esac
+}
+
+usb::revoke() {
+    [[ $# == 4 && $2 =~ ^[a-f0-9]{64}$ ]] && usb::_validate_id "$1" && usb::_profile_name "$3" || return 1
+    case "$4" in
+        block) usb::_change block "$1" no "$2" "$3" ;;
+        forget) usb::_forget "$1" "$2" "$3" ;;
+        *) return 1 ;;
+    esac
 }
 
 usb::allow() {

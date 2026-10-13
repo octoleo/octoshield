@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Read-only observations. The public cache contains summaries, never command
-# output, connection names, addresses, USB descriptors, or authentication data.
+# output, connection names, addresses, private USB identities, or authentication
+# data. USB display names are deliberately sanitized for the local device UI.
 STATUS_DIRECTORY=/run/octoshield
 STATUS_MAX_AGE=90
+STATUS_USB_MAX_AGE=10
 STATUS_MAX_BYTES=262144
 STATUS_ETC=/etc
 STATUS_SYS=/sys
@@ -388,10 +390,53 @@ status::profile_snapshot() {
     ' <<<"$data" 2>/dev/null || printf '%s\n' '{"available":false,"active":"unmanaged","global":"unmanaged","assignments":{},"overrides":{},"results":{},"catalog":[]}'
 }
 
+status::_project_usb_devices() {
+    # Project fields explicitly: never publish USBGuard hashes or serials.
+    jq -ce '[.[] | select(
+        (.id | type == "number" and . >= 1 and . <= 4294967294 and floor == .) and
+        (.token | type == "string" and test("^[a-f0-9]{64}$")) and
+        (.state | IN("allowed","blocked","rejected")) and
+        (.category | IN("input","storage","network","hub","other")) and
+        (.profile | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+        (.vendor_product | type == "string" and test("^[A-Fa-f0-9]{4}:[A-Fa-f0-9]{4}$")) and
+        (.port | type == "string" and length <= 128 and test("^[0-9]+-[0-9]+(\\.[0-9]+)*$")) and
+        (.remembered | type == "boolean")) |
+        ((.name // "") | if type == "string" then gsub("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]";"") | .[0:128] else "" end) as $name |
+        {id,token,state,category,profile,vendor_product,port,remembered,name:$name,label:(if $name == "" then "USB device" else $name end)}] | .[0:256]' 2>/dev/null
+}
+
 status::pending_devices() {
     local devices='[]'
     if declare -F usb::devices_json >/dev/null; then devices=$(usb::devices_json 2>/dev/null) || devices='[]'; fi
-    jq -ce '[.[] | select((.id | type == "number" and . >= 1 and . <= 4294967295 and floor == .) and (.state | IN("blocked","rejected"))) | {id,state,label:"USB device"}] | .[0:256]' <<<"$devices" 2>/dev/null || printf '[]\n'
+    # Keep the historical entry-point name for collector compatibility, but
+    # include allowed devices too so a refresh needs no privileged helper.
+    status::_project_usb_devices <<<"$devices" || printf '[]\n'
+}
+
+# This independent, inexpensive snapshot never advances the full inspection's
+# checked_at. A slow firewall/exposure inspection cannot keep a USB modal stale.
+status::collect_usb() {
+    local observed raw devices='[]' available=false profile=unmanaged checked
+    observed=$(status::usb 2>/dev/null) || observed=
+    status::valid_result <<<"$observed" || observed=$(status::result unknown 'USB protection cannot be verified.')
+    profile=$(jq -r '.profile // "unmanaged"' <<<"$observed") || return 1
+    [[ $profile =~ ^[a-z][a-z0-9-]{0,31}$ ]] || profile=unmanaged
+    if [[ $(jq -r .state <<<"$observed") =~ ^(active|partial)$ ]] && declare -F usb::devices_json >/dev/null && raw=$(usb::devices_json 2>/dev/null) && devices=$(status::_project_usb_devices <<<"$raw"); then
+        # Treat omitted/invalid rows or mixed profiles as an unavailable read,
+        # never as a successful empty list or an actionable partial inventory.
+        if jq -e --argjson raw "$raw" --arg profile "$profile" '
+            ($raw | type == "array" and length <= 256) and length == ($raw | length) and
+            (map(.id) | unique | length) == length and (map(.token) | unique | length) == length and
+            all(.[]; .profile == $profile)' <<<"$devices" >/dev/null 2>&1; then available=true; fi
+    fi
+    if [[ $available != true ]]; then
+        devices='[]'
+        observed=$(jq -c '{state:"unknown",summary:((.summary | .[0:800]) + " Connected USB devices could not be refreshed. No device approval is available until a fresh inspection succeeds.")}' <<<"$observed") || return 1
+    fi
+    checked=$(date +%s) || return 1
+    jq -cn --argjson checked "$checked" --argjson available "$available" --argjson observed "$observed" --arg profile "$profile" --argjson devices "$devices" '
+        {schema:1,checked_at:$checked,usb:{available:$available,state:$observed.state,summary:$observed.summary,profile:$profile,
+          pending:($devices | map(select(.state == "blocked" or .state == "rejected")) | length),devices:$devices}}'
 }
 
 status::version() {
@@ -430,7 +475,7 @@ status::collect() {
     done
     network=$(status::network_snapshot) || return 1
     devices=$(status::pending_devices) || return 1
-    pending=$(jq -er --argjson devices "$devices" '[($devices | length),(.usb.pending | if type == "number" and . >= 0 and . <= 65535 and floor == . then . else 0 end)] | max' <<<"$controls") || pending=0
+    pending=$(jq -er --argjson devices "$devices" '[($devices | map(select(.state == "blocked" or .state == "rejected")) | length),(.usb.pending | if type == "number" and . >= 0 and . <= 65535 and floor == . then . else 0 end)] | max' <<<"$controls") || pending=0
     usb_profile=$(jq -er .usb.profile <<<"$controls") || return 1
     checked=$(date +%s) || return 1
     jq -cn --arg version "$version" --argjson checked "$checked" \
@@ -454,8 +499,85 @@ status::validate_document() {
         (.network.fingerprint | type == "string" and test("^[a-f0-9]{64}$")) and
         (.network.connected_count | type == "number" and . >= 0 and . <= 65535 and floor == .) and
         (.usb.pending | type == "number" and . >= 0 and . <= 65535 and floor == .) and
-        (.usb.devices | type == "array" and length <= 256 and all(.[]; (.id | type == "number" and . >= 1 and . <= 4294967295 and floor == .) and (.state | IN("blocked","rejected")) and .label == "USB device"))
+        (.usb.devices | type == "array" and length <= 256 and all(.[];
+            (.id | type == "number" and . >= 1 and . <= 4294967294 and floor == .) and
+            (.token | type == "string" and test("^[a-f0-9]{64}$")) and
+            (.state | IN("allowed","blocked","rejected")) and
+            (.category | IN("input","storage","network","hub","other")) and
+            (.profile | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+            (.vendor_product | type == "string" and test("^[A-Fa-f0-9]{4}:[A-Fa-f0-9]{4}$")) and
+            (.port | type == "string" and length <= 128 and test("^[0-9]+-[0-9]+(\\.[0-9]+)*$")) and
+            (.remembered | type == "boolean") and
+            (all(.name,.label; type == "string" and length <= 128 and (test("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]") | not)))))
     ' >/dev/null 2>&1
+}
+
+status::validate_usb_document() {
+    jq -e '
+        def safe_name: type == "string" and length <= 128 and (test("[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]") | not);
+        type == "object" and .schema == 1 and
+        (.checked_at | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .) and
+        (.usb | type == "object") and
+        (.usb.available | type == "boolean") and
+        (.usb.state | IN("active","inactive","partial","unknown","unsupported")) and
+        (.usb.summary | type == "string" and length <= 1024) and
+        (.usb.profile | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+        (.usb.pending | type == "number" and . >= 0 and . <= 256 and floor == .) and
+        (.usb.devices | type == "array" and length <= 256 and all(.[];
+            (.id | type == "number" and . >= 1 and . <= 4294967294 and floor == .) and
+            (.token | type == "string" and test("^[a-f0-9]{64}$")) and
+            (.state | IN("allowed","blocked","rejected")) and
+            (.category | IN("input","storage","network","hub","other")) and
+            (.vendor_product | type == "string" and test("^[A-Fa-f0-9]{4}:[A-Fa-f0-9]{4}$")) and
+            (.port | type == "string" and length <= 128 and test("^[0-9]+-[0-9]+(\\.[0-9]+)*$")) and
+            (.remembered | type == "boolean") and (all(.name,.label; safe_name)))) and
+        (.usb as $usb | all($usb.devices[]; .profile == $usb.profile)) and
+        (.usb.devices | (map(.id) | unique | length) == length and (map(.token) | unique | length) == length) and
+        .usb.pending == (.usb.devices | map(select(.state == "blocked" or .state == "rejected")) | length) and
+        (if .usb.available then true else .usb.state == "unknown" and (.usb.devices | length == 0) end)
+    ' >/dev/null 2>&1
+}
+
+# Caller holds the shared operation lock during collection (or already owns the
+# exclusive mutation lock). Opening another lock here would deadlock refreshes
+# made by an administrator operation that already holds the exclusive lock.
+status::refresh_usb() (
+    local data temporary metadata
+    ((EUID == 0)) || return 1
+    [[ ! -L $STATUS_DIRECTORY ]] || return 1
+    if [[ -e $STATUS_DIRECTORY ]]; then
+        [[ -d $STATUS_DIRECTORY ]] || return 1
+        metadata=$(stat -c '%u:%g:%a' -- "$STATUS_DIRECTORY") || return 1
+        [[ $metadata == 0:0:755 ]] || return 1
+    else install -d -m 0755 -o root -g root -- "$STATUS_DIRECTORY" || return 1; fi
+    [[ ! -L $STATUS_DIRECTORY/usb.json ]] || return 1
+    data=$(status::collect_usb) || return 1
+    ((${#data} <= STATUS_MAX_BYTES)) || return 1
+    status::validate_usb_document <<<"$data" || return 1
+    temporary=$(mktemp "$STATUS_DIRECTORY/.usb.XXXXXXXX") || return 1
+    trap 'rm -f -- "$temporary"' EXIT
+    printf '%s\n' "$data" >"$temporary" || return 1
+    chmod 0644 "$temporary" && chown root:root "$temporary" || return 1
+    mv -fT -- "$temporary" "$STATUS_DIRECTORY/usb.json"
+)
+
+status::read_usb() {
+    local file="$STATUS_DIRECTORY/usb.json" metadata size modified now document checked
+    [[ -d $STATUS_DIRECTORY && ! -L $STATUS_DIRECTORY && -f $file && ! -L $file ]] || return 1
+    metadata=$(stat -c '%u:%g:%a' -- "$STATUS_DIRECTORY") || return 1
+    [[ $metadata == 0:0:755 ]] || return 1
+    metadata=$(stat -c '%u:%g:%a:%s:%Y' -- "$file") || return 1
+    [[ $metadata =~ ^0:0:644:([0-9]{1,7}):([0-9]{1,12})$ ]] || return 1
+    size=${BASH_REMATCH[1]} modified=${BASH_REMATCH[2]}
+    ((size > 0 && size <= STATUS_MAX_BYTES)) || return 1
+    now=$(date +%s) || return 1
+    ((now - modified <= STATUS_USB_MAX_AGE && modified - now <= 5)) || return 1
+    document=$(head -c "$((STATUS_MAX_BYTES + 1))" -- "$file") || return 1
+    ((${#document} <= STATUS_MAX_BYTES)) || return 1
+    status::validate_usb_document <<<"$document" || return 1
+    checked=$(jq -er .checked_at <<<"$document") || return 1
+    ((now - checked <= STATUS_USB_MAX_AGE && checked - now <= 5)) || return 1
+    printf '%s\n' "$document"
 }
 
 status::refresh() (
