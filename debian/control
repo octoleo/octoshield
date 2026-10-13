@@ -37,6 +37,7 @@ Depends:
  libnotify-bin,
  librsvg2-common,
  pkexec,
+ systemd,
  whiptail
 Recommends:
  gnome-control-center,

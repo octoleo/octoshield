@@ -84,6 +84,7 @@ install: all gui
 	install -D -m 0755 build/octoshield-session "$(DESTDIR)/usr/libexec/octoshield-session"
 	install -D -m 0755 src/usb-prompt.sh "$(DESTDIR)/usr/lib/octoshield/src/usb-prompt.sh"
 	install -D -m 0644 systemd/octoshield-usb-agent.service "$(DESTDIR)/usr/lib/systemd/user/octoshield-usb-agent.service"
+	sed -i 's@/usr/local/@/usr/@g' "$(DESTDIR)/usr/lib/systemd/user/octoshield-usb-agent.service"
 	install -D -m 0644 data/io.vdm.OctoShield.UsbAgent.desktop "$(DESTDIR)/etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop"
 	printf '%s\n' '#!/bin/bash' 'exec /usr/bin/bash /usr/lib/octoshield/src/octoshield "$$@"' >"$(DESTDIR)/usr/bin/octoshield"
 	chmod 0755 "$(DESTDIR)/usr/bin/octoshield"
