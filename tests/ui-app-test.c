@@ -41,6 +41,24 @@ static void save_widget_png(GtkWidget *widget, const char *path)
 
 static int fixture(const char *name)
 {
+    if (g_str_equal(name, "session")) {
+        fputs("{\"type\":\"ready\"}\n", stdout); fflush(stdout);
+        char line[8192];
+        guint count = 0;
+        while (fgets(line, sizeof(line), stdin) != NULL) {
+            g_autoptr(JsonParser) parser = json_parser_new();
+            if (!json_parser_load_from_data(parser, line, -1, NULL)) return 10;
+            JsonObject *request = json_node_get_object(json_parser_get_root(parser));
+            gint64 id = json_object_get_int_member(request, "id");
+            count++;
+            printf("{\"type\":\"log\",\"request\":%" G_GINT64_FORMAT ",\"text\":\"same session operation %u\"}\n", id, count);
+            printf("{\"type\":\"done\",\"request\":%" G_GINT64_FORMAT ",\"success\":true}\n", id);
+            printf("{\"type\":\"stderr\",\"request\":%" G_GINT64_FORMAT ",\"text\":\"late diagnostic after done\"}\n", id);
+            printf("{\"type\":\"finished\",\"request\":%" G_GINT64_FORMAT ",\"exit_code\":0}\n", id);
+            fflush(stdout);
+        }
+        return 0;
+    }
     if (g_str_equal(name, "oversize")) {
         for (guint i = 0; i < MAX_PROTOCOL_LINE + 10; i++)
             fputc('x', stdout);
@@ -159,7 +177,7 @@ static void test_observed_status_and_overrides(void)
         "\"overrides\":{\"usb\":\"office\"},\"results\":{\"firewall\":{\"status\":\"failed\"}}},"
         "\"controls\":{\"firewall\":{\"state\":\"active\",\"summary\":\"Native firewall is enabled\"},"
         "\"usb\":{\"state\":\"active\",\"summary\":\"Authorization verified\"}},"
-        "\"usb\":{\"pending\":2,\"devices\":[{\"id\":17,\"state\":\"blocked\",\"label\":\"USB device\"}]}}",
+        "\"usb\":{\"available\":true,\"pending\":2,\"devices\":[{\"id\":17,\"state\":\"blocked\",\"label\":\"USB device\"}]}}",
         g_get_real_time() / G_USEC_PER_SEC);
     g_assert_true(json_parser_load_from_data(parser, snapshot, -1, NULL));
     render_status(&test_app, json_node_get_object(json_parser_get_root(parser)));
@@ -206,9 +224,10 @@ static void test_data_models(void)
     Operation operation = {.app = &test_app, .title = "Refresh device list"};
     test_app.operation = &operation;
     handle_data_log(&test_app, "[{\"id\":22,\"state\":\"blocked\",\"name\":\"<b>untrusted keyboard</b>\"},{\"id\":0,\"name\":\"invalid\"}]");
-    g_assert_cmpuint(test_app.usb_ids->len, ==, 1);
-    gtk_drop_down_set_selected(test_app.usb_devices, 0);
-    g_assert_cmpstr(gtk_editable_get_text(test_app.usb_device_id), ==, "22");
+    g_assert_cmpuint(test_app.usb_inventory_rows->len, ==, 1);
+    UsbDevice *device = g_ptr_array_index(test_app.usb_inventory_rows, 0);
+    g_assert_cmpstr(device->id, ==, "22");
+    g_assert_cmpstr(device->name, ==, "<b>untrusted keyboard</b>");
     operation.title = "Check for OctoShield updates";
     handle_data_log(&test_app, "{\"current\":\"1.1.0\",\"latest\":\"1.2.0\",\"message\":\"Update available\",\"download_url\":\"https://evil.invalid/package.deb\"}");
     g_assert_cmpstr(gtk_link_button_get_uri(test_app.update_link), ==, "https://github.com/octoleo/octoshield/releases/latest");
@@ -269,7 +288,7 @@ static void test_large_data_records(void)
     g_string_append_c(devices, ']');
     g_assert_cmpuint(devices->len, >, 4096);
     receive_data_chunks(&operation, devices->str);
-    g_assert_cmpuint(test_app.usb_ids->len, ==, 100);
+    g_assert_cmpuint(test_app.usb_inventory_rows->len, ==, 100);
     g_string_free(devices, TRUE);
     g_string_free(operation.review, TRUE);
     g_string_free(operation.data_output, TRUE);
@@ -453,6 +472,127 @@ static void test_confirmations(void)
     g_assert_nonnull(strstr(text, "Operation completed successfully."));
 }
 
+
+static JsonObject *usb_fixture(const char *token, const char *profile, const char *state)
+{
+    JsonObject *usb = json_object_new();
+    json_object_set_boolean_member(usb, "available", TRUE);
+    json_object_set_int_member(usb, "pending", g_str_equal(state, "blocked") ? 1 : 0);
+    json_object_set_string_member(usb, "profile", profile);
+    JsonArray *devices = json_array_new();
+    JsonObject *device = json_object_new();
+    json_object_set_int_member(device, "id", 42);
+    json_object_set_string_member(device, "token", token);
+    json_object_set_string_member(device, "profile", profile);
+    json_object_set_string_member(device, "state", state);
+    json_object_set_string_member(device, "name", "Travel USB key <untrusted name>");
+    json_object_set_string_member(device, "vendor_product", "1234:5678");
+    json_object_set_string_member(device, "port", "1-2");
+    json_object_set_string_member(device, "category", "Storage");
+    json_array_add_object_element(devices, device);
+    json_object_set_array_member(usb, "devices", devices);
+    return usb;
+}
+
+static void test_usb_prompt_deduplication_and_cancel(void)
+{
+    g_autofree gchar *token = g_strnfill(64, 'a');
+    g_autofree gchar *replacement = g_strnfill(64, 'b');
+    g_autoptr(JsonObject) usb = usb_fixture(token, "office", "blocked");
+    test_app.local_session_ready = FALSE;
+    render_usb_status(&test_app, usb);
+    g_assert_null(test_app.usb_prompt);
+    test_app.local_session_ready = TRUE;
+    render_usb_status(&test_app, usb);
+    g_assert_nonnull(test_app.usb_prompt);
+    g_assert_cmpstr(adw_message_dialog_get_default_response(test_app.usb_prompt), ==, "block");
+    g_assert_cmpstr(adw_message_dialog_get_close_response(test_app.usb_prompt), ==, "block");
+    g_assert_nonnull(strstr(adw_message_dialog_get_body(test_app.usb_prompt), "office"));
+    save_widget_png(GTK_WIDGET(test_app.usb_prompt), "build/ui-usb-approval.png");
+    adw_message_dialog_response(test_app.usb_prompt, "block");
+    g_assert_null(test_app.operation);
+    g_assert_null(test_app.pending_request);
+    g_assert_null(test_app.session);
+    render_usb_status(&test_app, usb);
+    g_assert_null(test_app.usb_prompt);
+    json_object_set_string_member(json_array_get_object_element(array_member(usb, "devices"), 0), "token", replacement);
+    render_usb_status(&test_app, usb);
+    g_assert_nonnull(test_app.usb_prompt);
+    /* Disconnecting revokes the visible decision without submitting approval. */
+    render_usb_status(&test_app, NULL);
+    g_assert_null(test_app.usb_prompt);
+    g_assert_null(test_app.operation);
+    g_assert_null(test_app.pending_request);
+    test_app.local_session_ready = FALSE;
+}
+
+static void test_usb_approval_is_bound_before_authentication(void)
+{
+    g_autofree gchar *token = g_strnfill(64, 'c');
+    g_autoptr(JsonObject) usb = usb_fixture(token, "conference", "blocked");
+    test_app.local_session_ready = TRUE;
+    render_usb_status(&test_app, usb);
+    g_assert_nonnull(test_app.usb_prompt);
+    /* An in-progress synthetic authentication holds the request without ever
+     * spawning pkexec or accepting a system credential in this test. */
+    Session session = {.app = &test_app};
+    test_app.auth_required = TRUE;
+    test_app.session = &session;
+    adw_message_dialog_response(test_app.usb_prompt, "profile");
+    g_assert_nonnull(test_app.pending_request);
+    g_assert_cmpstr(test_app.pending_request->argv[2], ==, "usb");
+    g_assert_cmpstr(test_app.pending_request->argv[3], ==, "approve");
+    g_assert_cmpstr(test_app.pending_request->argv[4], ==, "42");
+    g_assert_cmpstr(test_app.pending_request->argv[5], ==, token);
+    g_assert_cmpstr(test_app.pending_request->argv[6], ==, "conference");
+    g_assert_cmpstr(test_app.pending_request->argv[7], ==, "profile");
+    g_assert_null(test_app.operation);
+    request_free(test_app.pending_request); test_app.pending_request = NULL;
+    test_app.session = NULL; test_app.auth_required = FALSE;
+    test_app.local_session_ready = FALSE;
+    render_usb_status(&test_app, NULL);
+    update_actions(&test_app);
+}
+
+static void test_session_reuses_authenticated_transport(void)
+{
+    const char *const argv[] = {test_executable, "--fixture", "session", NULL};
+    g_autoptr(GError) error = NULL;
+    Session *session = g_new0(Session, 1);
+    session->app = &test_app;
+    session->process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+    g_assert_no_error(error);
+    session->input = g_subprocess_get_stdin_pipe(session->process);
+    session->output = g_subprocess_get_stdout_pipe(session->process);
+    session->line = g_byte_array_new();
+    test_app.session = session; test_app.auth_required = TRUE;
+    session_read_next(session);
+    g_subprocess_wait_async(session->process, NULL, session_waited, session);
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (!session->ready && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_true(session->ready);
+    const char *const args[] = {"status"};
+    start_action(&test_app, "Session operation one", NULL, TRUE, FALSE, 1, args);
+    drain_operation(FALSE);
+    g_assert_true(session->ready);
+    g_assert_false(g_output_stream_is_closed(session->input));
+    start_action(&test_app, "Session operation two", NULL, TRUE, FALSE, 1, args);
+    drain_operation(FALSE);
+    g_autofree gchar *text = log_text();
+    g_assert_nonnull(strstr(text, "same session operation 2"));
+    g_assert_nonnull(strstr(text, "late diagnostic after done"));
+    g_assert_nonnull(strstr(text, "Operation completed successfully."));
+    g_assert_cmpuint(session->next_request, ==, 2);
+    session_revoke(&test_app, "Test lock");
+    deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (test_app.session != NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_null(test_app.session);
+    g_assert_false(administrator_ready(&test_app));
+    g_assert_cmpstr(gtk_stack_get_visible_child_name(test_app.access_pages), ==, "locked");
+    test_app.auth_required = FALSE; test_app.local_session_ready = FALSE;
+    update_actions(&test_app);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && g_str_equal(argv[1], "--fixture"))
@@ -475,6 +615,9 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/status/catalog-preserves-selection", test_profile_catalog_selection);
     g_test_add_func("/ui/status/device-and-update-models", test_data_models);
     g_test_add_func("/ui/status/large-profile-and-device-records", test_large_data_records);
+    g_test_add_func("/ui/usb/prompt-deduplication-and-cancel", test_usb_prompt_deduplication_and_cancel);
+    g_test_add_func("/ui/usb/approval-bound-before-authentication", test_usb_approval_is_bound_before_authentication);
+    g_test_add_func("/ui/session/reuses-authenticated-transport", test_session_reuses_authenticated_transport);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);

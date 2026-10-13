@@ -38,11 +38,13 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.1.0"
+#define OCTOSHIELD_VERSION "1.2.0"
 #endif
 
 typedef struct App App;
 typedef struct Operation Operation;
+typedef struct UsbDevice UsbDevice;
+typedef struct Session Session;
 
 /* A fixed-size native image container controls layout without creating resized
  * bitmap assets. GtkPicture scales the original embedded PNG for the display. */
@@ -128,7 +130,7 @@ static const Action actions[] = {
     {"desktop-apply", "Protect GNOME session", "Five-minute idle lock; removable-media and sharing controls.", "Set a five-minute idle timeout and immediate locking, disable media automount and autorun, and disable available per-user GNOME RDP/VNC controls. Your original settings are backed up privately.", FALSE, TRUE, {"desktop", "apply", NULL}},
     {"desktop-restore", "Restore GNOME settings", "Restore your recorded original desktop preferences.", "Restore the desktop settings recorded before OctoShield first changed them. Screen locking or desktop sharing may become less restrictive. System firewall and USB policy remain separate.", FALSE, TRUE, {"desktop", "restore", NULL}},
     {"desktop-status", "Inspect GNOME settings", "Read the current controls in your own desktop session.", NULL, FALSE, FALSE, {"desktop", "status", NULL}},
-    {"usb-list", "Refresh device list", "Show USBGuard device IDs, rules and authorization state.", NULL, TRUE, FALSE, {"usb", "devices", NULL}},
+    {"usb-list", "Refresh device list", "Refresh connected devices and their current authorization.", NULL, TRUE, FALSE, {"usb", "devices", NULL}},
     {"monitor-status", "System monitor status", "Inspect the privileged collector's service state.", NULL, TRUE, FALSE, {"monitor", "status", NULL}},
     {"monitor-logs", "Recent monitor events", "Read recent collector service output.", NULL, TRUE, FALSE, {"monitor", "logs", NULL}},
     {"monitor-disable", "Disable system monitoring", "Stop collecting new security-event notifications.", "Stop the OctoShield system monitor. Existing firewall, USB and other preventive controls remain configured, but monitoring will stop reporting new events.", TRUE, TRUE, {"monitor", "disable", NULL}},
@@ -148,9 +150,6 @@ static const char *const accounts_argv[] = {
 };
 
 typedef enum {
-    INPUT_USB_ALLOW,
-    INPUT_USB_BLOCK,
-    INPUT_USB_FORGET,
     INPUT_OFFICE_FIREWALL,
     INPUT_OFFICE_NETWORK,
     INPUT_OFFICE_SERVICE,
@@ -209,6 +208,23 @@ struct Operation {
     gboolean review_truncated;
     gboolean data_seen;
     gboolean data_truncated;
+    gboolean session_operation;
+    guint64 request_id;
+};
+
+struct Session {
+    App *app;
+    GSubprocess *process;
+    GOutputStream *input;
+    GInputStream *output;
+    GByteArray *line;
+    GQueue writes;
+    gchar *writing;
+    gboolean ready;
+    gboolean closed;
+    gboolean exited;
+    gboolean eof;
+    guint64 next_request;
 };
 
 struct App {
@@ -243,15 +259,31 @@ struct App {
     GtkLinkButton *update_link;
     GtkDropDown *global_profile;
     GtkDropDown *edit_profile;
-    GtkDropDown *usb_devices;
-    GtkEditable *usb_device_id;
-    GPtrArray *usb_ids;
+    GtkListBox *usb_devices;
+    GPtrArray *usb_inventory_rows;
+    GHashTable *usb_decisions;
+    AdwMessageDialog *usb_prompt;
+    gchar *usb_profile;
+    gchar *usb_inventory_signature;
+    gboolean local_session_ready;
+    gboolean auth_required;
+    gboolean usb_review_launch;
+    gboolean usb_automatic;
+    gboolean shutting_down;
+    Session *session;
+    Request *pending_request;
+    GtkStack *access_pages;
+    GtkLabel *access_status;
+    GtkButton *unlock;
+    GDBusProxy *login_session;
     GHashTable *setting_choices;
     gchar *active_profile;
     guint refresh_timer;
     gint64 status_not_before;
     gboolean cache_valid;
     gboolean usb_inventory;
+    gboolean usb_cache_valid;
+    gint64 usb_status_not_before;
     gboolean refresh_session_service;
     gboolean smoke_test;
 };
@@ -262,6 +294,15 @@ static void read_next(Reader *reader);
 static void show_confirmation(Operation *operation, guint64 id, const char *text);
 static gboolean refresh_status(gpointer data);
 static void handle_data_log(App *app, const char *text);
+static void maybe_prompt_usb(App *app);
+static void launch_request(Request *request);
+static void session_unlock(App *app);
+static void session_revoke(App *app, const char *reason);
+static gboolean session_send(Session *session, JsonBuilder *builder);
+static gboolean administrator_ready(App *app)
+{
+    return !app->auth_required || (app->session != NULL && app->session->ready && !app->session->closed);
+}
 
 static const char *brand_resource(App *app)
 {
@@ -298,7 +339,10 @@ static void branding_clear(App *app)
     g_clear_pointer(&app->status_rows, g_ptr_array_unref);
     g_clear_pointer(&app->profile_selectors, g_ptr_array_unref);
     g_clear_pointer(&app->profile_ids, g_ptr_array_unref);
-    g_clear_pointer(&app->usb_ids, g_ptr_array_unref);
+    g_clear_pointer(&app->usb_inventory_rows, g_ptr_array_unref);
+    g_clear_pointer(&app->usb_decisions, g_hash_table_unref);
+    g_clear_pointer(&app->usb_profile, g_free);
+    g_clear_pointer(&app->usb_inventory_signature, g_free);
     g_clear_pointer(&app->setting_choices, g_hash_table_unref);
     g_clear_pointer(&app->active_profile, g_free);
     if (app->theme_handler != 0) {
@@ -390,7 +434,7 @@ static void close_answers(Operation *operation)
         /* Closing the decision channel denies a future prompt. Never signal a
          * privileged process in the middle of a configuration mutation. */
         if (!operation->answer_pending)
-            g_output_stream_close(operation->answers, NULL, NULL);
+            if (!operation->session_operation) g_output_stream_close(operation->answers, NULL, NULL);
     }
 }
 
@@ -402,6 +446,7 @@ static void protocol_error(Operation *operation, const char *message)
         append_log(operation->app, "The decision channel was closed. Waiting for the helper to finish; changes already made are not automatically undone.");
     }
     close_answers(operation);
+    if (operation->session_operation) session_revoke(operation->app, "The administrator connection was interrupted. Unlock to continue.");
     g_clear_pointer(&operation->deferred_confirmation, g_free);
     operation->waiting_confirmation = FALSE;
     if (operation->app->confirmation != NULL) {
@@ -423,7 +468,7 @@ static void answer_written(GObject *source, GAsyncResult *result, gpointer data)
     }
     operation->answer_pending = FALSE;
     g_clear_pointer(&operation->answer, g_free);
-    if (operation->input_closed)
+    if (operation->input_closed && !operation->session_operation)
         g_output_stream_close(operation->answers, NULL, NULL);
     if (operation->deferred_confirmation != NULL && !operation->protocol_failed &&
         !operation->exited && !operation->done_seen) {
@@ -451,10 +496,21 @@ static void confirmation_response(AdwMessageDialog *dialog, const char *response
     append_log(app, accepted ? "Decision: continue with the reviewed change." : "Decision: decline this change.");
     g_string_truncate(operation->review, 0);
     operation->review_truncated = FALSE;
-    operation->answer_pending = TRUE;
-    operation->answer = g_strdup_printf("%" G_GUINT64_FORMAT " %s\n", operation->current_prompt_id, accepted ? "yes" : "no");
-    g_output_stream_write_all_async(operation->answers, operation->answer, strlen(operation->answer), G_PRIORITY_DEFAULT,
-                                   NULL, answer_written, operation);
+    if (operation->session_operation) {
+        g_autoptr(JsonBuilder) builder = json_builder_new();
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type"); json_builder_add_string_value(builder, "answer");
+        json_builder_set_member_name(builder, "request"); json_builder_add_int_value(builder, (gint64)operation->request_id);
+        json_builder_set_member_name(builder, "id"); json_builder_add_int_value(builder, (gint64)operation->current_prompt_id);
+        json_builder_set_member_name(builder, "allow"); json_builder_add_boolean_value(builder, accepted);
+        json_builder_end_object(builder);
+        if (!session_send(app->session, builder)) protocol_error(operation, "The administrator session is unavailable.");
+    } else {
+        operation->answer_pending = TRUE;
+        operation->answer = g_strdup_printf("%" G_GUINT64_FORMAT " %s\n", operation->current_prompt_id, accepted ? "yes" : "no");
+        g_output_stream_write_all_async(operation->answers, operation->answer, strlen(operation->answer), G_PRIORITY_DEFAULT,
+                                       NULL, answer_written, operation);
+    }
     gtk_label_set_text(app->activity, accepted ? "Applying the reviewed change…" : "Waiting for the helper after your decision…");
     update_actions(app);
 }
@@ -641,7 +697,7 @@ static void operation_maybe_finish(Operation *operation)
     app->operation = NULL;
     g_byte_array_unref(operation->out.line);
     g_byte_array_unref(operation->err.line);
-    g_object_unref(operation->process);
+    g_clear_object(&operation->process);
     g_string_free(operation->review, TRUE);
     if (operation->data_output != NULL) g_string_free(operation->data_output, TRUE);
     g_free(operation->deferred_confirmation);
@@ -651,6 +707,8 @@ static void operation_maybe_finish(Operation *operation)
     g_free(operation);
     update_actions(app);
     refresh_status(app);
+    maybe_prompt_usb(app);
+    if (app->shutting_down) gtk_window_close(app->window);
 }
 
 static void request_free(Request *request)
@@ -668,12 +726,19 @@ static void launch_request(Request *request)
         request_free(request);
         return;
     }
+    gboolean privileged = g_str_equal(request->argv[0], "/usr/bin/pkexec");
+    gboolean session_operation = privileged && app->auth_required;
+    if (session_operation && (!administrator_ready(app) || app->session->next_request >= G_MAXINT32)) {
+        request_free(request);
+        toast(app, "Unlock OctoShield before making changes");
+        return;
+    }
     g_autoptr(GError) error = NULL;
-    GSubprocess *process = g_subprocess_newv((const gchar *const *)request->argv,
+    GSubprocess *process = session_operation ? NULL : g_subprocess_newv((const gchar *const *)request->argv,
                                            G_SUBPROCESS_FLAGS_STDIN_PIPE |
                                            G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                            G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
-    if (process == NULL) {
+    if (!session_operation && process == NULL) {
         show_error(app, "Unable to start this operation", error->message);
         request_free(request);
         update_actions(app);
@@ -682,18 +747,21 @@ static void launch_request(Request *request)
     Operation *operation = g_new0(Operation, 1);
     operation->app = app;
     operation->process = process;
-    operation->answers = g_subprocess_get_stdin_pipe(process);
+    operation->session_operation = session_operation;
+    operation->answers = session_operation ? app->session->input : g_subprocess_get_stdin_pipe(process);
     operation->title = g_strdup(request->title);
     operation->review = g_string_new(NULL);
     if (g_str_equal(request->title, "Inspect profile configuration") ||
         g_str_equal(request->title, "Refresh device list") ||
         g_str_equal(request->title, "Check for OctoShield updates"))
         operation->data_output = g_string_new(NULL);
-    operation->out = (Reader){operation, g_subprocess_get_stdout_pipe(process), g_byte_array_new(), TRUE, FALSE, FALSE};
-    operation->err = (Reader){operation, g_subprocess_get_stderr_pipe(process), g_byte_array_new(), FALSE, FALSE, FALSE};
+    operation->out = (Reader){operation, session_operation ? NULL : g_subprocess_get_stdout_pipe(process), g_byte_array_new(), TRUE, FALSE, FALSE};
+    operation->err = (Reader){operation, session_operation ? NULL : g_subprocess_get_stderr_pipe(process), g_byte_array_new(), FALSE, FALSE, FALSE};
     app->operation = operation;
-    if (request->changes && g_str_equal(request->argv[0], "/usr/bin/pkexec"))
-        app->status_not_before = g_get_real_time() / G_USEC_PER_SEC;
+    if (request->changes && g_str_equal(request->argv[0], "/usr/bin/pkexec")) {
+        if (g_strcmp0(request->argv[2], "usb") == 0) app->usb_status_not_before = g_get_real_time() / G_USEC_PER_SEC;
+        else app->status_not_before = g_get_real_time() / G_USEC_PER_SEC;
+    }
     if (g_str_equal(request->title, "Inspect profile configuration")) {
         gtk_label_set_text(app->profile_details, "Loading the selected profile configuration…");
         GHashTableIter iter;
@@ -708,14 +776,378 @@ static void launch_request(Request *request)
         append_log(app, request->impact);
     append_log(app, "Review this output and every requested confirmation. Closing this window does not interrupt a running system change.");
     gtk_expander_set_expanded(app->details, TRUE);
-    gtk_label_set_text(app->activity, "Working — administrator authentication may be requested…");
+    gtk_label_set_text(app->activity, "Working — your administrator session is unlocked…");
     gtk_widget_set_visible(GTK_WIDGET(app->spinner), TRUE);
     gtk_spinner_start(app->spinner);
     update_actions(app);
-    read_next(&operation->out);
-    read_next(&operation->err);
-    g_subprocess_wait_async(process, NULL, process_waited, operation);
+    if (session_operation) {
+        operation->request_id = ++app->session->next_request;
+        g_autoptr(JsonBuilder) builder = json_builder_new();
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type"); json_builder_add_string_value(builder, "request");
+        json_builder_set_member_name(builder, "id"); json_builder_add_int_value(builder, (gint64)operation->request_id);
+        json_builder_set_member_name(builder, "args"); json_builder_begin_array(builder);
+        for (guint i = 2; request->argv[i] != NULL; i++) json_builder_add_string_value(builder, request->argv[i]);
+        json_builder_end_array(builder); json_builder_end_object(builder);
+        if (!session_send(app->session, builder)) session_revoke(app, "Unable to submit the requested operation.");
+    } else {
+        read_next(&operation->out);
+        read_next(&operation->err);
+        g_subprocess_wait_async(process, NULL, process_waited, operation);
+    }
     request_free(request);
+}
+
+static void session_maybe_finish(Session *session);
+static void session_read_next(Session *session);
+
+static void session_revoke(App *app, const char *reason)
+{
+    Session *session = app->session;
+    if (session != NULL && !session->closed) {
+        session->closed = TRUE;
+        session->ready = FALSE;
+        /* EOF revokes this app's authority. The broker finishes only an already
+         * confirmed mutation and denies every pending/future confirmation. */
+        if (session->writing == NULL) g_output_stream_close(session->input, NULL, NULL);
+    }
+    if (app->access_status != NULL) gtk_label_set_text(app->access_status, reason);
+    if (app->usb_prompt != NULL) adw_message_dialog_response(app->usb_prompt, "block");
+    if (app->pending_request != NULL) { request_free(app->pending_request); app->pending_request = NULL; }
+    update_actions(app);
+}
+
+static void session_write_next(Session *session);
+
+static void session_written(GObject *source, GAsyncResult *result, gpointer data)
+{
+    Session *session = data;
+    g_autoptr(GError) error = NULL;
+    if (!g_output_stream_write_all_finish(G_OUTPUT_STREAM(source), result, NULL, &error))
+        session_revoke(session->app, "The administrator connection closed. Unlock to continue.");
+    g_clear_pointer(&session->writing, g_free);
+    if (session->closed) {
+        g_queue_clear_full(&session->writes, g_free);
+        g_output_stream_close(session->input, NULL, NULL);
+    } else session_write_next(session);
+    session_maybe_finish(session);
+}
+
+static void session_write_next(Session *session)
+{
+    if (session->closed || session->writing != NULL || g_queue_is_empty(&session->writes)) return;
+    session->writing = g_queue_pop_head(&session->writes);
+    g_output_stream_write_all_async(session->input, session->writing, strlen(session->writing),
+                                   G_PRIORITY_DEFAULT, NULL, session_written, session);
+}
+
+static gboolean session_send(Session *session, JsonBuilder *builder)
+{
+    if (session == NULL || !session->ready || session->closed || session->writes.length >= 4) return FALSE;
+    g_autoptr(JsonNode) node = json_builder_get_root(builder);
+    g_autoptr(JsonGenerator) generator = json_generator_new();
+    json_generator_set_root(generator, node);
+    g_autofree gchar *json = json_generator_to_data(generator, NULL);
+    g_queue_push_tail(&session->writes, g_strconcat(json, "\n", NULL));
+    session_write_next(session);
+    return TRUE;
+}
+
+static gboolean session_integer(JsonObject *object, const char *name, gint64 *number)
+{
+    JsonNode *node = json_object_get_member(object, name);
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) || json_node_get_value_type(node) != G_TYPE_INT64) return FALSE;
+    *number = json_node_get_int(node);
+    return TRUE;
+}
+
+static void session_event(Session *session)
+{
+    App *app = session->app;
+    g_autoptr(JsonParser) parser = json_parser_new();
+    if (session->line->len == 0 || memchr(session->line->data, '\0', session->line->len) != NULL ||
+        !json_parser_load_from_data(parser, (const char *)session->line->data, session->line->len, NULL)) {
+        session_revoke(app, "Invalid administrator response. Unlock to start a new session."); return;
+    }
+    JsonNode *node = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(node)) { session_revoke(app, "Invalid administrator response."); return; }
+    JsonObject *object = json_node_get_object(node);
+    JsonNode *type_node = json_object_get_member(object, "type");
+    if (type_node == NULL || !JSON_NODE_HOLDS_VALUE(type_node) || json_node_get_value_type(type_node) != G_TYPE_STRING) {
+        session_revoke(app, "Invalid administrator response."); return;
+    }
+    const char *type = json_node_get_string(type_node);
+    if (g_str_equal(type, "ready")) {
+        if (session->ready || session->closed) { session_revoke(app, "Unexpected administrator response."); return; }
+        session->ready = TRUE;
+        app->local_session_ready = TRUE; /* Broker independently verified logind. */
+        if (app->access_status != NULL) gtk_label_set_text(app->access_status, "Administrator session unlocked. Lock or close OctoShield to end it.");
+        update_actions(app);
+        if (app->pending_request != NULL) {
+            Request *request = app->pending_request; app->pending_request = NULL;
+            launch_request(request);
+        } else maybe_prompt_usb(app);
+        return;
+    }
+    if (g_str_equal(type, "closed")) {
+        session_revoke(app, "Administrator access ended. Unlock to continue. Devices remain protected by the current policy."); return;
+    }
+    gint64 request = 0;
+    Operation *operation = app->operation;
+    if (!session->ready || !session_integer(object, "request", &request) || request < 1 ||
+        operation == NULL || !operation->session_operation || (guint64)request != operation->request_id) {
+        session_revoke(app, "An administrator response did not match the active operation."); return;
+    }
+    if (g_str_equal(type, "finished")) {
+        gint64 exit_code = -1;
+        if (!session_integer(object, "exit_code", &exit_code) || exit_code < 0 || exit_code > 255) {
+            session_revoke(app, "Invalid administrator completion result."); return;
+        }
+        operation->exited = TRUE;
+        operation->exit_success = exit_code == 0;
+        operation->out.eof = operation->err.eof = TRUE;
+        operation_maybe_finish(operation);
+        return;
+    }
+    if (g_str_equal(type, "stderr")) {
+        JsonNode *text = json_object_get_member(object, "text");
+        if (text != NULL && JSON_NODE_HOLDS_VALUE(text) && json_node_get_value_type(text) == G_TYPE_STRING) {
+            g_autofree gchar *safe = octoshield_text_sanitize(json_node_get_string(text), -1);
+            append_log(app, safe);
+        } else session_revoke(app, "Invalid administrator diagnostic output.");
+        return;
+    }
+    g_byte_array_set_size(operation->out.line, 0);
+    g_byte_array_append(operation->out.line, session->line->data, session->line->len);
+    handle_line(&operation->out);
+    g_byte_array_set_size(operation->out.line, 0);
+}
+
+static void session_read(GObject *source, GAsyncResult *result, gpointer data)
+{
+    Session *session = data;
+    g_autoptr(GBytes) bytes = g_input_stream_read_bytes_finish(G_INPUT_STREAM(source), result, NULL);
+    if (bytes == NULL || g_bytes_get_size(bytes) == 0) {
+        session->eof = TRUE;
+        session_revoke(session->app, "OctoShield is locked. Unlock with an administrator account to continue.");
+        session_maybe_finish(session);
+        return;
+    }
+    gsize size = 0;
+    const guint8 *buffer = g_bytes_get_data(bytes, &size);
+    for (gsize i = 0; i < size; i++) {
+        if (buffer[i] == '\n') {
+            if (!session->closed) session_event(session);
+            g_byte_array_set_size(session->line, 0);
+        } else if (!session->closed) {
+            if (session->line->len >= MAX_PROTOCOL_LINE)
+                session_revoke(session->app, "An administrator response exceeded its safety limit.");
+            else g_byte_array_append(session->line, &buffer[i], 1);
+        }
+    }
+    session_read_next(session);
+}
+
+static void session_read_next(Session *session)
+{
+    g_input_stream_read_bytes_async(session->output, 4096, G_PRIORITY_DEFAULT, NULL, session_read, session);
+}
+
+static void session_maybe_finish(Session *session)
+{
+    if (!session->exited || !session->eof || session->writing != NULL) return;
+    App *app = session->app;
+    if (app->session == session) app->session = NULL;
+    if (app->operation != NULL && app->operation->session_operation) {
+        Operation *operation = app->operation;
+        operation->protocol_failed = TRUE;
+        operation->exited = TRUE;
+        operation->out.eof = operation->err.eof = TRUE;
+        operation_maybe_finish(operation);
+    }
+    g_queue_clear_full(&session->writes, g_free);
+    g_byte_array_unref(session->line);
+    g_object_unref(session->process);
+    g_free(session);
+    update_actions(app);
+    maybe_prompt_usb(app);
+}
+
+static void session_waited(GObject *source, GAsyncResult *result, gpointer data)
+{
+    Session *session = data;
+    g_subprocess_wait_finish(G_SUBPROCESS(source), result, NULL);
+    session->exited = TRUE;
+    session_maybe_finish(session);
+}
+
+static void session_unlock(App *app)
+{
+    if (app->smoke_test || app->shutting_down || app->session != NULL) return;
+    const char *const argv[] = {"/usr/bin/pkexec", "--disable-internal-agent", "/usr/libexec/octoshield-session", NULL};
+    g_autoptr(GError) error = NULL;
+    GSubprocess *process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDIN_PIPE |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+    if (process == NULL) { show_error(app, "Unable to unlock OctoShield", error->message); return; }
+    Session *session = g_new0(Session, 1);
+    session->app = app; session->process = process;
+    session->input = g_subprocess_get_stdin_pipe(process);
+    session->output = g_subprocess_get_stdout_pipe(process);
+    session->line = g_byte_array_new();
+    app->session = session;
+    gtk_label_set_text(app->access_status, "Choose an administrator account in the system authentication dialog. OctoShield never receives or stores its password.");
+    session_read_next(session);
+    g_subprocess_wait_async(process, NULL, session_waited, session);
+    update_actions(app);
+}
+
+static void unlock_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    App *app = data;
+    if (administrator_ready(app)) session_revoke(app, "OctoShield is locked. Unlock to begin a new administrator session.");
+    else session_unlock(app);
+}
+
+static gboolean login_boolean(GDBusProxy *proxy, const char *name)
+{
+    g_autoptr(GVariant) value = g_dbus_proxy_get_cached_property(proxy, name);
+    return value != NULL && g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN) && g_variant_get_boolean(value);
+}
+
+static void login_changed(GDBusProxy *proxy, GVariant *changed, const gchar *const *invalidated, gpointer data)
+{
+    (void)changed; (void)invalidated;
+    App *app = data;
+    g_autoptr(GVariant) remote = g_dbus_proxy_get_cached_property(proxy, "Remote");
+    g_autoptr(GVariant) locked = g_dbus_proxy_get_cached_property(proxy, "LockedHint");
+    g_autoptr(GVariant) type = g_dbus_proxy_get_cached_property(proxy, "Type");
+    g_autoptr(GVariant) user = g_dbus_proxy_get_cached_property(proxy, "User");
+    guint uid = G_MAXUINT;
+    if (user != NULL && g_variant_is_of_type(user, G_VARIANT_TYPE("(uo)"))) g_variant_get_child(user, 0, "u", &uid);
+    g_autofree gchar *owner = g_dbus_proxy_get_name_owner(proxy);
+    app->local_session_ready = owner != NULL && remote != NULL && locked != NULL && type != NULL &&
+        g_variant_is_of_type(remote, G_VARIANT_TYPE_BOOLEAN) && g_variant_is_of_type(locked, G_VARIANT_TYPE_BOOLEAN) &&
+        g_variant_is_of_type(type, G_VARIANT_TYPE_STRING) && login_boolean(proxy, "Active") &&
+        !g_variant_get_boolean(remote) && !g_variant_get_boolean(locked) && uid == getuid() &&
+        (g_str_equal(g_variant_get_string(type, NULL), "wayland") || g_str_equal(g_variant_get_string(type, NULL), "x11"));
+    if (!app->local_session_ready) session_revoke(app, "Your desktop session is inactive or locked. Unlock OctoShield after returning.");
+    else maybe_prompt_usb(app);
+}
+
+static void login_proxy_ready(GObject *source, GAsyncResult *result, gpointer data)
+{
+    (void)source;
+    App *app = data;
+    app->login_session = g_dbus_proxy_new_for_bus_finish(result, NULL);
+    if (app->login_session == NULL) return;
+    g_signal_connect(app->login_session, "g-properties-changed", G_CALLBACK(login_changed), app);
+    login_changed(app->login_session, NULL, NULL, app);
+}
+
+typedef struct {
+    App *app;
+    GDBusConnection *connection;
+    GPtrArray *matches;
+    guint pending;
+} LoginDiscovery;
+
+typedef struct {
+    LoginDiscovery *discovery;
+    gchar *path;
+} LoginCandidate;
+
+static gboolean login_properties_eligible(GVariant *properties)
+{
+    gboolean active = FALSE, remote = TRUE, locked = TRUE;
+    const char *type = NULL, *user_path = NULL;
+    guint uid = G_MAXUINT;
+    return g_variant_lookup(properties, "Active", "b", &active) && active &&
+        g_variant_lookup(properties, "Remote", "b", &remote) && !remote &&
+        g_variant_lookup(properties, "LockedHint", "b", &locked) && !locked &&
+        g_variant_lookup(properties, "Type", "&s", &type) &&
+        (g_str_equal(type, "wayland") || g_str_equal(type, "x11")) &&
+        g_variant_lookup(properties, "User", "(u&o)", &uid, &user_path) && uid == getuid();
+}
+
+static void login_candidate_ready(GObject *source, GAsyncResult *result, gpointer data)
+{
+    LoginCandidate *candidate = data;
+    LoginDiscovery *discovery = candidate->discovery;
+    g_autoptr(GVariant) response = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, NULL);
+    if (response != NULL) {
+        g_autoptr(GVariant) properties = NULL;
+        g_variant_get(response, "(@a{sv})", &properties);
+        if (login_properties_eligible(properties)) g_ptr_array_add(discovery->matches, g_strdup(candidate->path));
+    }
+    g_free(candidate->path); g_free(candidate);
+    if (--discovery->pending != 0) return;
+    if (discovery->matches->len == 1 && !discovery->app->shutting_down)
+        g_dbus_proxy_new_for_bus(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+            NULL, "org.freedesktop.login1", g_ptr_array_index(discovery->matches, 0),
+            "org.freedesktop.login1.Session", NULL, login_proxy_ready, discovery->app);
+    g_ptr_array_unref(discovery->matches);
+    g_object_unref(discovery->connection);
+    g_free(discovery);
+}
+
+static void login_sessions_listed(GObject *source, GAsyncResult *result, gpointer data)
+{
+    App *app = data;
+    g_autoptr(GVariant) response = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, NULL);
+    if (response == NULL || app->shutting_down) return;
+    g_autoptr(GVariant) sessions = NULL;
+    g_variant_get(response, "(@a(susso))", &sessions);
+    if (g_variant_n_children(sessions) > 128) return;
+    LoginDiscovery *discovery = g_new0(LoginDiscovery, 1);
+    discovery->app = app;
+    discovery->connection = G_DBUS_CONNECTION(g_object_ref(source));
+    discovery->matches = g_ptr_array_new_with_free_func(g_free);
+    GVariantIter iterator;
+    g_variant_iter_init(&iterator, sessions);
+    const char *id, *user, *seat, *path;
+    guint uid;
+    while (g_variant_iter_next(&iterator, "(&su&s&s&o)", &id, &uid, &user, &seat, &path)) {
+        if (uid != getuid()) continue;
+        LoginCandidate *candidate = g_new0(LoginCandidate, 1);
+        candidate->discovery = discovery; candidate->path = g_strdup(path);
+        discovery->pending++;
+        g_dbus_connection_call(discovery->connection, "org.freedesktop.login1", path,
+            "org.freedesktop.DBus.Properties", "GetAll", g_variant_new("(s)", "org.freedesktop.login1.Session"),
+            G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, NULL, login_candidate_ready, candidate);
+    }
+    if (discovery->pending == 0) {
+        g_ptr_array_unref(discovery->matches); g_object_unref(discovery->connection); g_free(discovery);
+    }
+}
+
+static void login_session_found(GObject *source, GAsyncResult *result, gpointer data)
+{
+    App *app = data;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GVariant) response = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
+    if (response == NULL) {
+        g_autofree gchar *remote = error != NULL ? g_dbus_error_get_remote_error(error) : NULL;
+        if (g_strcmp0(remote, "org.freedesktop.login1.NoSessionForPID") == 0)
+            g_dbus_connection_call(G_DBUS_CONNECTION(source), "org.freedesktop.login1", "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager", "ListSessions", NULL, G_VARIANT_TYPE("(a(susso))"),
+                G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, NULL, login_sessions_listed, app);
+        return;
+    }
+    const char *path = NULL;
+    g_variant_get(response, "(&o)", &path);
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+        NULL, "org.freedesktop.login1", path, "org.freedesktop.login1.Session", NULL, login_proxy_ready, app);
+}
+
+static void login_bus_ready(GObject *source, GAsyncResult *result, gpointer data)
+{
+    (void)source;
+    g_autoptr(GDBusConnection) connection = g_bus_get_finish(result, NULL);
+    if (connection == NULL) return;
+    g_dbus_connection_call(connection, "org.freedesktop.login1", "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager", "GetSessionByPID", g_variant_new("(u)", (guint)getpid()),
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, NULL, login_session_found, data);
 }
 
 static void preview_response(AdwMessageDialog *dialog, const char *response, gpointer data)
@@ -750,6 +1182,12 @@ static void start_action(App *app, const char *title, const char *impact, gboole
     request->impact = g_strdup(impact);
     request->argv = argv;
     request->changes = changes;
+    if (!administrator_ready(app)) {
+        if (app->pending_request != NULL) request_free(app->pending_request);
+        app->pending_request = request;
+        session_unlock(app);
+        return;
+    }
     /* Privileged helpers present their actual plan before mutation. A second
      * generic desktop confirmation adds no evidence and obscures that plan. */
     if (!changes || privileged) {
@@ -791,26 +1229,6 @@ static void input_action_clicked(GtkButton *button, gpointer data)
     gsize count = 0;
     g_autofree gchar *impact = NULL;
     switch (binding->input_action) {
-    case INPUT_USB_ALLOW:
-        args[0] = "usb"; args[1] = "allow"; args[2] = first; count = 3;
-        if (gtk_switch_get_active(binding->permanent)) {
-            args[3] = "--permanent"; count = 4;
-            impact = g_strdup_printf("Review USB device %s and remember its authorization only for the effective USB profile named in the helper's confirmation. Other profiles receive no permission. A device can expose keyboard or network interfaces as well as storage.", first);
-        } else {
-            impact = g_strdup_printf("Review USB device %s and allow this connection until unplugging, restarting or switching USB profiles. This does not scan files or prove the device is safe.", first);
-        }
-        title = "Authorize USB device";
-        break;
-    case INPUT_USB_BLOCK:
-        args[0] = "usb"; args[1] = "block"; args[2] = first; count = 3;
-        title = "Block USB device";
-        impact = g_strdup_printf("Block USB device %s. If it is a keyboard, mouse, network adapter or mounted storage, access can stop immediately. Safely unmount storage before blocking it.", first);
-        break;
-    case INPUT_USB_FORGET:
-        args[0] = "usb"; args[1] = "forget"; args[2] = first; count = 3;
-        title = "Forget USB approval in this profile";
-        impact = g_strdup_printf("Remove remembered permission for device %s from the effective USB profile and reevaluate the connected device.", first);
-        break;
     case INPUT_OFFICE_FIREWALL:
         args[0] = "office"; args[1] = "firewall"; args[2] = first; args[3] = second; count = 4;
         title = "Allow a narrow office connection";
@@ -842,10 +1260,13 @@ static void input_action_clicked(GtkButton *button, gpointer data)
 
 static void update_actions(App *app)
 {
-    gboolean enabled = app->operation == NULL && app->preview == NULL && !app->smoke_test;
+    gboolean enabled = administrator_ready(app) && app->operation == NULL && app->preview == NULL && app->usb_prompt == NULL && !app->smoke_test;
     for (guint i = 0; i < app->operation_widgets->len; i++)
         gtk_widget_set_sensitive(g_ptr_array_index(app->operation_widgets, i), enabled);
     gtk_widget_set_visible(app->decline, app->operation != NULL && app->operation->waiting_confirmation);
+    if (app->usb_devices != NULL) gtk_widget_set_sensitive(GTK_WIDGET(app->usb_devices), enabled);
+    if (app->access_pages != NULL) gtk_stack_set_visible_child_name(app->access_pages, administrator_ready(app) || app->smoke_test ? "application" : "locked");
+    if (app->unlock != NULL) gtk_button_set_label(app->unlock, administrator_ready(app) ? "Lock" : app->session != NULL && !app->session->closed ? "Authenticating…" : "Unlock");
 }
 
 static GtkWidget *action_button(App *app, const char *id, const char *label, gboolean suggested)
@@ -1244,28 +1665,256 @@ static void update_catalog(App *app, JsonArray *catalog)
     app->profile_ids = g_steal_pointer(&ids);
 }
 
+struct UsbDevice {
+    App *app;
+    gchar *id;
+    gchar *token;
+    gchar *profile;
+    gchar *name;
+    gchar *state;
+    gchar *identity;
+    gboolean remembered;
+};
+
+static void usb_device_free(gpointer data)
+{
+    UsbDevice *device = data;
+    g_free(device->id); g_free(device->token); g_free(device->profile);
+    g_free(device->name); g_free(device->state); g_free(device->identity);
+    g_free(device);
+}
+
+static UsbDevice *usb_device_copy(const UsbDevice *device)
+{
+    UsbDevice *copy = g_new0(UsbDevice, 1);
+    *copy = *device;
+    copy->id = g_strdup(device->id); copy->token = g_strdup(device->token);
+    copy->profile = g_strdup(device->profile); copy->name = g_strdup(device->name);
+    copy->state = g_strdup(device->state); copy->identity = g_strdup(device->identity);
+    return copy;
+}
+
+static gboolean usb_token_valid(const char *token)
+{
+    if (token == NULL || strlen(token) != 64) return FALSE;
+    for (guint i = 0; i < 64; i++)
+        if (!g_ascii_isxdigit(token[i]) || g_ascii_isupper(token[i])) return FALSE;
+    return TRUE;
+}
+
+static gchar *usb_decision_key(const UsbDevice *device)
+{
+    return g_strdup_printf("%s:%s", device->profile, device->token);
+}
+
+static gboolean usb_device_current(App *app, const UsbDevice *device)
+{
+    if (!app->usb_cache_valid || !app->local_session_ready ||
+        g_strcmp0(device->profile, app->usb_profile) != 0) return FALSE;
+    for (guint i = 0; i < app->usb_inventory_rows->len; i++) {
+        UsbDevice *current = g_ptr_array_index(app->usb_inventory_rows, i);
+        if (g_str_equal(device->token, current->token) && g_str_equal(device->id, current->id) &&
+            g_str_equal(device->state, current->state)) return TRUE;
+    }
+    return FALSE;
+}
+
+static gboolean usb_prompt_next(gpointer data)
+{
+    maybe_prompt_usb(data);
+    return G_SOURCE_REMOVE;
+}
+
+static void usb_prompt_response(AdwMessageDialog *dialog, const char *response, gpointer data)
+{
+    UsbDevice *device = data;
+    App *app = device->app;
+    if (app->usb_prompt == dialog) app->usb_prompt = NULL;
+    gboolean allow = g_str_equal(response, "once") || g_str_equal(response, "profile");
+    if (allow && usb_device_current(app, device)) {
+        const char *args[] = {"usb", "approve", device->id, device->token, device->profile, response};
+        start_action(app, "Authorize USB device", NULL, TRUE, TRUE, G_N_ELEMENTS(args), args);
+    } else if (allow) {
+        toast(app, "The device, USB profile or session changed. Refresh and review it again.");
+    }
+    update_actions(app);
+    if (!app->shutting_down) g_idle_add(usb_prompt_next, app);
+}
+
+static void show_usb_prompt(UsbDevice *device)
+{
+    App *app = device->app;
+    if (app->shutting_down || app->usb_prompt != NULL || app->operation != NULL || app->preview != NULL ||
+        app->smoke_test || !usb_device_current(app, device)) return;
+    g_autofree gchar *key = usb_decision_key(device);
+    g_hash_table_add(app->usb_decisions, g_strdup(key));
+    GtkWidget *dialog = adw_message_dialog_new(app->window, "Allow this USB device?", NULL);
+    g_autofree gchar *body = g_strdup_printf("%s\n%s\n\nUSB profile: %s\n\nKeep it blocked unless you expected this device. Device names are supplied by the hardware and do not prove its identity.", device->name, device->identity, device->profile);
+    adw_message_dialog_set_body(ADW_MESSAGE_DIALOG(dialog), body);
+    GtkWidget *explanation = text_label("Allow once lasts until disconnect, a USB profile change or a USBGuard restart. Remember saves permission only in this USB profile.", "dim-label");
+    adw_message_dialog_set_extra_child(ADW_MESSAGE_DIALOG(dialog), explanation);
+    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "block", "Keep blocked", "once", "Allow once", "profile", "Remember in profile", NULL);
+    adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "block");
+    adw_message_dialog_set_close_response(ADW_MESSAGE_DIALOG(dialog), "block");
+    adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "once", ADW_RESPONSE_SUGGESTED);
+    app->usb_prompt = ADW_MESSAGE_DIALOG(dialog);
+    UsbDevice *copy = usb_device_copy(device);
+    g_object_set_data_full(G_OBJECT(dialog), "usb-device", copy, usb_device_free);
+    g_signal_connect(dialog, "response", G_CALLBACK(usb_prompt_response), copy);
+    update_actions(app);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void maybe_prompt_usb(App *app)
+{
+    if (!app->usb_automatic || app->shutting_down || app->usb_inventory_rows == NULL || app->usb_prompt != NULL || !app->local_session_ready ||
+        !app->usb_cache_valid || app->operation != NULL || app->preview != NULL || app->pending_request != NULL ||
+        (app->session != NULL && !app->session->ready) || app->smoke_test) return;
+    for (guint i = 0; i < app->usb_inventory_rows->len; i++) {
+        UsbDevice *device = g_ptr_array_index(app->usb_inventory_rows, i);
+        if ((!g_str_equal(device->state, "blocked") && !g_str_equal(device->state, "rejected")) || !usb_token_valid(device->token)) continue;
+        g_autofree gchar *key = usb_decision_key(device);
+        if (!g_hash_table_contains(app->usb_decisions, key)) { show_usb_prompt(device); return; }
+    }
+    if (app->usb_review_launch && !administrator_ready(app) && app->pending_request == NULL && app->session == NULL) gtk_window_close(app->window);
+}
+
+static void usb_review_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    show_usb_prompt(data);
+}
+
+static void usb_revoke_clicked(GtkButton *button, gpointer data)
+{
+    UsbDevice *device = data;
+    App *app = device->app;
+    if (!usb_device_current(app, device)) { toast(app, "Refresh the device list before changing this device"); return; }
+    const char *mode = g_object_get_data(G_OBJECT(button), "usb-mode");
+    const char *args[] = {"usb", "revoke", device->id, device->token, device->profile, mode};
+    start_action(app, g_str_equal(mode, "forget") ? "Forget USB approval" : "Block USB device", NULL, TRUE, TRUE, G_N_ELEMENTS(args), args);
+}
+
+static GtkWidget *usb_row_button(UsbDevice *device, const char *label, const char *mode)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    if (mode != NULL) g_object_set_data(G_OBJECT(button), "usb-mode", (gpointer)mode);
+    g_signal_connect(button, "clicked", mode != NULL ? G_CALLBACK(usb_revoke_clicked) : G_CALLBACK(usb_review_clicked), device);
+    return button;
+}
+
 static void show_usb_devices(App *app, JsonArray *devices)
 {
-    if (app->usb_devices == NULL || devices == NULL || json_array_get_length(devices) > 512) return;
-    GtkStringList *model = gtk_string_list_new(NULL);
-    g_ptr_array_set_size(app->usb_ids, 0);
+    if (app->usb_devices == NULL) return;
+    g_autofree gchar *signature = NULL;
+    if (devices != NULL && json_array_get_length(devices) <= 512) {
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_ARRAY);
+        json_node_set_array(node, devices);
+        g_autoptr(JsonGenerator) generator = json_generator_new();
+        json_generator_set_root(generator, node);
+        g_autofree gchar *json = json_generator_to_data(generator, NULL);
+        g_autofree gchar *data = g_strconcat(app->usb_profile != NULL ? app->usb_profile : "", json, NULL);
+        signature = g_compute_checksum_for_string(G_CHECKSUM_SHA256, data, -1);
+    }
+    if (signature != NULL && g_strcmp0(signature, app->usb_inventory_signature) == 0) {
+        maybe_prompt_usb(app);
+        return;
+    }
+    g_free(app->usb_inventory_signature);
+    app->usb_inventory_signature = g_steal_pointer(&signature);
+    /* Never leave actionable rows behind when the observation disappears. */
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(app->usb_devices))) != NULL)
+        gtk_list_box_remove(app->usb_devices, child);
+    g_ptr_array_set_size(app->usb_inventory_rows, 0);
+    if (devices == NULL || json_array_get_length(devices) > 512) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "Device status unavailable");
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Refresh after the status service has observed connected hardware.");
+        gtk_list_box_append(app->usb_devices, row);
+        if (app->usb_prompt != NULL) adw_message_dialog_response(app->usb_prompt, "block");
+        return;
+    }
+    g_autoptr(GHashTable) attached = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < json_array_get_length(devices); i++) {
         JsonNode *node = json_array_get_element(devices, i);
         if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node)) continue;
-        JsonObject *device = json_node_get_object(node);
-        JsonNode *id_node = json_object_get_member(device, "id");
+        JsonObject *object = json_node_get_object(node);
+        JsonNode *id_node = json_object_get_member(object, "id");
         if (id_node == NULL || !JSON_NODE_HOLDS_VALUE(id_node) || json_node_get_value_type(id_node) != G_TYPE_INT64) continue;
         gint64 id = json_node_get_int(id_node);
         if (id < 1 || id > G_GINT64_CONSTANT(4294967294)) continue;
-        g_autofree gchar *id_text = g_strdup_printf("%" G_GINT64_FORMAT, id);
-        g_autofree gchar *label = g_strdup_printf("%s · %s · %s", id_text, string_member(device, "state", "unknown"), string_member(device, "name", string_member(device, "label", "USB device")));
-        g_autofree gchar *safe = octoshield_text_sanitize(label, -1);
-        gtk_string_list_append(model, safe);
-        g_ptr_array_add(app->usb_ids, g_strdup(id_text));
+        UsbDevice *device = g_new0(UsbDevice, 1);
+        device->app = app;
+        device->id = g_strdup_printf("%" G_GINT64_FORMAT, id);
+        device->token = g_strdup(string_member(object, "token", ""));
+        device->profile = g_strdup(string_member(object, "profile", app->usb_profile != NULL ? app->usb_profile : "unmanaged"));
+        device->state = g_strdup(string_member(object, "state", "unknown"));
+        const char *name = string_member(object, "name", "");
+        if (*name == '\0') name = string_member(object, "label", "USB device");
+        if (*name == '\0') name = "USB device";
+        device->name = octoshield_text_sanitize(name, -1);
+        g_autofree gchar *identity = g_strdup_printf("%s · %s · port %s", string_member(object, "category", "USB device"), string_member(object, "vendor_product", "identity unavailable"), string_member(object, "port", "unknown"));
+        device->identity = octoshield_text_sanitize(identity, -1);
+        JsonNode *remembered = json_object_get_member(object, "remembered");
+        device->remembered = remembered != NULL && JSON_NODE_HOLDS_VALUE(remembered) && json_node_get_value_type(remembered) == G_TYPE_BOOLEAN && json_node_get_boolean(remembered);
+        g_ptr_array_add(app->usb_inventory_rows, device);
+        if (usb_token_valid(device->token)) g_hash_table_add(attached, usb_decision_key(device));
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), device->name);
+        gboolean blocked = g_str_equal(device->state, "blocked") || g_str_equal(device->state, "rejected");
+        gboolean allowed = g_str_equal(device->state, "allowed");
+        const char *state = blocked ? "Blocked · decision required" : allowed ? (device->remembered ? "Allowed · remembered in this profile" : "Allowed · current policy") : "Authorization unknown";
+        g_autofree gchar *subtitle = g_strdup_printf("%s\n%s", state, device->identity);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
+        adw_action_row_set_subtitle_lines(ADW_ACTION_ROW(row), 3);
+        GtkWidget *icon = gtk_image_new_from_icon_name(blocked ? "changes-prevent-symbolic" : allowed ? "emblem-ok-symbolic" : "dialog-question-symbolic");
+        gtk_widget_add_css_class(icon, blocked ? "warning" : allowed ? "success" : "dim-label");
+        adw_action_row_add_prefix(ADW_ACTION_ROW(row), icon);
+        if (usb_token_valid(device->token)) {
+            GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+            if (blocked) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Review…", NULL));
+            if (allowed) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Block…", "block"));
+            if (device->remembered) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Forget…", "forget"));
+            adw_action_row_add_suffix(ADW_ACTION_ROW(row), buttons);
+        }
+        gtk_list_box_append(app->usb_devices, row);
     }
-    gtk_drop_down_set_model(app->usb_devices, G_LIST_MODEL(model));
-    gtk_drop_down_set_selected(app->usb_devices, GTK_INVALID_LIST_POSITION);
-    g_object_unref(model);
+    GHashTableIter iter; gpointer key;
+    g_hash_table_iter_init(&iter, app->usb_decisions);
+    while (g_hash_table_iter_next(&iter, &key, NULL))
+        if (!g_hash_table_contains(attached, key)) g_hash_table_iter_remove(&iter);
+    if (app->usb_inventory_rows->len == 0) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "No external USB devices detected");
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Connected devices and their authorization will appear here automatically.");
+        gtk_list_box_append(app->usb_devices, row);
+    }
+    if (app->usb_prompt != NULL) {
+        UsbDevice *prompted = g_object_get_data(G_OBJECT(app->usb_prompt), "usb-device");
+        if (!usb_device_current(app, prompted)) adw_message_dialog_response(app->usb_prompt, "block");
+    }
+    update_actions(app);
+    maybe_prompt_usb(app);
+}
+
+static void render_usb_status(App *app, JsonObject *usb)
+{
+    JsonNode *available = usb != NULL ? json_object_get_member(usb, "available") : NULL;
+    app->usb_cache_valid = available != NULL && JSON_NODE_HOLDS_VALUE(available) && json_node_get_value_type(available) == G_TYPE_BOOLEAN && json_node_get_boolean(available);
+
+    JsonNode *pending_node = usb != NULL ? json_object_get_member(usb, "pending") : NULL;
+    gint64 pending = app->usb_cache_valid && pending_node != NULL && JSON_NODE_HOLDS_VALUE(pending_node) && json_node_get_value_type(pending_node) == G_TYPE_INT64 ? json_node_get_int(pending_node) : -1;
+    const char *usb_profile = string_member(usb, "profile", "not assigned");
+    g_autofree gchar *pending_text = pending < 0 ? g_strdup(string_member(usb, "summary", "USB status unavailable. New devices are not assumed to be blocked until authorization is verified.")) :
+        g_strdup_printf("USB profile: %s · %" G_GINT64_FORMAT " blocked device%s awaiting a decision. Approval is scoped to this USB profile.", usb_profile, pending, pending == 1 ? "" : "s");
+    gtk_label_set_text(app->usb_pending, pending_text);
+    if (app->overview_usb != NULL) gtk_label_set_text(app->overview_usb, pending_text);
+    g_free(app->usb_profile);
+    app->usb_profile = g_strdup(usb_profile);
+    show_usb_devices(app, app->usb_cache_valid ? array_member(usb, "devices") : NULL);
 }
 
 static void render_status(App *app, JsonObject *root)
@@ -1302,24 +1951,13 @@ static void render_status(App *app, JsonObject *root)
         g_autofree gchar *label = g_strdup_printf("Last system observation %s · refreshes automatically", time);
         gtk_label_set_text(app->checked_label, label);
     } else gtk_label_set_text(app->checked_label, "Status is missing, stale or invalid. Inspection can help diagnose the service.");
-    JsonObject *usb = object_member(root, "usb");
-    JsonNode *pending_node = usb != NULL ? json_object_get_member(usb, "pending") : NULL;
-    gint64 pending = pending_node != NULL && JSON_NODE_HOLDS_VALUE(pending_node) && json_node_get_value_type(pending_node) == G_TYPE_INT64 ? json_node_get_int(pending_node) : -1;
-    const char *usb_profile = string_member(usb, "profile", string_member(object_member(profiles, "assignments"), "usb", "not assigned"));
-    g_autofree gchar *pending_text = pending < 0 ? g_strdup("USB status unavailable. New devices are not assumed to be blocked until authorization is verified.") :
-        g_strdup_printf("USB profile: %s · %" G_GINT64_FORMAT " blocked device%s awaiting a decision. Approval is scoped to this USB profile.", usb_profile, pending, pending == 1 ? "" : "s");
-    gtk_label_set_text(app->usb_pending, pending_text);
-    if (app->overview_usb != NULL) gtk_label_set_text(app->overview_usb, pending_text);
-    /* Cached entries are pending, not a trusted inventory. Keep a manually
-     * inspected inventory until the user asks to refresh it. */
-    if (!app->usb_inventory)
-        show_usb_devices(app, array_member(usb, "devices"));
+    if (!app->auth_required) render_usb_status(app, object_member(root, "usb"));
 }
 
 /* The directory cannot be replaced by another user; the opened file is then
  * checked itself before its bounded contents are parsed. Never follow links,
  * trust user-writable status, or preserve green indicators after expiry. */
-static JsonNode *read_status_cache(void)
+static JsonNode *read_observation_cache(const char *filename, gint64 max_age)
 {
     int directory = open("/run/octoshield", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (directory < 0) return NULL;
@@ -1327,7 +1965,7 @@ static JsonNode *read_status_cache(void)
     if (fstat(directory, &info) != 0 || info.st_uid != 0 || info.st_gid != 0 || (info.st_mode & 07777) != 0755) {
         close(directory); return NULL;
     }
-    int fd = openat(directory, "status.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int fd = openat(directory, filename, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     close(directory);
     if (fd < 0) return NULL;
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 || info.st_gid != 0 ||
@@ -1356,17 +1994,37 @@ static JsonNode *read_status_cache(void)
         json_node_get_int(schema) != 1) return NULL;
     gint64 now = g_get_real_time() / G_USEC_PER_SEC;
     gint64 observed = json_node_get_int(checked);
-    return observed >= 0 && observed <= now && now - observed <= 90 ? json_node_copy(root) : NULL;
+    return observed >= 0 && observed <= now && now - observed <= max_age ? json_node_copy(root) : NULL;
 }
 
 static gboolean refresh_status(gpointer data)
 {
     App *app = data;
     if (app->status_rows == NULL) return G_SOURCE_CONTINUE;
-    g_autoptr(JsonNode) root = read_status_cache();
+    g_autoptr(JsonNode) root = read_observation_cache("status.json", 90);
     if (root != NULL && json_object_get_int_member(json_node_get_object(root), "checked_at") < app->status_not_before)
         g_clear_pointer(&root, json_node_unref);
     render_status(app, root != NULL ? json_node_get_object(root) : NULL);
+    if (app->auth_required) {
+        g_autoptr(JsonNode) usb_snapshot = read_observation_cache("usb.json", 10);
+        if (usb_snapshot != NULL && json_object_get_int_member(json_node_get_object(usb_snapshot), "checked_at") < app->usb_status_not_before)
+            g_clear_pointer(&usb_snapshot, json_node_unref);
+        JsonObject *usb = usb_snapshot != NULL ? object_member(json_node_get_object(usb_snapshot), "usb") : NULL;
+        render_usb_status(app, usb);
+        g_autoptr(JsonObject) observed = json_object_new();
+        JsonObject *controls = json_object_new();
+        json_object_set_object_member(observed, "controls", controls);
+        if (usb != NULL) json_object_set_object_member(controls, "usb", json_object_ref(usb));
+        JsonObject *profiles = json_object_new();
+        JsonObject *assignments = json_object_new();
+        json_object_set_object_member(observed, "profiles", profiles);
+        json_object_set_object_member(profiles, "assignments", assignments);
+        json_object_set_string_member(assignments, "usb", app->usb_profile != NULL ? app->usb_profile : "unknown");
+        for (guint i = 0; i < app->status_rows->len; i++) {
+            StatusRow *row = g_ptr_array_index(app->status_rows, i);
+            if (g_str_equal(row->section, "controls") && g_str_equal(row->key, "usb")) update_status_row(row, observed);
+        }
+    }
     return G_SOURCE_CONTINUE;
 }
 
@@ -1449,15 +2107,6 @@ static void handle_data_log(App *app, const char *text)
         g_string_free(configuration, TRUE);
         app->operation->data_seen = TRUE;
     }
-}
-
-static void usb_device_selected(GObject *object, GParamSpec *property, gpointer data)
-{
-    (void)property;
-    App *app = data;
-    guint index = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
-    if (index < app->usb_ids->len)
-        gtk_editable_set_text(app->usb_device_id, g_ptr_array_index(app->usb_ids, index));
 }
 
 static void open_usb_clicked(GtkButton *button, gpointer data)
@@ -1571,35 +2220,71 @@ static void build_protections(App *app)
     group_add(group, control_row("Change your password", "Use GNOME Accounts. OctoShield never receives or stores your password.", accounts));
 }
 
+static gchar *usb_preferences_path(void)
+{
+    return g_build_filename(g_get_user_config_dir(), "octoshield", "preferences.ini", NULL);
+}
+
+static gboolean usb_automatic_preference(void)
+{
+    g_autofree gchar *path = usb_preferences_path();
+    g_autoptr(GKeyFile) settings = g_key_file_new();
+    g_autoptr(GError) error = NULL;
+    if (!g_key_file_load_from_file(settings, path, G_KEY_FILE_NONE, NULL)) return TRUE;
+    gboolean enabled = g_key_file_get_boolean(settings, "USB", "automatic-prompts", &error);
+    return error != NULL ? TRUE : enabled;
+}
+
+static void usb_automatic_changed(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    App *app = data;
+    gboolean enabled = gtk_switch_get_active(GTK_SWITCH(object));
+    if (enabled == app->usb_automatic) return;
+    g_autofree gchar *path = usb_preferences_path();
+    g_autofree gchar *directory = g_path_get_dirname(path);
+    g_autoptr(GError) error = NULL;
+    struct stat info;
+    gboolean safe = g_mkdir_with_parents(directory, 0700) == 0 && lstat(directory, &info) == 0 &&
+        S_ISDIR(info.st_mode) && info.st_uid == getuid() && chmod(directory, 0700) == 0;
+    if (safe && lstat(path, &info) == 0) safe = S_ISREG(info.st_mode) && info.st_uid == getuid() && info.st_nlink == 1;
+    g_autoptr(GKeyFile) settings = g_key_file_new();
+    if (safe) {
+        g_key_file_load_from_file(settings, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
+        g_key_file_set_boolean(settings, "USB", "automatic-prompts", enabled);
+        gsize size = 0;
+        g_autofree gchar *contents = g_key_file_to_data(settings, &size, NULL);
+        safe = g_file_set_contents_full(path, contents, (gssize)size,
+            G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE, 0600, &error);
+    }
+    if (!safe) {
+        gtk_switch_set_active(GTK_SWITCH(object), app->usb_automatic);
+        show_error(app, "Unable to save USB prompt preference", error != NULL ? error->message : "The preference location must be a private directory owned by your user.");
+        return;
+    }
+    app->usb_automatic = enabled;
+    if (enabled) maybe_prompt_usb(app);
+}
+
 static void build_usb(App *app)
 {
     GtkWidget *page = page_new(app, "usb", "USB devices", "Unknown devices remain blocked while authorization is active. Remembered approvals belong only to the effective USB profile; device names alone cannot prove identity.");
     app->usb_pending = GTK_LABEL(text_label("Checking pending USB devices…", "title-3"));
     gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->usb_pending));
-    GtkWidget *alerts = group_new(page, "Blocked-device alerts", "Enable desktop alerts to hear about blocked devices while OctoShield is closed. Authorization stays enforced independently of this window; approvals wait until you unlock the session.");
+    GtkWidget *alerts = group_new(page, "Device decisions", "New blocked devices open a decision dialog in your unlocked local desktop. Cancel always leaves a device blocked; an administrator must authenticate before the first approval.");
+    GtkWidget *automatic = gtk_switch_new();
+    gtk_switch_set_active(GTK_SWITCH(automatic), app->usb_automatic);
+    g_signal_connect(automatic, "notify::active", G_CALLBACK(usb_automatic_changed), app);
+    group_add(alerts, control_row("Ask when a new device is connected", "Controls automatic dialogs for your user. You can always review devices here.", automatic));
+    g_ptr_array_add(app->operation_widgets, automatic);
     group_add(alerts, action_row(app, "notify-enable", "Enable alerts…", "preferences-system-notifications-symbolic"));
-    GtkWidget *group = group_new(page, "Connected hardware", "The pending list is available without authentication. Refresh the full inventory to inspect identity and interfaces before approving a device.");
+    GtkWidget *group = group_new(page, "Connected hardware", "Device state refreshes automatically. Review a blocked device to allow it once or remember it in this USB profile. Refresh never asks for another password during this administrator session.");
     group_add(group, status_row(app, "controls", "usb", "USB authorization"));
     group_add(group, action_row(app, "usb-list", "Refresh", "view-refresh-symbolic"));
-    app->usb_devices = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){NULL}));
-    gtk_widget_set_size_request(GTK_WIDGET(app->usb_devices), 240, -1);
-    group_add(group, control_row("Select a connected device", NULL, GTK_WIDGET(app->usb_devices)));
-    group = group_new(page, "Authorize or block one device", "Allow once expires when switching USB profiles. Remember authorizes only this profile. Switching profiles reevaluates devices already attached.");
-    GtkWidget *device = input_row(group, "Numeric device ID");
-    app->usb_device_id = GTK_EDITABLE(device);
-    g_signal_connect(app->usb_devices, "notify::selected", G_CALLBACK(usb_device_selected), app);
-    adw_entry_row_set_input_purpose(ADW_ENTRY_ROW(device), GTK_INPUT_PURPOSE_DIGITS);
-    GtkWidget *permanent = gtk_switch_new();
-    group_add(group, control_row("Remember for the current USB profile", "Off: allow once. On: save permission only for this profile.", permanent));
-    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_set_halign(buttons, GTK_ALIGN_END);
-    GtkWidget *block = input_button(app, "Block device…", INPUT_USB_BLOCK, device, NULL, NULL, NULL);
-    GtkWidget *allow = input_button(app, "Allow device…", INPUT_USB_ALLOW, device, NULL, permanent, NULL);
-    gtk_widget_add_css_class(allow, "suggested-action");
-    gtk_box_append(GTK_BOX(buttons), block);
-    gtk_box_append(GTK_BOX(buttons), input_button(app, "Forget approval…", INPUT_USB_FORGET, device, NULL, NULL, NULL));
-    gtk_box_append(GTK_BOX(buttons), allow);
-    gtk_box_append(GTK_BOX(page), buttons);
+    app->usb_devices = GTK_LIST_BOX(gtk_list_box_new());
+    gtk_list_box_set_selection_mode(app->usb_devices, GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(GTK_WIDGET(app->usb_devices), "boxed-list");
+    gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->usb_devices));
     group = group_new(page, "Prepare another USB profile", "Enroll only physically reviewed devices. Keep essential input devices available and safely unmount storage before restrictive changes.");
     GtkDropDown *profile = GTK_DROP_DOWN(profile_selector(app));
     group_add(group, control_row("Destination profile", NULL, GTK_WIDGET(profile)));
@@ -1814,6 +2499,8 @@ static gboolean window_close_requested(GtkWindow *window, gpointer data)
 {
     (void)window;
     App *app = data;
+    app->shutting_down = TRUE;
+    session_revoke(app, "Closing the administrator session…");
     if (app->operation != NULL) {
         if (app->confirmation != NULL)
             adw_message_dialog_response(app->confirmation, "decline");
@@ -1847,6 +2534,8 @@ static void activate(GApplication *application, gpointer data)
     App *app = data;
     if (app->window != NULL) {
         gtk_window_present(app->window);
+        refresh_status(app);
+        maybe_prompt_usb(app);
         return;
     }
     app->window = GTK_WINDOW(adw_application_window_new(GTK_APPLICATION(application)));
@@ -1858,8 +2547,10 @@ static void activate(GApplication *application, gpointer data)
     app->status_rows = g_ptr_array_new_with_free_func(g_free);
     app->profile_selectors = g_ptr_array_new();
     app->profile_ids = g_ptr_array_new_with_free_func(g_free);
-    app->usb_ids = g_ptr_array_new_with_free_func(g_free);
+    app->usb_inventory_rows = g_ptr_array_new_with_free_func(usb_device_free);
+    app->usb_decisions = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     app->setting_choices = g_hash_table_new(g_str_hash, g_str_equal);
+    app->usb_automatic = usb_automatic_preference();
     static const char *const defaults[] = {"conference", "public", "office", "home"};
     for (gsize i = 0; i < G_N_ELEMENTS(defaults); i++)
         g_ptr_array_add(app->profile_ids, g_strdup(defaults[i]));
@@ -1876,6 +2567,10 @@ static void activate(GApplication *application, gpointer data)
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *header = adw_header_bar_new();
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), adw_window_title_new("OctoShield", "Laptop protection · Octoleo"));
+    app->unlock = GTK_BUTTON(gtk_button_new_with_label("Unlock"));
+    gtk_widget_set_tooltip_text(GTK_WIDGET(app->unlock), "Unlock once for this window; locking or closing ends administrator access");
+    g_signal_connect(app->unlock, "clicked", G_CALLBACK(unlock_clicked), app);
+    adw_header_bar_pack_start(ADW_HEADER_BAR(header), GTK_WIDGET(app->unlock));
     GtkWidget *about = gtk_button_new_from_icon_name("help-about-symbolic");
     gtk_widget_set_tooltip_text(about, "About OctoShield");
     gtk_accessible_update_property(GTK_ACCESSIBLE(about), GTK_ACCESSIBLE_PROPERTY_LABEL, "About OctoShield", -1);
@@ -1899,7 +2594,24 @@ static void activate(GApplication *application, gpointer data)
     gtk_box_append(GTK_BOX(main), build_activity(app));
     gtk_box_append(GTK_BOX(body), main);
     gtk_widget_set_vexpand(body, TRUE);
-    gtk_box_append(GTK_BOX(outer), body);
+    app->access_pages = GTK_STACK(gtk_stack_new());
+    gtk_widget_set_vexpand(GTK_WIDGET(app->access_pages), TRUE);
+    gtk_stack_add_named(app->access_pages, body, "application");
+    GtkWidget *locked = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+    gtk_widget_set_halign(locked, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(locked, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_start(locked, 40); gtk_widget_set_margin_end(locked, 40);
+    gtk_box_append(GTK_BOX(locked), text_label("Unlock OctoShield", "title-1"));
+    app->access_status = GTK_LABEL(text_label("Authenticate once to manage protection in this window. Your desktop stays unprivileged; only approved system operations run through the administrator session.", NULL));
+    gtk_label_set_max_width_chars(app->access_status, 65);
+    gtk_box_append(GTK_BOX(locked), GTK_WIDGET(app->access_status));
+    GtkWidget *unlock_main = gtk_button_new_with_label("Unlock with an administrator account");
+    gtk_widget_add_css_class(unlock_main, "suggested-action");
+    g_signal_connect(unlock_main, "clicked", G_CALLBACK(unlock_clicked), app);
+    gtk_box_append(GTK_BOX(locked), unlock_main);
+    gtk_box_append(GTK_BOX(locked), text_label("Closing or locking this window ends access. Your existing firewall and USB policies remain in force.", "dim-label"));
+    gtk_stack_add_named(app->access_pages, locked, "locked");
+    gtk_box_append(GTK_BOX(outer), GTK_WIDGET(app->access_pages));
     adw_toast_overlay_set_child(app->toasts, outer);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(app->window), GTK_WIDGET(app->toasts));
     GtkCssProvider *css = gtk_css_provider_new();
@@ -1911,12 +2623,27 @@ static void activate(GApplication *application, gpointer data)
     g_object_unref(css);
     update_actions(app);
     refresh_status(app);
-    app->refresh_timer = g_timeout_add_seconds(15, refresh_status, app);
+    app->refresh_timer = g_timeout_add_seconds(2, refresh_status, app);
     gtk_window_present(app->window);
     if (app->refresh_session_service && !app->smoke_test)
         refresh_active_notifier();
+    if (app->auth_required && !app->smoke_test) {
+        g_bus_get(G_BUS_TYPE_SYSTEM, NULL, login_bus_ready, app);
+        if (!app->usb_review_launch) session_unlock(app);
+    }
     if (app->smoke_test)
         g_timeout_add(700, smoke_finished, app);
+}
+
+static int application_command_line(GApplication *application, GApplicationCommandLine *command, gpointer data)
+{
+    App *app = data;
+    int argc = 0;
+    g_auto(GStrv) argv = g_application_command_line_get_arguments(command, &argc);
+    if (argc > 2 || (argc == 2 && !g_str_equal(argv[1], "--usb-review"))) return 2;
+    if (app->window == NULL) app->usb_review_launch = argc == 2;
+    g_application_activate(application);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -1927,18 +2654,18 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc == 2 && g_str_equal(argv[1], "--help")) {
-        g_print("Usage: octoshield-gtk [--version | --smoke-test]\n\nOpen OctoShield in your normal GNOME user session.\n--smoke-test opens a read-only window briefly for display tests.\n");
+        g_print("Usage: octoshield-gtk [--version | --usb-review | --smoke-test]\n\nOpen OctoShield in your normal GNOME user session.\n--smoke-test opens a read-only window briefly for display tests.\n");
         return 0;
     }
     if (argc == 2 && g_str_equal(argv[1], "--smoke-test")) {
         smoke_test = TRUE;
         argc = 1;
-    } else if (argc != 1) {
+    } else if (argc != 1 && !(argc == 2 && g_str_equal(argv[1], "--usb-review"))) {
         g_printerr("Unknown argument. Run octoshield-gtk --help.\n");
         return 2;
     }
     if (geteuid() == 0) {
-        g_printerr("Run OctoShield as your normal GNOME user, without sudo. Administrator authentication is requested only for system operations.\n");
+        g_printerr("Run OctoShield as your normal GNOME user, without sudo. Administrator authentication unlocks this application session.\n");
         return 1;
     }
     if (g_getenv("SSH_CONNECTION") != NULL || g_getenv("SSH_TTY") != NULL) {
@@ -1953,10 +2680,14 @@ int main(int argc, char **argv)
     }
     App app = {0};
     app.smoke_test = smoke_test;
+    app.auth_required = !smoke_test;
     app.refresh_session_service = TRUE;
-    app.application = adw_application_new(OCTOSHIELD_APPLICATION_ID, smoke_test ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
+    app.application = adw_application_new(OCTOSHIELD_APPLICATION_ID, smoke_test ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(app.application, "activate", G_CALLBACK(activate), &app);
+    if (!smoke_test) g_signal_connect(app.application, "command-line", G_CALLBACK(application_command_line), &app);
     int result = g_application_run(G_APPLICATION(app.application), argc, argv);
+    if (app.session != NULL) g_output_stream_close(app.session->input, NULL, NULL);
+    g_clear_object(&app.login_session);
     branding_clear(&app);
     if (app.operation_widgets != NULL)
         g_ptr_array_unref(app.operation_widgets);
