@@ -6,17 +6,17 @@ The supported delivery is a downloadable `.deb` containing the native GNOME appl
 
 ## Install the package
 
-Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.1.0 on Ubuntu 24.04 from a new empty directory:
+Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.2.0 on Ubuntu 24.04 from a new empty directory:
 
 ```bash
 (
 set -e
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.1.0/octoshield_1.1.0_ubuntu24.04_amd64.deb
+    -O https://github.com/octoleo/octoshield/releases/download/v1.2.0/octoshield_1.2.0_ubuntu24.04_amd64.deb
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.1.0/SHA256SUMS-ubuntu24.04
+    -O https://github.com/octoleo/octoshield/releases/download/v1.2.0/SHA256SUMS-ubuntu24.04
 sha256sum -c SHA256SUMS-ubuntu24.04
-sudo apt install ./octoshield_1.1.0_ubuntu24.04_amd64.deb
+sudo apt install ./octoshield_1.2.0_ubuntu24.04_amd64.deb
 )
 ```
 
@@ -68,7 +68,7 @@ To stop repository updates without removing the app or its protections, set `Ena
 
 Package installation installs program files and dependencies and starts the background status observer. It does not apply hardening, enroll USB devices, select a security profile, or enable security-event collection automatically. Choose controls after opening the app. The observer reports existing state and cleans up previously authorized expired firewall rules under the operation lock; kernel time matching enforces finite deadlines independently.
 
-- The desktop runs without administrator privileges. A fixed PolicyKit helper authenticates system actions; GNOME preferences and notifications remain in the user's session.
+- The desktop runs without administrator privileges. The system's PolicyKit dialog unlocks one administrator session for that application lifetime; the fixed helper API handles reviewed system actions without repeatedly asking for a password. Closing or locking the application, or locking the desktop, ends the session and requires a new unlock. GNOME preferences and notifications remain in the user's session. System policy selects eligible administrator identities; Unix `root` group membership is not used as an authorization shortcut.
 - Each protection explains its impact. Disruptive changes require explicit confirmation, including replacement of UFW exceptions and physical review of the USB enrollment set. Firewall profile switching never uses `ufw reset`.
 - Relevant native configuration is saved in local, root-restricted recovery snapshots before modification, and action records identify changes. OctoShield does not separately encrypt these files. The GUI exposes action history rather than saved configuration secrets. These snapshots support configuration recovery; general folder backups and Restic/S3 integration remain outside this release.
 - Operations show busy state and results; detailed package/native output arrives at operation boundaries. Declining a pending confirmation stops its next step. Interrupted actions may need repair; there is no claim of atomic rollback across native commands.
@@ -78,11 +78,13 @@ See [features](features.md), the [control-by-control README](../README.md#indivi
 
 ## Upgrade and clean removal
 
-Version 1.1.0 retains the package name `octoshield`, so downloading its matching `.deb` and opening it with a supported desktop package installer upgrades 1.0.0 in place. The package manager asks for administrator permission. If double-clicking opens an archive viewer or no installer, use `sudo apt install ./octoshield_1.1.0_ubuntu24.04_amd64.deb` with your actual matching filename. Do not uninstall the older version first. Package upgrades preserve native policy, profile state, user preferences and private snapshots, and do not automatically select a new security profile.
+Version 1.2.0 retains the package name `octoshield`, so downloading its matching `.deb` and opening it with a supported desktop package installer upgrades an existing 1.0.0 or 1.1.0 installation in place. The package manager asks for administrator permission. If double-clicking opens an archive viewer or no installer, use `sudo apt install ./octoshield_1.2.0_ubuntu24.04_amd64.deb` with your actual matching filename. Do not uninstall the older version first. Package upgrades preserve native policy, profile state, user preferences and private snapshots, and do not automatically select a new security profile.
 
 The application and `octoshield updates check` provide an explicit, normal-user release check against `https://api.github.com/repos/octoleo/octoshield/releases/latest`. The request uses HTTPS, time and size limits, canonical stable versions, and exact official package URL matching for Ubuntu 24.04/26.04 amd64. It sends no GitHub token, does not run at startup, and never downloads or executes an installer as root. A failed check is reported as unavailable, not as proof the application is current. Opening the offered release or package link uses your normal desktop browser; install the downloaded package through the system package manager. Older remote versions are not recommended as upgrades. No store keys or credentials are needed for this check.
 
-The status observer is introduced and enabled on installation or migration from 1.0.0. Package replacement briefly stops that observer so it cannot use half-replaced modules; configuration resumes it when enabled. Later upgrades respect a deliberately disabled or masked observer. UFW, USBGuard and existing security-event collection keep their current state. Opening the upgraded application refreshes an already-active notifier in your own session; it never enables a notifier you disabled. Event collector code reloads on an explicit restart or later reboot. A stale status indicator remains visible until a new observation is available.
+The user-session USB prompt agent starts at desktop login through XDG autostart; opening the new application also starts it for an existing login. This does not enable optional security-event notifications or authorize connected devices.
+
+The status observer is introduced and enabled on installation or migration from 1.0.0. Package replacement briefly stops that observer so it cannot use half-replaced modules; configuration resumes it when enabled. Later upgrades respect a deliberately disabled or masked observer. An open administrator session is revoked during package maintenance or broker replacement; reopen the updated app and authenticate again. UFW, USBGuard and existing security-event collection keep their current state. Opening the upgraded application refreshes an already-active notifier in your own session; it never enables a notifier you disabled. Event collector code reloads on an explicit restart or later reboot. A stale status indicator remains visible until a new observation is available.
 
 To remove the packaged application:
 
@@ -167,7 +169,7 @@ The workflow runs `bash scripts/apt-repository.sh --input PACKAGE_DIRECTORY --as
 
 Use `MAJOR.MINOR.PATCH`: major for incompatible changes, minor for compatible features, and patch for compatible fixes. A version number is not a security assurance. The helper accepts plain `X.Y.Z` without prerelease/build suffixes or leading zeroes. Version 1.0.0 is the first stable packaged release; subsequent versions follow the same tested publication path.
 
-Prepare the next release on a review branch. For a patch release after 1.1.0:
+Prepare the next release on a review branch. For a patch release after 1.2.0:
 
 ```bash
 git switch main
@@ -179,7 +181,7 @@ bash scripts/version.sh --check
 git diff
 ```
 
-Use `--bump minor` or `--bump major` for those increments, or `--set 1.0.1` to choose an exact newer version. The helper updates the CLI, bootstrap banner, GUI, Debian changelog, and AppStream release/screenshot references while retaining earlier release entries. Review the generated changes and replace generic release notes with an accurate description in `debian/changelog` and `data/io.vdm.OctoShield.metainfo.xml`. Update version-specific examples in documentation when appropriate. The helper does not commit, push, or publish.
+Use `--bump minor` or `--bump major` for those increments, or `--set 1.2.1` to choose an exact newer version. The helper updates the CLI, bootstrap banner, GUI, Debian changelog, and AppStream release/screenshot references while retaining earlier release entries. Review the generated changes and replace generic release notes with an accurate description in `debian/changelog` and `data/io.vdm.OctoShield.metainfo.xml`. Update version-specific examples in documentation when appropriate. The helper does not commit, push, or publish.
 
 Commit the version changes and release notes, open a pull request, and merge after review and passing checks. The resulting `main` workflow rebuilds and tests both supported Ubuntu packages, validates the APT repository layout, then creates the matching `vX.Y.Z` tag and GitHub release. Packages and application assets are uploaded to a draft first; the release becomes public after uploads and validation complete. A merged change that retains an already published version is tested but does not replace that release. Increment the version when those changes are ready for users.
 

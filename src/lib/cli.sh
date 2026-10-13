@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.1.0 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.2.0 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -123,7 +123,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.1.0 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.2.0 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -323,7 +323,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.1.0\n'
+            printf 'OctoShield 1.2.0\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then

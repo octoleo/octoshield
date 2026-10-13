@@ -56,10 +56,11 @@ case "$1" in
                 while read -r uid _rest; do
                     case "$uid" in '' | *[!0-9]*) continue ;; esac
                     systemctl --user --machine="$uid@.host" disable --now octoshield-notify.service >/dev/null 2>&1 || true
+                    systemctl --user --machine="$uid@.host" stop octoshield-usb-agent.service >/dev/null 2>&1 || true
                 done
         fi
         printf '%s\n' \
-            'OctoShield: removing the app stops its status reporting and monitoring; previously approved security settings and private backups remain.' \
+            'OctoShield: removing the app stops its status reporting, USB prompts and monitoring; previously approved security settings and private backups remain.' \
             'Offline users may retain notification enablement preferences. No home directories or custom units are deleted.' >&2
         ;;
 esac

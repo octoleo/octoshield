@@ -11,17 +11,20 @@
     work. OctoShield brings established Linux security controls into a native
     GNOME application, with a complete terminal interface for administrators.</p>
     <p>Review each protection before applying it. OctoShield explains proposed
-    changes and asks for administrator authentication when system access is
-    required. Installing the application does not turn on security controls or
+    changes and uses the system's administrator authentication dialog to
+    unlock each desktop application session. Installing the application does
+    not turn on security controls or
     automatically trust connected USB devices.</p>
     <ul>
       <li>Switch editable Conference, Public, Office and Home profiles globally
       or for one protection, with explicit overrides and verified live status.</li>
       <li>Configure a host firewall for Wi-Fi and Ethernet, with narrowly scoped
       IPv4/IPv6 port, protocol, source and interface exceptions and optional expiry.</li>
-      <li>Review and enroll trusted USB devices with USBGuard. Keep unknown
-      devices blocked until you approve temporary or profile-specific access;
-      reevaluate connected devices when switching profiles.</li>
+      <li>Review and enroll trusted USB devices with USBGuard. A guided device
+      prompt offers temporary or profile-specific access while unknown devices
+      remain blocked; switching profiles reevaluates connected devices.</li>
+      <li>Unlock the desktop once, refresh device status without repeated
+      password requests, and choose actions beside each connected device.</li>
       <li>Limit automatic network connections and unnecessary services, and
       configure GNOME screen locking and removable-media behavior.</li>
       <li>Review AppArmor confinement, automatic security updates, and sudo
@@ -36,7 +39,8 @@
       package installer while retaining profiles, policies and recovery snapshots.</li>
     </ul>
     <p>The desktop application runs as your normal user. A narrowly scoped
-    PolicyKit helper performs reviewed system changes, while desktop preferences
+    PolicyKit-authorized session performs reviewed system changes through a
+    fixed helper API, while desktop preferences
     remain in your own session. System changes are recorded with recovery
     snapshots; interrupted operations may need manual review.</p>
     <p>OctoShield is maintained by Vast Development Method as part of the Octoleo
@@ -63,32 +67,32 @@
     <keyword>Ubuntu</keyword>
     <keyword>Octoleo</keyword>
   </keywords>
-  <!-- Captured application images are attached by the v1.1.0 release workflow.
+  <!-- Captured application images are attached by the v1.2.0 release workflow.
        Public store indexing also requires anonymously accessible release assets. -->
   <screenshots>
     <screenshot type="default">
       <caption>Review your laptop's protections from the light overview (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-overview-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-overview-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-overview-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-overview-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Choose and review individual system protections (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-protections-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-protections-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Review USB devices before authorizing access (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-usb-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-usb-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-office-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-office-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.1.0/OctoShield-monitoring-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-monitoring-dark.png</image>
     </screenshot>
   </screenshots>
   <provides>
@@ -100,6 +104,22 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="1.2.0" date="2026-10-13">
+      <description>
+        <p>A smoother administrator session and guided USB approval flow,
+        with live device state and explicit temporary or profile-specific trust.</p>
+        <ul>
+          <li>Authenticate once when opening the application and retain access
+          for that application session without running the desktop as root.</li>
+          <li>Review newly blocked USB devices in a guided prompt, choose once
+          or the effective USB profile, and keep cancelled requests blocked.</li>
+          <li>Refresh and manage connected devices with clear status and direct
+          actions; reject decisions if the attachment or profile changed.</li>
+          <li>Upgrade the existing Debian installation from 1.1.0 while
+          preserving custom profiles, USB approvals and recovery information.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-10-12">
       <description>
         <p>Manage everyday and conference protection with editable profiles,

@@ -95,12 +95,12 @@ jobs:
           UBUNTU_VERSION: ${{ matrix.ubuntu }}
         run: |
           version=$(dpkg-parsechangelog -S Version)
-          baseline="octoshield_1.0.0_ubuntu${UBUNTU_VERSION}_amd64.deb"
+          baseline="octoshield_1.1.0_ubuntu${UBUNTU_VERSION}_amd64.deb"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
-            "https://github.com/octoleo/octoshield/releases/download/v1.0.0/$baseline" --output "/tmp/$baseline"
+            "https://github.com/octoleo/octoshield/releases/download/v1.1.0/$baseline" --output "/tmp/$baseline"
           case "$UBUNTU_VERSION" in
-            24.04) baseline_sha=a398320a729f71df21461c09ee816485d4c314ae5a58f7bd6e6da7e9354de7e9 ;;
-            26.04) baseline_sha=fc44e411855b5179697bc92c48b2b1a2f8a7193adfac886013aa5fa0823a32e9 ;;
+            24.04) baseline_sha=6202f446aaa81b7ce0a41fd902ec7b27766f57ee1d04591e45947ad01630d6b0 ;;
+            26.04) baseline_sha=696ac2650e4b9d3d490740d68548614f882ca317fd1af5e6a69d412d6fdfc634 ;;
           esac
           printf '%s  %s\n' "$baseline_sha" "/tmp/$baseline" | sha256sum --check
           bash tests/package-lifecycle.sh --disposable-system "../octoshield_${version}_amd64.deb" "/tmp/$baseline"

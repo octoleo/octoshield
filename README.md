@@ -17,12 +17,12 @@ Read the [feature guide](docs/features.md) for the complete capability overview 
 
 ### Desktop application and CLI: install the package
 
-Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version [1.1.0](https://github.com/octoleo/octoshield/releases/tag/v1.1.0) provides these packages:
+Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version 1.2.0 is published after this release branch merges and its checks pass. Its release provides these packages:
 
-| Ubuntu / architecture | Download | Package install command for version 1.1.0 |
+| Ubuntu / architecture | Download | Package install command for version 1.2.0 |
 | --- | --- | --- |
-| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.1.0/octoshield_1.1.0_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.1.0/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.1.0_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.1.0/octoshield_1.1.0_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.1.0/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.1.0_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.0/octoshield_1.2.0_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.0/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.2.0_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.0/octoshield_1.2.0_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.0/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.2.0_ubuntu26.04_amd64.deb` |
 
 Choose the package matching **both your Ubuntu release and CPU architecture**:
 
@@ -44,9 +44,9 @@ else
 fi
 ```
 
-Open **OctoShield** from GNOME's application launcher, or run `octoshield-gtk`. No reboot is required to open the application. Run it as your normal desktop user; individual system operations show the standard administrator authentication dialog. Installation starts the background status observer, but does not apply hardening, enroll USB devices, select a profile, or enable security-event collection automatically. Open the application and choose the controls you want.
+Open **OctoShield** from GNOME's application launcher, or run `octoshield-gtk`. No reboot is required. Run it as your normal desktop user: the system administrator dialog unlocks the application once, and its authenticated session lasts until the window closes. You can then refresh status and review changes without entering a password for every action. Locking the application or desktop also ends the authorization and requires another unlock. The GTK process still runs as your own user; only the fixed system-control helper receives administrator privileges. Installation starts the background status observer, but does not apply hardening, enroll USB devices, select a profile, or enable security-event collection automatically.
 
-To upgrade an existing 1.0.0 installation, download the matching 1.1.0 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
+To upgrade an existing 1.0.0 or 1.1.0 installation, download the matching 1.2.0 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
 
 The package also installs `/usr/bin/octoshield`:
 
@@ -61,7 +61,7 @@ If you previously installed the standalone version, `/usr/local/bin/octoshield` 
 For CLI-only use, install from the public release checkout. With Git available:
 
 ```bash
-git clone --branch v1.1.0 --depth 1 https://github.com/octoleo/octoshield.git
+git clone --branch v1.2.0 --depth 1 https://github.com/octoleo/octoshield.git
 cd octoshield
 bash src/octoshield install
 ```
@@ -126,7 +126,7 @@ Open OctoShield and use its sidebar:
 | Monitoring | Enable/disable collection, inspect status/logs, and control this user's notifications. |
 | Recovery | Check official application updates, read recovery guidance, list saved change transactions, and inspect their action history. |
 
-The GUI is a native application, not a terminal embedded in a window. A fixed privileged helper executes the same Bash control functions used by the CLI. It presents plain-text results and explicit confirmation requests; raw output cannot become shell commands. Detailed output appears at operation boundaries, so package installation can remain busy without displaying every line immediately. USB enrollment presents the generated device policy before asking you to trust it. Leave the window open until an operation finishes; you can decline a pending confirmation without applying its next step.
+The GUI is a native application, not a terminal embedded in a window. Its administrator session calls a fixed helper API backed by the same Bash control functions used by the CLI. Unlocking the session does not approve every change: consequential operations still explain their impact and request confirmation. It presents plain-text results and explicit confirmation requests; raw output cannot become shell commands. Detailed output appears at operation boundaries, so package installation can remain busy without displaying every line immediately. USB enrollment presents the generated device policy before asking you to trust it. Leave the window open until an operation finishes; you can decline a pending confirmation without applying its next step.
 
 ## Individual baseline controls
 
@@ -181,7 +181,9 @@ octoshield recovery
 
 Before initial enrollment, remove **all untrusted devices**. Keep required built-in devices, trusted keyboard/mouse, hubs and dock connected. Read the generated rules, physically verify the complete set, and have a recovery method available. The device set is checked again before enabling policy. Existing unmanaged USBGuard installations are left for manual review rather than overwritten. Re-running setup retains the approved rules and never automatically trusts every currently attached device again.
 
-Unknown devices remain blocked while approval is pending. With desktop notifications enabled, an unlocked local session receives a prompt to open OctoShield for review. A locked session cannot approve devices. Open **USB devices** to choose temporary approval or remember the device for the effective USB profile, or use the CLI:
+Unknown devices remain blocked while approval is pending. In an active, unlocked local desktop session, OctoShield offers a device review with **Allow once**, **Remember for this profile**, or **Keep blocked**. Closing or cancelling the review grants nothing. The prompt identifies the effective USB profile, including an individual override: remembering a device in Office does not trust it in Conference. Authentication goes through the system administrator dialog if OctoShield is not already unlocked. The package starts a small user-session USB prompt agent through desktop autostart, and opening the application starts it for the current login. Automatic USB prompts can be disabled in the application without disabling USBGuard. This agent is independent of optional security-event notifications; a locked or inactive session never approves a device.
+
+The **USB devices** page shows each current attachment and its observed state with actions beside it. Refreshing the list does not ask for another password in the unlocked application. A completed decision refreshes the result; a failed, disconnected or changed attachment remains an explicit error or unknown state. Device or profile changes invalidate the previous review. A dismissed device stays blocked and can be reviewed later from this page, or use the CLI:
 
 ```bash
 octoshield usb list
@@ -197,7 +199,7 @@ octoshield usb allow "$device_id" --permanent
 
 `octoshield usb block "$device_id"` blocks the current attachment; `octoshield usb forget "$device_id"` also removes its remembered authorization from the active USB profile. Approval in Office does not grant approval in Conference. Switching reevaluates connected devices, expires temporary approvals and reviews devices that may disconnect. Mounted storage must be safely unmounted before a switch that would block it. Inactive profiles can be prepared with `octoshield usb enroll office` after physically reviewing every attached device. Copying a profile intentionally copies that profile's remembered devices too; review the copied policy before use. Legacy 1.0 approvals are preserved separately for explicit restoration.
 
-CLI USB approval expires sudo's cached authentication timestamp. The GUI requests administrator authentication through PolicyKit for its fixed helper. Local authentication policy still applies: `NOPASSWD`, custom PolicyKit rules, or existing root access cannot be neutralized by a prompt in this tool. Device fingerprints/descriptors can be spoofed. Trusted hardware, firmware, physical supervision, and a locked screen remain necessary. Devices may need approval again when moved to another port.
+CLI USB approval expires sudo's cached authentication timestamp. The GUI unlocks its fixed administrator session through PolicyKit; OctoShield never reads, stores or replays a password. The system decides which accounts qualify as administrators and presents its identity chooser when needed. Membership in the Unix `root` group is not the authorization rule. A standard user can proceed only when the system accepts an administrator's authentication. Closing and reopening the application requires a new unlock; local PolicyKit rules still govern authentication. `NOPASSWD`, custom PolicyKit rules or existing root access cannot be neutralized by an application prompt. Device fingerprints/descriptors can be spoofed. Trusted hardware, firmware, physical supervision and a locked screen remain necessary. Devices may need approval again when moved to another port.
 
 ## Security notifications
 
@@ -231,7 +233,7 @@ Disabling desktop notifications does not disable the firewall, USB policy, or sy
 
 `octoshield desktop restore` restores only the saved GNOME settings from before first apply. System snapshots are private and are not automatically reapplied; see [docs/recovery.md](docs/recovery.md) for targeted recovery, partial failures, and USB lockout instructions.
 
-`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.1.0.
+`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.2.0.
 
 ## Scope and limits
 

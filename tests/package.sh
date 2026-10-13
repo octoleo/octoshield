@@ -37,6 +37,7 @@ if grep -Eq '^[[:space:]]+dh_installsystemd(user)?([[:space:]]|$)' "$repo/debian
 fi
 
 desktop-file-validate "$repo/data/io.vdm.OctoShield.desktop"
+desktop-file-validate "$repo/data/io.vdm.OctoShield.UsbAgent.desktop"
 for document in "$repo"/data/*.xml "$repo"/data/*.policy "$repo"/data/branding/*.xml; do
     xmllint --nonet --noout "$document"
 done
@@ -62,12 +63,19 @@ for theme in light dark; do
     equal "$(od -An -tx1 -N8 "$branding" | tr -d ' \n')" 89504e470d0a1a0a 'original branding must be a PNG'
 done
 policy=$repo/data/io.vdm.OctoShield.policy
-equal "$(xmllint --xpath 'count(/policyconfig/action)' "$policy")" 1 'exactly one authorization action'
-equal "$(xmllint --xpath 'string(/policyconfig/action/@id)' "$policy")" io.vdm.OctoShield.admin 'fixed policy action'
-equal "$(xmllint --xpath 'string(/policyconfig/action/annotate[@key="org.freedesktop.policykit.exec.path"])' "$policy")" /usr/libexec/octoshield-helper 'fixed privileged executable'
-equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_active)' "$policy")" auth_admin 'fresh administrator authorization'
-equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_inactive)' "$policy")" no 'inactive sessions denied'
-equal "$(xmllint --xpath 'string(/policyconfig/action/defaults/allow_any)' "$policy")" no 'other sessions denied'
+equal "$(xmllint --xpath 'count(/policyconfig/action)' "$policy")" 2 'only fixed operation and desktop-session authorization actions'
+for action in admin session; do
+    expression="/policyconfig/action[@id='io.vdm.OctoShield.$action']"
+    equal "$(xmllint --xpath "count($expression)" "$policy")" 1 'exactly one declaration for each fixed action'
+    case "$action" in
+        admin) executable=/usr/libexec/octoshield-helper ;;
+        session) executable=/usr/libexec/octoshield-session ;;
+    esac
+    equal "$(xmllint --xpath "string($expression/annotate[@key='org.freedesktop.policykit.exec.path'])" "$policy")" "$executable" 'fixed privileged executable'
+    equal "$(xmllint --xpath "string($expression/defaults/allow_active)" "$policy")" auth_admin 'fresh administrator authorization without a shared keep-cache'
+    equal "$(xmllint --xpath "string($expression/defaults/allow_inactive)" "$policy")" no 'inactive sessions denied'
+    equal "$(xmllint --xpath "string($expression/defaults/allow_any)" "$policy")" no 'other sessions denied'
+done
 equal "$(xmllint --xpath 'count(/policyconfig/action/annotate[@key="org.freedesktop.policykit.exec.allow_gui"])' "$policy")" 0 'GUI process must not gain privileges'
 grep -Fx 'Exec=octoshield-gtk' "$repo/data/io.vdm.OctoShield.desktop" >/dev/null || fail 'desktop launcher does not launch the normal-user GUI'
 grep -Fx 'Terminal=false' "$repo/data/io.vdm.OctoShield.desktop" >/dev/null || fail 'desktop entry unexpectedly opens a terminal'
@@ -134,7 +142,7 @@ lifecycle prerm failed-upgrade
 lifecycle postinst abort-upgrade
 [[ ! -e $maintenance ]] || fail 'aborted upgrade must release maintenance exclusion'
 lifecycle prerm remove
-equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl stop octoshield-status.service\nsystemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service' 'removal stops our observer and monitor and disables our notifier for numeric active users'
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl stop octoshield-status.service\nsystemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1000@.host stop octoshield-usb-agent.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host stop octoshield-usb-agent.service' 'removal stops our observer, monitor and USB agent and disables our notifier for numeric active users'
 grep -Fq 'security settings and private backups remain' "$fixture/lifecycle-output" || fail 'removal must disclose retained security settings'
 [[ -f $maintenance ]] || fail 'removal must exclude new protection changes'
 lifecycle postrm remove
@@ -183,10 +191,23 @@ dpkg-deb --control "$archive" "$fixture/control"
 dpkg-deb --fsys-tarfile "$archive" | tar --numeric-owner -tvf - >"$fixture/contents"
 awk '$2 != "0/0" {bad=1} END {exit bad}' "$fixture/contents" || fail 'package payload must be owned by root'
 [[ ! -e $fixture/root/usr/local ]] || fail 'Debian package must not own the standalone /usr/local installation'
-[[ ! -e $fixture/root/etc ]] || fail 'package must not install or replace system security configuration'
+# The user-session prompt agent uses the standard XDG autostart location. No
+# native firewall, USB policy, authentication or network configuration belongs
+# in the package payload.
+while IFS= read -r path; do
+    case "${path#"$fixture/root"}" in
+        /etc | /etc/xdg | /etc/xdg/autostart)
+            [[ -d $path && ! -L $path ]] || fail 'autostart parent must be a regular directory'
+            ;;
+        /etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop)
+            [[ -f $path && ! -L $path ]] || fail 'autostart entry must be a regular file'
+            ;;
+        *) fail 'package must not install or replace system security configuration' ;;
+    esac
+done < <(find "$fixture/root/etc" -mindepth 0 -print)
 [[ -z $(find "$fixture/root" -type f -perm /6000 -print) ]] || fail 'setuid/setgid files are forbidden'
 
-for executable in usr/bin/octoshield usr/bin/octoshield-gtk usr/libexec/octoshield-helper usr/lib/octoshield/bin/octoshield-monitor usr/lib/octoshield/src/status-daemon; do
+for executable in usr/bin/octoshield usr/bin/octoshield-gtk usr/libexec/octoshield-helper usr/libexec/octoshield-session usr/lib/octoshield/bin/octoshield-monitor usr/lib/octoshield/src/status-daemon usr/lib/octoshield/src/usb-prompt.sh; do
     [[ -f $fixture/root/$executable && -x $fixture/root/$executable && ! -L $fixture/root/$executable ]] || fail "missing regular executable $executable"
 done
 for path in \
@@ -205,7 +226,9 @@ for path in \
     usr/share/polkit-1/actions/io.vdm.OctoShield.policy \
     usr/lib/systemd/system/octoshield-monitor.service \
     usr/lib/systemd/system/octoshield-status.service \
-    usr/lib/systemd/user/octoshield-notify.service; do
+    usr/lib/systemd/user/octoshield-notify.service \
+    usr/lib/systemd/user/octoshield-usb-agent.service \
+    etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop; do
     [[ -f $fixture/root/$path && ! -L $fixture/root/$path ]] || fail "missing regular package file $path"
 done
 cmp "$repo/data/branding/OctoShield-light.png" "$fixture/root/usr/share/pixmaps/io.vdm.OctoShield.png" || fail 'launcher does not preserve the provided light branding'
@@ -216,7 +239,9 @@ done
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type d ! -perm -0005 -print) ]] || fail 'library directories must be readable/searchable by desktop users'
 [[ -z $(find "$fixture/root/usr/lib/octoshield" -type f ! -perm -0004 -print) ]] || fail 'runtime library must be readable by desktop users'
 [[ -z $(find "$fixture/root/usr" -perm /0022 -print) ]] || fail 'package paths must not be writable by non-root users'
-for path in "$fixture/root/usr/lib/systemd/system/octoshield-monitor.service" "$fixture/root/usr/lib/systemd/system/octoshield-status.service" "$fixture/root/usr/lib/systemd/user/octoshield-notify.service"; do
+[[ -z $(find "$fixture/root/etc" -perm /0022 -print) ]] || fail 'autostart paths must not be writable by non-root users'
+cmp "$repo/data/io.vdm.OctoShield.UsbAgent.desktop" "$fixture/root/etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop" || fail 'packaged autostart differs from reviewed source'
+for path in "$fixture/root/usr/lib/systemd/system/octoshield-monitor.service" "$fixture/root/usr/lib/systemd/system/octoshield-status.service" "$fixture/root/usr/lib/systemd/user/octoshield-notify.service" "$fixture/root/usr/lib/systemd/user/octoshield-usb-agent.service"; do
     if grep -Fq /usr/local "$path"; then fail 'package service points at standalone installation'; fi
 done
 for script in postinst prerm postrm; do
