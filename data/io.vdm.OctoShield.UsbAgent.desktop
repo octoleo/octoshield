@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OctoShield USB Approval
+Comment=Ask before authorizing a newly attached USB device
+Exec=/usr/bin/systemctl --user start octoshield-usb-agent.service
+TryExec=/usr/bin/octoshield-gtk
+Icon=io.vdm.OctoShield
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

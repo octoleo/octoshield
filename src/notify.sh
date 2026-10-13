@@ -75,15 +75,23 @@ notify::open_message() (
     if [[ $action == open ]] && notify::unlocked; then /usr/bin/octoshield-gtk >/dev/null 2>&1 & fi
 )
 
+notify::automatic_usb_prompts() {
+    # The CLI-only installation may not include the graphical companion. Keep
+    # its existing notification fallback, and respect the desktop preference.
+    declare -F usb_prompt::enabled >/dev/null || return 1
+    usb_prompt::enabled || return 1
+    timeout 3s systemctl --user is-active --quiet octoshield-usb-agent.service 2>/dev/null
+}
+
 notify::status_changes() {
     local previous=$1 current=$2 pending old_pending signature old_signature fingerprint old_fingerprint previous_json
     previous_json=$previous
     [[ -n $previous_json ]] || previous_json='{}'
     pending=$(jq -er .usb.pending <<<"$current") || return 1
     old_pending=$(jq -er '.usb.pending // 0' <<<"$previous_json") || old_pending=0
-    signature=$(jq -c '.usb.devices | map({id,state})' <<<"$current") || return 1
-    old_signature=$(jq -c '.usb.devices // [] | map({id,state})' <<<"$previous_json") || old_signature='[]'
-    if ((pending > 0)) && { [[ $pending != "$old_pending" || $signature != "$old_signature" || -z $previous ]]; }; then
+    signature=$(jq -c '.usb.devices | map(select(.state == "blocked" or .state == "rejected") | {id,state})' <<<"$current") || return 1
+    old_signature=$(jq -c '.usb.devices // [] | map(select(.state == "blocked" or .state == "rejected") | {id,state})' <<<"$previous_json") || old_signature='[]'
+    if ((pending > 0)) && { [[ $pending != "$old_pending" || $signature != "$old_signature" || -z $previous ]]; } && ! notify::automatic_usb_prompts; then
         notify::open_message 'USB approval required' \
             'A USB device remains blocked. Review it in OctoShield and choose a temporary or profile-specific approval only if you recognize it.' &
     fi
@@ -138,6 +146,10 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     notify_source=$(readlink -f -- "${BASH_SOURCE[0]}") || exit 1
     # shellcheck source=src/lib/status.sh
     source "${notify_source%/*}/lib/status.sh"
+    if [[ -f ${notify_source%/*}/usb-prompt.sh ]]; then
+        # shellcheck source=src/usb-prompt.sh
+        source "${notify_source%/*}/usb-prompt.sh"
+    fi
     unset notify_source
     notify::run
 fi

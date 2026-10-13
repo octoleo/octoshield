@@ -15,6 +15,29 @@ setup() {
     [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
 }
 
+@test 'active automatic USB prompts suppress the duplicate approval notification' {
+    usb_prompt::enabled() { return 0; }
+    timeout() { [[ $* == '3s systemctl --user is-active --quiet octoshield-usb-agent.service' ]]; }
+    notify::status_changes '' "$CURRENT"
+    wait
+    [ ! -e "$NOTIFY_LOG" ]
+}
+
+@test 'disabled automatic USB prompts retain notification fallback' {
+    usb_prompt::enabled() { return 1; }
+    notify::status_changes '' "$CURRENT"
+    wait
+    [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
+}
+
+@test 'stopped USB prompt agent retains notification fallback' {
+    usb_prompt::enabled() { return 0; }
+    timeout() { return 1; }
+    notify::status_changes '' "$CURRENT"
+    wait
+    [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
+}
+
 @test 'unchanged status does not repeat notifications' {
     notify::status_changes "$CURRENT" "$CURRENT"
     wait

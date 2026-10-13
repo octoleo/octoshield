@@ -1,0 +1,16 @@
+[Unit]
+Description=OctoShield USB approval prompts for the active desktop
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/lib/octoshield/src/usb-prompt.sh
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+# GNOME autostart and the application start this companion. It does not enable
+# optional security-event notifications or change USB authorization itself.
