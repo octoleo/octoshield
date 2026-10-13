@@ -180,7 +180,7 @@ dependencies=$(dpkg-deb --field "$archive" Depends)
 if grep -Eq '(^|,)[[:space:]]*(usbguard|ufw|apparmor|unattended-upgrades)([[:space:],(]|$)' <<<"$dependencies"; then
     fail 'installing the package could install a security control before explicit enrollment'
 fi
-for dependency in jq pkexec whiptail; do
+for dependency in jq pkexec systemd whiptail; do
     grep -Eq "(^|,)[[:space:]]*$dependency([[:space:],(]|$)" <<<"$dependencies" || fail "missing runtime dependency $dependency"
 done
 for dependency in libgtk-4 libadwaita-1 libjson-glib; do

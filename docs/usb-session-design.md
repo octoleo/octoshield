@@ -21,6 +21,12 @@ safely, but the revoked session cannot accept further actions or confirmations.
 Reopening or unlocking requires authentication again. There is no shared sudo
 or PolicyKit authorization cache.
 
+Package maintenance or replacement of the broker executable also revokes the
+session. Requests use a bounded JSON-lines protocol with operation and prompt
+identifiers. Helper diagnostic output travels separately from structured
+results, and completion is reported only after the helper has exited and both
+output streams have drained.
+
 ## Guided USB decisions
 
 The status observer publishes a bounded, sanitized inventory for navigation
@@ -41,6 +47,13 @@ remain in place. Dismissed attachments do not repeatedly reopen the same dialog.
 The standalone CLI keeps its existing explicit authorization and review flow.
 Desktop automatic USB prompts have a visible user preference; their absence
 never changes USBGuard's enforcement policy.
+
+The observer refreshes a separate `/run/octoshield/usb.json` snapshot every two
+seconds after collection, with a ten-second freshness limit. Slow system-wide
+inspection does not delay that loop or extend the lifetime of old observations.
+Only sanitized display data and opaque attachment tokens are public; USB serials
+and native policy hashes stay private. Cache failure removes actionable device
+rows and dismisses stale decisions.
 
 ## Delivery and verification
 
