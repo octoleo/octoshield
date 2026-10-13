@@ -4,7 +4,7 @@ Use a local terminal. If network hardening fails, disconnect Wi-Fi/Ethernet and 
 
 ## Package upgrades, coexistence, and removal
 
-The Debian package owns `/usr/bin/octoshield`, `/usr/bin/octoshield-gtk`, `/usr/lib/octoshield`, and its fixed PolicyKit helper at `/usr/libexec/octoshield-helper`. A standalone installation owns `/usr/local/bin/octoshield` and `/usr/local/lib/octoshield`. Package operations do not silently delete that standalone copy.
+The Debian package owns `/usr/bin/octoshield`, `/usr/bin/octoshield-gtk`, `/usr/lib/octoshield`, its fixed PolicyKit helper at `/usr/libexec/octoshield-helper`, its application-session broker at `/usr/libexec/octoshield-session`, and its USB prompt agent/autostart entry. A standalone installation owns `/usr/local/bin/octoshield` and `/usr/local/lib/octoshield`. Package operations do not silently delete that standalone copy.
 
 Inspect command resolution and monitoring units before switching installations:
 
@@ -36,9 +36,9 @@ Removal stops the package's monitoring services and removes its application; it 
 
 If package upgrade/removal reports an OctoShield operation in progress, let that action finish and retry APT. Do not force package removal or kill the helper during a system change.
 
-During package replacement/removal, `/run/octoshield-package-maintenance` prevents new system changes from starting against incomplete program files. Normal completion clears it. If a package operation is interrupted, repair the package first with `sudo dpkg --configure -a`, then retry the intended APT operation as appropriate. Confirm that no APT/dpkg operation remains active and that package files are consistent before removing only a stale maintenance marker with `sudo rm -- /run/octoshield-package-maintenance`. Do not delete the active-operation lock. Reboot clears `/run`, but does not by itself repair an interrupted package installation.
+During package replacement/removal, `/run/octoshield-package-maintenance` prevents new system changes from starting against incomplete program files and revokes any open administrator session. Normal completion clears it. Reopen the updated application and authenticate again. If a package operation is interrupted, repair the package first with `sudo dpkg --configure -a`, then retry the intended APT operation as appropriate. Confirm that no APT/dpkg operation remains active and that package files are consistent before removing only a stale maintenance marker with `sudo rm -- /run/octoshield-package-maintenance`. Do not delete the active-operation lock. Reboot clears `/run`, but does not by itself repair an interrupted package installation.
 
-Removal disables the notifier in available user managers. Offline users' home directories and custom units are not rewritten. Each user can disable their notification preference before uninstalling:
+Removal stops the USB prompt agent and disables the notifier in available user managers. Offline users' home directories and custom units are not rewritten. Each user can disable their notification preference before uninstalling:
 
 ```bash
 systemctl --user disable --now octoshield-notify.service
@@ -66,7 +66,9 @@ Timed firewall permissions are runtime-only and stop permitting new connections 
 
 Start `octoshield-gtk` as the normal logged-in GNOME user to see startup diagnostics. Do not run the application with `sudo`. A package built for another Ubuntu release or CPU architecture is not a supported workaround for missing runtime libraries; install the matching build with APT.
 
-System changes use GNOME's PolicyKit authentication dialog. If authentication is unavailable, check that you have an active local GNOME session and the package's PolicyKit helper/policy are installed. The terminal interface remains available through `/usr/bin/octoshield`. GNOME settings and notification actions require your real user session, not a root terminal or SSH session.
+The application's unlock uses GNOME's PolicyKit authentication dialog. The system selects the eligible administrator account; OctoShield never asks you to type a password into its own fields. Once unlocked, normal refreshes and reviewed controls reuse that application's private session. Closing the window or locking the application/desktop ends it; reopen or unlock and authenticate again after an interrupted or failed session. Do not add users to the Unix `root` group or install a blanket passwordless PolicyKit rule to bypass an authentication problem.
+
+If authentication is unavailable, check that you have an active local GNOME session and the package's PolicyKit helper/policy are installed. The terminal interface remains available through `/usr/bin/octoshield`. GNOME settings and notification actions require your real user session, not a root terminal or SSH session. USB devices remain blocked when a prompt is closed, authentication is cancelled, the session is locked, or a reviewed device/profile changes. Open the USB page after unlocking to review any remaining blocked device; repeatedly dismissing the same attachment does not repeatedly authorize or enroll it.
 
 The Recovery page displays transaction action history, not raw configuration snapshots containing network secrets. For an interrupted or failed operation, inspect that history and apply only the relevant recovery below. Keep the application open until the backend finishes; declining an outstanding confirmation cancels the next step but does not undo earlier changes from that operation.
 

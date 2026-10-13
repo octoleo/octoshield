@@ -18,13 +18,14 @@ endif
 override_dh_auto_install:
 	dh_auto_install --destdir=$(CURDIR)/debian/octoshield -- install
 
-# Make's install target already stages both vendor units. Do not invoke either
+# Make's install target already stages the vendor units. Do not invoke either
 # systemd helper: --no-enable still emits unmask/re-enable scripts, and these
 # helpers do not support suppressing autoscripts with the generic --no-scripts
 # option. Our explicit maintainer scripts preserve the operator's choices.
 override_dh_installsystemd:
 	@:
 
-# Desktop notifications remain an opt-in user choice; removal stops our sessions.
+# Event notifications remain opt-in. The USB agent uses desktop autostart;
+# package installation does not launch it in another user's active session.
 override_dh_installsystemduser:
 	@:

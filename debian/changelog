@@ -1,3 +1,19 @@
+octoshield (1.2.0) unstable; urgency=medium
+
+  * Unlock each desktop application session once through the system's
+    administrator authentication dialog while keeping the GTK process
+    unprivileged and reviewed operations limited to the fixed helper API.
+  * Guide blocked USB approvals with an immediate device review and a choice
+    of temporary access or remembered access in the effective USB profile.
+  * Refresh device status without repeated password prompts and present
+    device actions directly beside their current observed state.
+  * Bind approvals to the reviewed attachment and USB profile; cancellation,
+    stale decisions and unsuccessful authentication grant no device access.
+  * Verify upgrades from the published 1.1.0 packages while retaining custom
+    profile settings, remembered USB permissions and recovery snapshots.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Tue, 13 Oct 2026 20:55:20 +0000
+
 octoshield (1.1.0) unstable; urgency=medium
 
   * Add editable Conference, Public, Office and Home profiles, custom copies,

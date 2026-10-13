@@ -9,17 +9,20 @@ fail() {
     printf 'Package lifecycle test: %s\n' "$*" >&2
     exit 1
 }
-[[ ($# -eq 2 || $# -eq 3) && $1 == --disposable-system ]] || fail 'refusing host changes; usage: tests/package-lifecycle.sh --disposable-system PACKAGE.deb [1.0.0-PACKAGE.deb] inside disposable CI only'
+[[ ($# -eq 2 || $# -eq 3) && $1 == --disposable-system ]] || fail 'refusing host changes; usage: tests/package-lifecycle.sh --disposable-system PACKAGE.deb [OLDER-PACKAGE.deb] inside disposable CI only'
 [[ ${CI:-} == true || ${GITHUB_ACTIONS:-} == true ]] || fail 'this destructive test requires CI=true or GITHUB_ACTIONS=true and an explicitly disposable system'
 ((EUID == 0)) || fail 'this disposable-system test requires root'
 archive=$(realpath -- "$2")
 [[ -f $archive ]] || fail 'package archive does not exist'
 [[ $(dpkg-deb --field "$archive" Package) == octoshield ]] || fail 'wrong package archive'
 baseline=$archive
+destination_version=$(dpkg-deb --field "$archive" Version)
 if [[ $# -eq 3 ]]; then
     baseline=$(realpath -- "$3")
-    [[ -f $baseline && $(dpkg-deb --field "$baseline" Package) == octoshield && $(dpkg-deb --field "$baseline" Version) == 1.0.0 ]] || fail 'upgrade baseline must be the actual OctoShield 1.0.0 package'
-    dpkg --compare-versions "$(dpkg-deb --field "$archive" Version)" gt 1.0.0 || fail 'upgrade destination is not newer than 1.0.0'
+    [[ -f $baseline && $(dpkg-deb --field "$baseline" Package) == octoshield ]] || fail 'upgrade baseline must be an actual OctoShield package'
+    baseline_version=$(dpkg-deb --field "$baseline" Version)
+    [[ $baseline_version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'upgrade baseline is not a stable version'
+    dpkg --compare-versions "$destination_version" gt "$baseline_version" || fail 'upgrade destination is not newer than the supplied baseline'
 fi
 if [[ $(dpkg-query -W -f='${Status}' octoshield 2>/dev/null || :) == 'install ok installed' ]]; then
     fail 'OctoShield is already installed; this does not appear to be a fresh disposable test system'
@@ -44,6 +47,7 @@ printf 'User choices must survive a package upgrade.\n' >"$preferences"
 chmod 0600 "$preferences"
 preferences_checksum=$(sha256sum "$preferences")
 profile_checksum=''
+usb_policy_checksum=''
 monitor_enabled=false
 policy_snapshot=$(mktemp)
 trap 'rm -f -- "$policy_snapshot"' EXIT
@@ -59,6 +63,9 @@ check_preserved_state() {
     [[ -f $preferences && $(sha256sum "$preferences") == "$preferences_checksum" ]] || fail 'user preference was removed or changed'
     if [[ -n $profile_checksum ]]; then
         [[ $(sha256sum /var/lib/octoshield/profiles/state.json) == "$profile_checksum" ]] || fail 'profile settings were reset or changed'
+    fi
+    if [[ -n $usb_policy_checksum ]]; then
+        [[ $(sha256sum /var/lib/octoshield/usb/profiles/lifecycle.rules) == "$usb_policy_checksum" ]] || fail 'remembered profile USB approval was removed or changed'
     fi
     if [[ -s $policy_snapshot ]]; then
         sha256sum --check --quiet "$policy_snapshot" || fail 'native security configuration changed during package lifecycle'
@@ -104,13 +111,37 @@ jq -e -s '.[-1] == {type:"done",success:false}' <<<"$helper_output" >/dev/null |
 check_preserved_state
 check_inactive_services
 
+# Seed meaningful saved choices using the installed baseline's own schema. No
+# policy is selected or applied: this checks persistence, not hardware access.
+# Releases before named profiles are still supported as upgrade baselines.
+seed_profile_choices() {
+    # shellcheck disable=SC1091
+    source /usr/lib/octoshield/src/lib/profiles.sh
+    install -d -m 0700 /var/lib/octoshield/profiles /var/lib/octoshield/usb /var/lib/octoshield/usb/profiles
+    profiles::_defaults | jq '.profiles.lifecycle = .profiles.office |
+        .profiles.lifecycle.name = "Lifecycle saved choices" |
+        .profiles.lifecycle.services.printing = "enabled" |
+        .profiles.lifecycle.network.autoconnect = false |
+        .profiles.lifecycle.firewall.rules = [{id:"r1-1-1",port:8443,protocol:"tcp",source:"192.0.2.0/24",interface:"any",expires_at:0}]' \
+        >/var/lib/octoshield/profiles/state.json
+    profiles::_validate_document </var/lib/octoshield/profiles/state.json || fail 'saved-profile fixture does not match the baseline schema'
+    chmod 0600 /var/lib/octoshield/profiles/state.json
+    profile_checksum=$(sha256sum /var/lib/octoshield/profiles/state.json)
+    printf 'allow id 1234:5678 hash "lifecyclefixture" via-port "1-2"\n' >/var/lib/octoshield/usb/profiles/lifecycle.rules
+    chmod 0600 /var/lib/octoshield/usb/profiles/lifecycle.rules
+    usb_policy_checksum=$(sha256sum /var/lib/octoshield/usb/profiles/lifecycle.rules)
+}
+if [[ -f /usr/lib/octoshield/src/lib/profiles.sh ]]; then
+    seed_profile_choices
+fi
+
 # Model the user's existing opt-in without starting security collection inside
 # the build container. New package versions must leave this choice intact.
 install -d -m 0755 /etc/systemd/system/multi-user.target.wants
 ln -s /usr/lib/systemd/system/octoshield-monitor.service /etc/systemd/system/multi-user.target.wants/octoshield-monitor.service
 monitor_enabled=true
 
-# CI supplies the published 1.0.0 archive to exercise a genuine version upgrade.
+# CI supplies the published previous release to exercise a genuine upgrade.
 # A running control must cause nonblocking refusal before package replacement.
 exec 8>/var/lib/octoshield/lock
 flock -n 8 || fail 'cannot acquire disposable operation lock'
@@ -122,17 +153,18 @@ dpkg --install "$archive"
 [[ $(dpkg-query -W -f='${Version}' octoshield) == "$(dpkg-deb --field "$archive" Version)" ]] || fail 'new version was not installed'
 /usr/bin/octoshield --help >/dev/null
 [[ ! -e /run/octoshield-package-maintenance ]] || fail 'upgrade did not release maintenance exclusion'
+[[ -x /usr/libexec/octoshield-session && $(stat -c '%u:%g:%a' /usr/libexec/octoshield-session) == 0:0:755 ]] || fail 'session broker is missing or has unsafe ownership/permissions'
+grep -Fq '<action id="io.vdm.OctoShield.session">' /usr/share/polkit-1/actions/io.vdm.OctoShield.policy || fail 'session authorization policy is missing'
+grep -Fq '<annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/octoshield-session</annotate>' /usr/share/polkit-1/actions/io.vdm.OctoShield.policy || fail 'session broker PolicyKit path mismatch'
+if grep -Fq auth_admin_keep /usr/share/polkit-1/actions/io.vdm.OctoShield.policy; then fail 'session authorization must not use a shared keep-cache'; fi
+[[ -f /etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop && -f /usr/lib/systemd/user/octoshield-usb-agent.service ]] || fail 'USB prompt desktop integration is missing'
+linked_libraries=$(ldd /usr/libexec/octoshield-session) || fail 'session broker is not a dynamically linked native executable'
+if grep -Fq 'not found' <<<"$linked_libraries"; then fail 'session broker shared-library dependency is missing'; fi
 check_preserved_state
 check_inactive_services
 
-# Persist a valid, unselected profile configuration and confirm a subsequent
-# upgrade/reinstall does not recreate defaults or activate a preset.
-# shellcheck disable=SC1091
-source /usr/lib/octoshield/src/lib/profiles.sh
-install -d -m 0700 /var/lib/octoshield/profiles
-profiles::_defaults >/var/lib/octoshield/profiles/state.json
-chmod 0600 /var/lib/octoshield/profiles/state.json
-profile_checksum=$(sha256sum /var/lib/octoshield/profiles/state.json)
+# Old baselines without named profiles acquire a persistence fixture now.
+if [[ -z $profile_checksum ]]; then seed_profile_choices; fi
 dpkg --install "$archive"
 check_preserved_state
 check_inactive_services
@@ -140,7 +172,9 @@ check_inactive_services
 apt-get remove --yes octoshield
 [[ ! -e /run/octoshield-package-maintenance ]] || fail 'removal did not release maintenance exclusion'
 check_preserved_state
-[[ ! -e /usr/bin/octoshield && ! -e /usr/bin/octoshield-gtk && ! -e /usr/libexec/octoshield-helper ]] || fail 'package removal left executable entry points installed'
+[[ ! -e /usr/bin/octoshield && ! -e /usr/bin/octoshield-gtk && ! -e /usr/libexec/octoshield-helper && ! -e /usr/libexec/octoshield-session ]] || fail 'package removal left executable entry points installed'
+[[ ! -e /usr/lib/systemd/user/octoshield-usb-agent.service ]] || fail 'package removal left the USB prompt service installed'
 apt-get purge --yes octoshield
+[[ ! -e /etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop ]] || fail 'package purge left its USB autostart entry installed'
 check_preserved_state
 printf '%s\n' 'PASS: actual disposable-CI install, version upgrade, reinstall, remove, and purge preserved native policies, profiles, user preferences, and recovery snapshots.'
