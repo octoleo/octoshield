@@ -10,7 +10,8 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=yes
-PrivateTmp=yes
+# All writable state uses the user's private runtime directory. Avoid mount
+# namespaces here so prompts also work when unprivileged namespaces are disabled.
 
 # GNOME autostart and the application start this companion. It does not enable
 # optional security-event notifications or change USB authorization itself.
