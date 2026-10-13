@@ -19,6 +19,7 @@ Run ordinary tests from the repository root without root privileges. Temporary f
 | `make test` | CLI/backend Bats and monitor C tests |
 | `make format` | Apply the project's shell formatting |
 | `make sanitize` | Run monitor C tests with AddressSanitizer/UndefinedBehaviorSanitizer |
+| `make session-sanitize` | Run the privileged broker tests with AddressSanitizer/UndefinedBehaviorSanitizer; needs GLib/GIO and JSON-GLib development packages |
 | `make gui` | Compile the native GTK4/libadwaita application |
 | `make ui-test` / `make test-gui` | Compile the GUI and exercise its protocol parser, argument validation, and GUI/CLI capability parity |
 | `make ui-display-test` | Run native window, exact review, and asynchronous subprocess regression tests under D-Bus/Xvfb |
@@ -34,7 +35,7 @@ Release tests check coherent versions, fixed documentation/media assembly, packa
 ```bash
 sudo apt-get install pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev \
     xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
-make gui ui-test ui-display-test
+make gui ui-test ui-display-test session-sanitize
 
 dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo \
     build/octoshield-gtk --smoke-test

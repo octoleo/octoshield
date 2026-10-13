@@ -78,7 +78,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Check C memory and undefined behavior
-        run: make sanitize
+        run: make sanitize session-sanitize
       - name: Run user-session fixtures and native app without root
         run: |
           useradd --create-home octoshield-test

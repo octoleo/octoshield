@@ -10,7 +10,7 @@ SESSION_PACKAGES := gio-2.0 json-glib-1.0
 CLI_FILES := $(shell bash -c 'source src/lib/install.sh; install::files')
 DESTDIR ?=
 
-.PHONY: all gui ui-test ui-display-test test-gui check lint format test sanitize install package clean
+.PHONY: all gui ui-test ui-display-test test-gui check lint format test sanitize session-sanitize install package clean
 all: build/octoshield-monitor
 
 build/octoshield-monitor: src/monitor.c
@@ -106,6 +106,9 @@ sanitize:
 	mkdir -p build
 	$(CC) -O1 -g $(WARNINGS) -fsanitize=address,undefined -fno-omit-frame-pointer tests/monitor.c -o build/test-monitor-sanitize
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=1} build/test-monitor-sanitize
+
+session-sanitize:
+	mkdir -p build
 	$(CC) -O1 -g $(WARNINGS) -fsanitize=address,undefined -fno-omit-frame-pointer $$(pkg-config --cflags $(SESSION_PACKAGES)) tests/session-broker.c src/ui/protocol.c -o build/test-session-sanitize $$(pkg-config --libs $(SESSION_PACKAGES))
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=1} build/test-session-sanitize
 
