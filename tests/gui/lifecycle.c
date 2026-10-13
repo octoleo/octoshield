@@ -163,6 +163,47 @@ static void test_oversized_review_cannot_be_approved(Fixture *fixture,
     g_assert_false(adw_message_dialog_get_response_enabled(fixture->app.confirmation, "accept"));
 }
 
+static void test_session_stderr_is_not_structured_data(Fixture *fixture, gconstpointer data)
+{
+    (void)data;
+    Session session = {.app = &fixture->app, .ready = TRUE};
+    session.line = g_byte_array_new();
+    fixture->operation.session_operation = TRUE;
+    fixture->operation.request_id = 7;
+    fixture->operation.data_output = g_string_new("{\"devices\":[]}");
+    fixture->operation.done_seen = TRUE;
+    fixture->operation.reported_success = TRUE;
+    const char *event = "{\"type\":\"stderr\",\"request\":7,\"text\":\"late diagnostic\"}";
+    g_byte_array_append(session.line, (const guint8 *)event, strlen(event));
+    session_event(&session);
+    g_assert_false(fixture->operation.protocol_failed);
+    g_assert_false(fixture->operation.input_closed);
+    g_assert_cmpstr(fixture->operation.data_output->str, ==, "{\"devices\":[]}");
+    g_string_free(fixture->operation.data_output, TRUE);
+    fixture->operation.data_output = NULL;
+    fixture->operation.session_operation = FALSE;
+    g_byte_array_unref(session.line);
+}
+
+static void test_session_wrong_request_revokes_authority(Fixture *fixture, gconstpointer data)
+{
+    (void)data;
+    Session session = {.app = &fixture->app, .ready = TRUE, .input = fixture->operation.answers};
+    session.line = g_byte_array_new();
+    fixture->app.session = &session;
+    fixture->operation.session_operation = TRUE;
+    fixture->operation.request_id = 7;
+    const char *event = "{\"type\":\"log\",\"request\":8,\"text\":\"wrong operation\"}";
+    g_byte_array_append(session.line, (const guint8 *)event, strlen(event));
+    session_event(&session);
+    g_assert_true(session.closed);
+    g_assert_false(session.ready);
+    g_assert_true(g_output_stream_is_closed(session.input));
+    fixture->app.session = NULL;
+    fixture->operation.session_operation = FALSE;
+    g_byte_array_unref(session.line);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -177,5 +218,9 @@ int main(int argc, char **argv)
                fixture_setup, test_stale_confirmation_denied, fixture_teardown);
     g_test_add("/ui-lifecycle/truncated-review-denied", Fixture, NULL,
                fixture_setup, test_oversized_review_cannot_be_approved, fixture_teardown);
+    g_test_add("/ui-lifecycle/session-stderr-excluded-from-data", Fixture, NULL,
+               fixture_setup, test_session_stderr_is_not_structured_data, fixture_teardown);
+    g_test_add("/ui-lifecycle/session-correlation-revokes-authority", Fixture, NULL,
+               fixture_setup, test_session_wrong_request_revokes_authority, fixture_teardown);
     return g_test_run();
 }
