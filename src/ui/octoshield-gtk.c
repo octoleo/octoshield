@@ -275,6 +275,7 @@ struct App {
     GtkStack *access_pages;
     GtkLabel *access_status;
     GtkButton *unlock;
+    GtkButton *unlock_primary;
     GDBusProxy *login_session;
     GHashTable *setting_choices;
     gchar *active_profile;
@@ -805,11 +806,18 @@ static void session_revoke(App *app, const char *reason)
 {
     Session *session = app->session;
     if (session != NULL && !session->closed) {
+        gboolean awaiting_authentication = !session->ready && session->next_request == 0 && !session->exited;
         session->closed = TRUE;
         session->ready = FALSE;
         /* EOF revokes this app's authority. The broker finishes only an already
          * confirmed mutation and denies every pending/future confirmation. */
         if (session->writing == NULL) g_output_stream_close(session->input, NULL, NULL);
+        /* pkexec does not consume this pipe while its authentication dialog is
+         * pending. End that request too, but only before READY and before any
+         * command could have been issued. Never signal an authorized operation.
+         * If authorization raced ahead, the unused broker still sees EOF. */
+        if (awaiting_authentication && session->process != NULL)
+            g_subprocess_send_signal(session->process, SIGTERM);
     }
     if (app->operation != NULL) {
         close_answers(app->operation);
@@ -1019,7 +1027,7 @@ static void unlock_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
     App *app = data;
-    if (administrator_ready(app)) session_revoke(app, "OctoShield is locked. Unlock to begin a new administrator session.");
+    if (app->session != NULL && !app->session->closed) session_revoke(app, "OctoShield is locked. Unlock to begin a new administrator session.");
     else session_unlock(app);
 }
 
@@ -1303,7 +1311,16 @@ static void update_actions(App *app)
     gtk_widget_set_visible(app->decline, app->operation != NULL && app->operation->waiting_confirmation);
     if (app->usb_devices != NULL) gtk_widget_set_sensitive(GTK_WIDGET(app->usb_devices), enabled);
     if (app->access_pages != NULL) gtk_stack_set_visible_child_name(app->access_pages, administrator_ready(app) || app->smoke_test ? "application" : "locked");
-    if (app->unlock != NULL) gtk_button_set_label(app->unlock, administrator_ready(app) ? "Lock" : app->session != NULL && !app->session->closed ? "Authenticating…" : "Unlock");
+    gboolean authenticating = app->session != NULL && !app->session->closed && !app->session->ready;
+    gboolean available = !app->smoke_test && (app->session == NULL || !app->session->closed);
+    if (app->unlock != NULL) {
+        gtk_button_set_label(app->unlock, authenticating ? "Cancel authentication" : administrator_ready(app) ? "Lock" : available ? "Unlock" : "Locking…");
+        gtk_widget_set_sensitive(GTK_WIDGET(app->unlock), available);
+    }
+    if (app->unlock_primary != NULL) {
+        gtk_button_set_label(app->unlock_primary, authenticating ? "Cancel authentication" : "Unlock with an administrator account");
+        gtk_widget_set_sensitive(GTK_WIDGET(app->unlock_primary), available);
+    }
 }
 
 static GtkWidget *action_button(App *app, const char *id, const char *label, gboolean suggested)
@@ -2665,6 +2682,7 @@ static void activate(GApplication *application, gpointer data)
     gtk_label_set_max_width_chars(app->access_status, 65);
     gtk_box_append(GTK_BOX(locked), GTK_WIDGET(app->access_status));
     GtkWidget *unlock_main = gtk_button_new_with_label("Unlock with an administrator account");
+    app->unlock_primary = GTK_BUTTON(unlock_main);
     gtk_widget_add_css_class(unlock_main, "suggested-action");
     g_signal_connect(unlock_main, "clicked", G_CALLBACK(unlock_clicked), app);
     gtk_box_append(GTK_BOX(locked), unlock_main);
