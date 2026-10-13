@@ -6,6 +6,7 @@ WARNINGS := -std=c11 -Wall -Wextra -Werror -pedantic
 HARDENING := -fstack-protector-strong -fPIE -pie -Wl,-z,relro,-z,now
 SHELL_FILES := src/octoshield src/octoshield-helper src/status-daemon $(wildcard debian/octoshield.postinst debian/octoshield.prerm debian/octoshield.postrm scripts/*.sh) $(shell find src tests -type f \( -name '*.sh' -o -name '*.bats' \) | sort)
 UI_PACKAGES := gtk4 libadwaita-1 json-glib-1.0 gio-2.0
+SESSION_PACKAGES := gio-2.0 json-glib-1.0
 CLI_FILES := $(shell bash -c 'source src/lib/install.sh; install::files')
 DESTDIR ?=
 
@@ -16,7 +17,15 @@ build/octoshield-monitor: src/monitor.c
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) $< $(LDFLAGS) -o $@
 
-gui: build/octoshield-gtk
+gui: build/octoshield-gtk build/octoshield-session
+
+build/octoshield-session: src/session-broker.c src/ui/protocol.c src/ui/protocol.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) $$(pkg-config --cflags $(SESSION_PACKAGES)) src/session-broker.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs $(SESSION_PACKAGES))
+
+build/test-session: tests/session-broker.c src/session-broker.c src/ui/protocol.c src/ui/protocol.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) $$(pkg-config --cflags $(SESSION_PACKAGES)) tests/session-broker.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs $(SESSION_PACKAGES))
 
 build/octoshield-resources.c: data/branding/octoshield.gresource.xml data/branding/OctoShield-light.png data/branding/OctoShield-dark.png
 	mkdir -p build
@@ -33,8 +42,9 @@ build/test-ui: tests/ui-test.c src/ui/protocol.c src/ui/protocol.h
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(HARDENING) -Isrc/ui $$(pkg-config --cflags glib-2.0 json-glib-1.0) tests/ui-test.c src/ui/protocol.c $(LDFLAGS) -o $@ $$(pkg-config --libs glib-2.0 json-glib-1.0)
 
-ui-test test-gui: gui build/test-ui
+ui-test test-gui: gui build/test-ui build/test-session
 	build/test-ui
+	build/test-session
 	bats tests/gui/*.bats
 
 build/test-ui-app: tests/ui-app-test.c src/ui/octoshield-gtk.c src/ui/protocol.c src/ui/protocol.h build/octoshield-resources.o
@@ -71,6 +81,10 @@ install: all gui
 	install -D -m 0755 build/octoshield-monitor "$(DESTDIR)/usr/lib/octoshield/bin/octoshield-monitor"
 	install -D -m 0755 build/octoshield-gtk "$(DESTDIR)/usr/bin/octoshield-gtk"
 	install -D -m 0755 src/octoshield-helper "$(DESTDIR)/usr/libexec/octoshield-helper"
+	install -D -m 0755 build/octoshield-session "$(DESTDIR)/usr/libexec/octoshield-session"
+	install -D -m 0755 src/usb-prompt.sh "$(DESTDIR)/usr/lib/octoshield/src/usb-prompt.sh"
+	install -D -m 0644 systemd/octoshield-usb-agent.service "$(DESTDIR)/usr/lib/systemd/user/octoshield-usb-agent.service"
+	install -D -m 0644 data/io.vdm.OctoShield.UsbAgent.desktop "$(DESTDIR)/etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop"
 	printf '%s\n' '#!/bin/bash' 'exec /usr/bin/bash /usr/lib/octoshield/src/octoshield "$$@"' >"$(DESTDIR)/usr/bin/octoshield"
 	chmod 0755 "$(DESTDIR)/usr/bin/octoshield"
 	@for unit in octoshield-monitor.service octoshield-notify.service octoshield-status.service; do sed 's@/usr/local/@/usr/@g' "systemd/$$unit" >"$(DESTDIR)/usr/lib/octoshield/systemd/$$unit"; done
@@ -91,6 +105,8 @@ sanitize:
 	mkdir -p build
 	$(CC) -O1 -g $(WARNINGS) -fsanitize=address,undefined -fno-omit-frame-pointer tests/monitor.c -o build/test-monitor-sanitize
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=1} build/test-monitor-sanitize
+	$(CC) -O1 -g $(WARNINGS) -fsanitize=address,undefined -fno-omit-frame-pointer $$(pkg-config --cflags $(SESSION_PACKAGES)) tests/session-broker.c src/ui/protocol.c -o build/test-session-sanitize $$(pkg-config --libs $(SESSION_PACKAGES))
+	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=1} build/test-session-sanitize
 
 clean:
 	rm -rf build

@@ -16,4 +16,14 @@
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/octoshield-helper</annotate>
   </action>
+  <action id="io.vdm.OctoShield.session">
+    <description>Unlock an OctoShield administrator session</description>
+    <message>Authenticate as an administrator to unlock OctoShield until you close or lock the application.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/octoshield-session</annotate>
+  </action>
 </policyconfig>

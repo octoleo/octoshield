@@ -352,6 +352,24 @@ static void action_profiles_reject(void)
         reject_action(TRUE, g_strv_length((gchar **)invalid[i]), invalid[i]);
 }
 
+static void action_usb_bound(void)
+{
+    const gchar *token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const gchar *args[] = {"usb", "approve", "7", token, "office", "once", NULL};
+    assert_action(TRUE, args);
+    args[5] = "profile"; assert_action(TRUE, args);
+    args[1] = "revoke"; args[5] = "block"; assert_action(TRUE, args);
+    args[5] = "forget"; assert_action(TRUE, args);
+    args[5] = "once"; reject_action(TRUE, 6, args);
+    args[1] = "approve"; args[3] = "bad"; reject_action(TRUE, 6, args);
+    args[3] = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    reject_action(TRUE, 6, args);
+    args[3] = token; args[4] = "unmanaged"; reject_action(TRUE, 6, args);
+    args[4] = "office"; args[2] = "4294967295"; reject_action(TRUE, 6, args);
+    args[2] = "7"; reject_action(TRUE, 5, args);
+    reject_action(FALSE, 6, args);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -364,5 +382,6 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/action/reject", action_reject);
     g_test_add_func("/ui/action/profiles-and-updates", action_profiles);
     g_test_add_func("/ui/action/profiles-reject", action_profiles_reject);
+    g_test_add_func("/ui/action/usb-bound", action_usb_bound);
     return g_test_run();
 }
