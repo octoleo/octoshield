@@ -479,8 +479,16 @@ usb::_approval_matches() {
 
 usb::devices_json() {
     core::require_root || return
-    local devices profile policy line id state canonical remembered category context token rows='' count=0
+    local devices profile policy line id state canonical remembered category context token remembered_rules='' rows='' count=0
     profile=$(usb::active_profile) && policy=$(usb::_profile_policy "$profile") && context=$(usb::_attachment_context) && devices=$(usbguard list-devices) || return
+    # Older enrolled policies retain USBGuard's extra name/serial/interface
+    # fields. Compare their safely parsed, exact VID/hash/port identity rather
+    # than mistaking a remembered device for a temporary allowance. This is a
+    # display projection only: no saved/native authorization rule is rewritten.
+    while IFS= read -r line; do
+        [[ $line == 'allow '* ]] || continue
+        if canonical=$(usb::_canonical "$line"); then remembered_rules+="$canonical"$'\n'; fi
+    done <<<"$policy"
     while IFS= read -r line; do
         [[ -n $line ]] || continue
         ((count += 1))
@@ -500,7 +508,7 @@ usb::devices_json() {
         canonical=$(usb::_canonical "$line") || return
         token=$(usb::_attachment_token "$id" "$line" "$context") || return
         remembered=false
-        grep -Fxq -- "$canonical" <<<"$policy" && remembered=true
+        grep -Fxq -- "$canonical" <<<"$remembered_rules" && remembered=true
         rows+=$(jq -cn --argjson id "$id" --arg token "$token" --arg state "$state" --arg category "$category" \
             --arg name "$USB_DEVICE_NAME" --arg vendor_product "$USB_DEVICE_VID" \
             --arg port "$USB_DEVICE_PORT" --arg profile "$profile" --argjson remembered "$remembered" \
