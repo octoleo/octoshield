@@ -344,7 +344,8 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
     static const gchar *const monitor[] = {"status", "logs", "disable", NULL};
 
     if (argc == 1) {
-        return g_str_equal(args[0], "status") || g_str_equal(args[0], "backups");
+        return g_str_equal(args[0], "status") || g_str_equal(args[0], "inspect") ||
+               g_str_equal(args[0], "backups");
     }
     if (g_str_equal(args[0], "apply")) {
         return argc == 2 && one_of(args[1], controls);
@@ -365,6 +366,16 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
         }
         if (argc < 3 || !decimal(args[2], G_GUINT64_CONSTANT(4294967294))) {
             return FALSE;
+        }
+        if (g_str_equal(args[1], "approve") || g_str_equal(args[1], "revoke")) {
+            if (argc != 6 || strlen(args[3]) != 64 || !profile_id(args[4]))
+                return FALSE;
+            for (const gchar *p = args[3]; *p; p++)
+                if (!g_ascii_isdigit(*p) && (*p < 'a' || *p > 'f'))
+                    return FALSE;
+            if (g_str_equal(args[1], "approve"))
+                return g_str_equal(args[5], "once") || g_str_equal(args[5], "profile");
+            return g_str_equal(args[5], "block") || g_str_equal(args[5], "forget");
         }
         if (g_str_equal(args[1], "block") || g_str_equal(args[1], "forget")) {
             return argc == 3;
