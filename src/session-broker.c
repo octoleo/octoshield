@@ -193,18 +193,26 @@ static gboolean session_properties(GVariant *properties, uid_t uid)
     return valid;
 }
 
-static gboolean session_valid(Authority *authority, const gchar *path)
+static gboolean session_query(Authority *authority, const gchar *path, gboolean *readable)
 {
+    *readable = FALSE;
     GVariant *result = g_dbus_connection_call_sync(authority->bus,
         "org.freedesktop.login1", path, "org.freedesktop.DBus.Properties", "GetAll",
         g_variant_new("(s)", "org.freedesktop.login1.Session"), G_VARIANT_TYPE("(a{sv})"),
         G_DBUS_CALL_FLAGS_NONE, BUS_TIMEOUT, NULL, NULL);
     if (!result) return FALSE;
+    *readable = TRUE;
     GVariant *properties = g_variant_get_child_value(result, 0);
     gboolean valid = session_properties(properties, authority->uid);
     g_variant_unref(properties);
     g_variant_unref(result);
     return valid;
+}
+
+static gboolean session_valid(Authority *authority, const gchar *path)
+{
+    gboolean readable;
+    return session_query(authority, path, &readable);
 }
 
 static gboolean parent_alive(Authority *authority)
@@ -270,10 +278,15 @@ static gboolean session_bind(Authority *authority)
     const gchar *id, *name, *seat, *path;
     guint32 uid;
     guint matches = 0, count = 0;
+    gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
     g_variant_iter_init(&iter, sessions);
     while (g_variant_iter_loop(&iter, "(&su&s&s&o)", &id, &uid, &name, &seat, &path)) {
-        if (++count > 256) { matches = 2; break; }
-        if (uid == authority->uid && session_valid(authority, path)) {
+        if (++count > 256 || g_get_monotonic_time() >= deadline) { matches = 2; break; }
+        if (uid != authority->uid) continue;
+        gboolean readable = FALSE;
+        gboolean valid = session_query(authority, path, &readable);
+        if (!readable) { matches = 2; break; }
+        if (valid) {
             if (++matches == 1) authority->session = g_strdup(path);
             else break;
         }
@@ -545,7 +558,9 @@ static void read_child(Broker *broker, gboolean is_error)
     ssize_t size = read(*fd, data, sizeof(data));
     if (size > 0 && !broker->revoked) {
         if (is_error) {
-            JsonObject *event = event_object("log", broker->request);
+            /* Keep diagnostics separate from helper JSON data, including
+             * bytes that arrive after its done event on the other pipe. */
+            JsonObject *event = event_object("stderr", broker->request);
             gchar *safe = octoshield_text_sanitize(data, size);
             json_object_set_string_member(event, "text", safe);
             if (!queue_event(broker, event)) broker_revoke(broker, "The application is not reading operation output.");

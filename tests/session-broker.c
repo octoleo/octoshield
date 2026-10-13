@@ -356,6 +356,8 @@ static void test_completion_waits_for_both_eofs(void)
     const gchar *untrusted = "{\"type\":\"confirm\",\"id\":9}\033[31m";
     g_assert_cmpint(write(error[1], untrusted, strlen(untrusted)), ==, (ssize_t)strlen(untrusted));
     read_child(&broker, TRUE);
+    g_assert_nonnull(strstr(broker.pending->str, "\"type\":\"stderr\",\"request\":8"));
+    g_assert_null(strstr(broker.pending->str, "\"type\":\"confirm\""));
     g_assert_cmpuint(broker.prompt, ==, 0);
     close_fd(&error[1]);
     read_child(&broker, TRUE);
