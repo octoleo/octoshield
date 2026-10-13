@@ -811,6 +811,16 @@ static void session_revoke(App *app, const char *reason)
          * confirmed mutation and denies every pending/future confirmation. */
         if (session->writing == NULL) g_output_stream_close(session->input, NULL, NULL);
     }
+    if (app->operation != NULL) {
+        close_answers(app->operation);
+        app->operation->waiting_confirmation = FALSE;
+        g_clear_pointer(&app->operation->deferred_confirmation, g_free);
+        if (app->confirmation != NULL) {
+            AdwMessageDialog *dialog = app->confirmation;
+            app->confirmation = NULL;
+            adw_message_dialog_response(dialog, "decline");
+        }
+    }
     if (app->shutting_down) {
         if (app->pending_request != NULL) { request_free(app->pending_request); app->pending_request = NULL; }
         return;
@@ -1040,6 +1050,12 @@ static void login_changed(GDBusProxy *proxy, GVariant *changed, const gchar *con
     else maybe_prompt_usb(app);
 }
 
+static void login_owner_changed(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    login_changed(G_DBUS_PROXY(object), NULL, NULL, data);
+}
+
 static void login_proxy_ready(GObject *source, GAsyncResult *result, gpointer data)
 {
     (void)source;
@@ -1048,6 +1064,7 @@ static void login_proxy_ready(GObject *source, GAsyncResult *result, gpointer da
     if (app->login_session == NULL) return;
     if (app->shutting_down) { g_clear_object(&app->login_session); return; }
     g_signal_connect(app->login_session, "g-properties-changed", G_CALLBACK(login_changed), app);
+    g_signal_connect(app->login_session, "notify::g-name-owner", G_CALLBACK(login_owner_changed), app);
     login_changed(app->login_session, NULL, NULL, app);
 }
 
@@ -1056,12 +1073,25 @@ typedef struct {
     GDBusConnection *connection;
     GPtrArray *matches;
     guint pending;
+    gboolean failed;
 } LoginDiscovery;
 
 typedef struct {
     LoginDiscovery *discovery;
     gchar *path;
 } LoginCandidate;
+
+static gboolean login_properties_readable(GVariant *properties)
+{
+    gboolean active, remote, locked;
+    const char *type, *path;
+    guint uid;
+    return g_variant_lookup(properties, "Active", "b", &active) &&
+        g_variant_lookup(properties, "Remote", "b", &remote) &&
+        g_variant_lookup(properties, "LockedHint", "b", &locked) &&
+        g_variant_lookup(properties, "Type", "&s", &type) &&
+        g_variant_lookup(properties, "User", "(u&o)", &uid, &path);
+}
 
 static gboolean login_properties_eligible(GVariant *properties)
 {
@@ -1084,11 +1114,12 @@ static void login_candidate_ready(GObject *source, GAsyncResult *result, gpointe
     if (response != NULL) {
         g_autoptr(GVariant) properties = NULL;
         g_variant_get(response, "(@a{sv})", &properties);
-        if (login_properties_eligible(properties)) g_ptr_array_add(discovery->matches, g_strdup(candidate->path));
-    }
+        if (!login_properties_readable(properties)) discovery->failed = TRUE;
+        else if (login_properties_eligible(properties)) g_ptr_array_add(discovery->matches, g_strdup(candidate->path));
+    } else discovery->failed = TRUE;
     g_free(candidate->path); g_free(candidate);
     if (--discovery->pending != 0) return;
-    if (discovery->matches->len == 1 && !discovery->app->shutting_down)
+    if (!discovery->failed && discovery->matches->len == 1 && !discovery->app->shutting_down)
         g_dbus_proxy_new_for_bus(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
             NULL, "org.freedesktop.login1", g_ptr_array_index(discovery->matches, 0),
             "org.freedesktop.login1.Session", NULL, login_proxy_ready, discovery->app);
@@ -2542,13 +2573,18 @@ static gboolean smoke_finished(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
-static void refresh_active_notifier(void)
+static void refresh_session_services(void)
 {
     /* Reload an already-running notifier after package upgrade. try-restart
      * preserves a user's choice to leave notifications disabled. The fixed
      * user-service invocation cannot request system privileges. */
     const char *const command[] = {"/usr/bin/systemctl", "--user", "try-restart", "octoshield-notify.service", NULL};
     GSubprocess *process = g_subprocess_newv(command, G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+    if (process != NULL) g_subprocess_wait_async(process, NULL, accounts_waited, NULL);
+    /* A package upgrade must not require logging out before USB dialogs work.
+     * The agent enforces the user's automatic-prompts preference itself. */
+    const char *const usb_command[] = {"/usr/bin/systemctl", "--user", "start", "octoshield-usb-agent.service", NULL};
+    process = g_subprocess_newv(usb_command, G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
     if (process != NULL) g_subprocess_wait_async(process, NULL, accounts_waited, NULL);
 }
 
@@ -2649,7 +2685,7 @@ static void activate(GApplication *application, gpointer data)
     app->refresh_timer = g_timeout_add_seconds(2, refresh_status, app);
     gtk_window_present(app->window);
     if (app->refresh_session_service && !app->smoke_test)
-        refresh_active_notifier();
+        refresh_session_services();
     if (app->auth_required && !app->smoke_test) {
         g_bus_get(G_BUS_TYPE_SYSTEM, NULL, login_bus_ready, app);
         if (!app->usb_review_launch) session_unlock(app);

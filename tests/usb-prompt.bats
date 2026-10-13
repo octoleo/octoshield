@@ -164,6 +164,8 @@ setup() {
 }
 
 @test 'only one agent may hold a desktop user lock' {
+    # Bats runs setup(), which sources the implementation, before this body.
+    # shellcheck disable=SC2218
     usb_prompt::lock
     run usb_prompt::lock
     [ "$status" -ne 0 ]

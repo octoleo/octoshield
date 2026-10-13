@@ -204,6 +204,24 @@ static void test_session_wrong_request_revokes_authority(Fixture *fixture, gcons
     g_byte_array_unref(session.line);
 }
 
+static void test_lock_dismisses_pending_confirmation(Fixture *fixture, gconstpointer data)
+{
+    (void)data;
+    Session session = {.app = &fixture->app, .ready = TRUE, .input = fixture->operation.answers};
+    fixture->app.session = &session;
+    fixture->operation.session_operation = TRUE;
+    receive(fixture, "{\"type\":\"confirm\",\"id\":1,\"text\":\"Apply this change?\"}");
+    g_assert_nonnull(fixture->app.confirmation);
+    session_revoke(&fixture->app, "Locked");
+    g_assert_null(fixture->app.confirmation);
+    g_assert_false(fixture->operation.waiting_confirmation);
+    g_assert_true(fixture->operation.input_closed);
+    g_assert_true(session.closed);
+    g_assert_false(fixture->operation.answer_pending);
+    fixture->app.session = NULL;
+    fixture->operation.session_operation = FALSE;
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -222,5 +240,7 @@ int main(int argc, char **argv)
                fixture_setup, test_session_stderr_is_not_structured_data, fixture_teardown);
     g_test_add("/ui-lifecycle/session-correlation-revokes-authority", Fixture, NULL,
                fixture_setup, test_session_wrong_request_revokes_authority, fixture_teardown);
+    g_test_add("/ui-lifecycle/lock-dismisses-pending-confirmation", Fixture, NULL,
+               fixture_setup, test_lock_dismisses_pending_confirmation, fixture_teardown);
     return g_test_run();
 }
