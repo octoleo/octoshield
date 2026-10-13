@@ -222,6 +222,35 @@ static void test_lock_dismisses_pending_confirmation(Fixture *fixture, gconstpoi
     fixture->operation.session_operation = FALSE;
 }
 
+static void test_close_cancels_only_pending_authentication(Fixture *fixture, gconstpointer data)
+{
+    (void)data;
+    /* A harmless child ignores stdin like pkexec during authentication. EOF
+     * alone cannot make it exit. After READY or after any request, even this
+     * child must be left to finish without a signal. */
+    const struct { gboolean ready; guint64 requests; gboolean cancelled; } states[] = {
+        {FALSE, 0, TRUE}, {TRUE, 0, FALSE}, {FALSE, 1, FALSE}
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(states); i++) {
+        g_autoptr(GError) error = NULL;
+        g_autoptr(GSubprocess) process = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+            G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+            &error, "/bin/sleep", "0.2", NULL);
+        g_assert_no_error(error);
+        Session session = {.app = &fixture->app, .process = process,
+            .input = g_subprocess_get_stdin_pipe(process), .ready = states[i].ready,
+            .next_request = states[i].requests};
+        fixture->app.session = &session;
+        session_revoke(&fixture->app, "Closed");
+        g_assert_true(g_subprocess_wait(process, NULL, &error));
+        g_assert_no_error(error);
+        g_assert_cmpint(g_subprocess_get_if_signaled(process), ==, states[i].cancelled);
+        if (states[i].cancelled) g_assert_cmpint(g_subprocess_get_term_sig(process), ==, SIGTERM);
+        else g_assert_true(g_subprocess_get_successful(process));
+        fixture->app.session = NULL;
+    }
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -242,5 +271,7 @@ int main(int argc, char **argv)
                fixture_setup, test_session_wrong_request_revokes_authority, fixture_teardown);
     g_test_add("/ui-lifecycle/lock-dismisses-pending-confirmation", Fixture, NULL,
                fixture_setup, test_lock_dismisses_pending_confirmation, fixture_teardown);
+    g_test_add("/ui-lifecycle/close-cancels-only-pending-authentication", Fixture, NULL,
+               fixture_setup, test_close_cancels_only_pending_authentication, fixture_teardown);
     return g_test_run();
 }
