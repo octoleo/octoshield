@@ -554,6 +554,70 @@ static void test_usb_approval_is_bound_before_authentication(void)
     update_actions(&test_app);
 }
 
+static void test_usb_profile_and_remembered_decisions(void)
+{
+    g_autofree gchar *token = g_strnfill(64, 'd');
+    g_autoptr(JsonObject) usb = usb_fixture(token, "office", "blocked");
+    JsonObject *device = json_array_get_object_element(array_member(usb, "devices"), 0);
+    json_object_set_boolean_member(device, "remembered", TRUE);
+    json_object_set_string_member(device, "name", "");
+    json_object_set_string_member(device, "label", "USB device");
+    test_app.local_session_ready = TRUE;
+    render_usb_status(&test_app, usb);
+    g_assert_nonnull(test_app.usb_prompt);
+    g_assert_nonnull(strstr(adw_message_dialog_get_body(test_app.usb_prompt), "USB device"));
+    g_assert_cmpstr(adw_message_dialog_get_response_label(test_app.usb_prompt, "once"), ==, "Allow now");
+    g_assert_false(adw_message_dialog_get_response_enabled(test_app.usb_prompt, "profile"));
+    adw_message_dialog_response(test_app.usb_prompt, "block");
+    json_object_set_string_member(usb, "profile", "home");
+    json_object_set_string_member(device, "profile", "home");
+    json_object_set_boolean_member(device, "remembered", FALSE);
+    render_usb_status(&test_app, usb);
+    g_assert_nonnull(test_app.usb_prompt);
+    g_assert_nonnull(strstr(adw_message_dialog_get_body(test_app.usb_prompt), "home"));
+    /* A policy change closes this stale prompt and does not turn Cancel into
+     * a block command against a device that is now allowed. */
+    json_object_set_string_member(device, "state", "allowed");
+    render_usb_status(&test_app, usb);
+    g_assert_null(test_app.usb_prompt);
+    UsbDevice *allowed = g_ptr_array_index(test_app.usb_inventory_rows, 0);
+    show_usb_prompt(allowed);
+    g_assert_cmpstr(adw_message_dialog_get_heading(test_app.usb_prompt), ==, "Remember this USB device?");
+    g_assert_cmpstr(adw_message_dialog_get_response_label(test_app.usb_prompt, "block"), ==, "Cancel");
+    adw_message_dialog_response(test_app.usb_prompt, "block");
+    g_assert_null(test_app.operation);
+    render_usb_status(&test_app, NULL);
+    test_app.local_session_ready = FALSE;
+}
+
+static GVariant *login_fixture(gboolean active, gboolean remote, gboolean locked, const char *type, guint uid)
+{
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&builder, "{sv}", "Active", g_variant_new_boolean(active));
+    g_variant_builder_add(&builder, "{sv}", "Remote", g_variant_new_boolean(remote));
+    g_variant_builder_add(&builder, "{sv}", "LockedHint", g_variant_new_boolean(locked));
+    g_variant_builder_add(&builder, "{sv}", "Type", g_variant_new_string(type));
+    g_variant_builder_add(&builder, "{sv}", "User", g_variant_new("(uo)", uid, "/org/freedesktop/login1/user/test"));
+    return g_variant_ref_sink(g_variant_builder_end(&builder));
+}
+
+static void test_login_requires_local_unlocked_graphical_owner(void)
+{
+    g_autoptr(GVariant) eligible = login_fixture(TRUE, FALSE, FALSE, "wayland", getuid());
+    g_autoptr(GVariant) locked = login_fixture(TRUE, FALSE, TRUE, "wayland", getuid());
+    g_autoptr(GVariant) remote = login_fixture(TRUE, TRUE, FALSE, "x11", getuid());
+    g_autoptr(GVariant) inactive = login_fixture(FALSE, FALSE, FALSE, "wayland", getuid());
+    g_autoptr(GVariant) tty = login_fixture(TRUE, FALSE, FALSE, "tty", getuid());
+    g_autoptr(GVariant) other = login_fixture(TRUE, FALSE, FALSE, "wayland", getuid() + 1);
+    g_assert_true(login_properties_eligible(eligible));
+    g_assert_false(login_properties_eligible(locked));
+    g_assert_false(login_properties_eligible(remote));
+    g_assert_false(login_properties_eligible(inactive));
+    g_assert_false(login_properties_eligible(tty));
+    g_assert_false(login_properties_eligible(other));
+}
+
 static void test_session_reuses_authenticated_transport(void)
 {
     const char *const argv[] = {test_executable, "--fixture", "session", NULL};
@@ -604,6 +668,7 @@ int main(int argc, char **argv)
     g_autoptr(GError) error = NULL;
     g_assert_true(g_application_register(G_APPLICATION(test_app.application), NULL, &error));
     activate(G_APPLICATION(test_app.application), &test_app);
+    test_app.usb_automatic = TRUE;
     g_test_add_func("/ui/window/all-pages", test_window);
     g_test_add_func("/ui/window/group-text-escaping", test_group_text_escaping);
     g_test_add_func("/ui/window/accounts-panel-entry", test_accounts_entry);
@@ -617,6 +682,8 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/status/large-profile-and-device-records", test_large_data_records);
     g_test_add_func("/ui/usb/prompt-deduplication-and-cancel", test_usb_prompt_deduplication_and_cancel);
     g_test_add_func("/ui/usb/approval-bound-before-authentication", test_usb_approval_is_bound_before_authentication);
+    g_test_add_func("/ui/usb/profile-and-remembered-decisions", test_usb_profile_and_remembered_decisions);
+    g_test_add_func("/ui/session/local-unlocked-graphical-owner", test_login_requires_local_unlocked_graphical_owner);
     g_test_add_func("/ui/session/reuses-authenticated-transport", test_session_reuses_authenticated_transport);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);

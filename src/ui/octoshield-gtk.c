@@ -811,6 +811,10 @@ static void session_revoke(App *app, const char *reason)
          * confirmed mutation and denies every pending/future confirmation. */
         if (session->writing == NULL) g_output_stream_close(session->input, NULL, NULL);
     }
+    if (app->shutting_down) {
+        if (app->pending_request != NULL) { request_free(app->pending_request); app->pending_request = NULL; }
+        return;
+    }
     if (app->access_status != NULL) gtk_label_set_text(app->access_status, reason);
     if (app->usb_prompt != NULL) adw_message_dialog_response(app->usb_prompt, "block");
     if (app->pending_request != NULL) { request_free(app->pending_request); app->pending_request = NULL; }
@@ -880,6 +884,7 @@ static void session_event(Session *session)
     if (g_str_equal(type, "ready")) {
         if (session->ready || session->closed) { session_revoke(app, "Unexpected administrator response."); return; }
         session->ready = TRUE;
+        app->usb_review_launch = FALSE;
         app->local_session_ready = TRUE; /* Broker independently verified logind. */
         if (app->access_status != NULL) gtk_label_set_text(app->access_status, "Administrator session unlocked. Lock or close OctoShield to end it.");
         update_actions(app);
@@ -969,8 +974,7 @@ static void session_maybe_finish(Session *session)
     g_byte_array_unref(session->line);
     g_object_unref(session->process);
     g_free(session);
-    update_actions(app);
-    maybe_prompt_usb(app);
+    if (!app->shutting_down) { update_actions(app); maybe_prompt_usb(app); }
 }
 
 static void session_waited(GObject *source, GAsyncResult *result, gpointer data)
@@ -1019,6 +1023,7 @@ static void login_changed(GDBusProxy *proxy, GVariant *changed, const gchar *con
 {
     (void)changed; (void)invalidated;
     App *app = data;
+    if (app->shutting_down) return;
     g_autoptr(GVariant) remote = g_dbus_proxy_get_cached_property(proxy, "Remote");
     g_autoptr(GVariant) locked = g_dbus_proxy_get_cached_property(proxy, "LockedHint");
     g_autoptr(GVariant) type = g_dbus_proxy_get_cached_property(proxy, "Type");
@@ -1041,6 +1046,7 @@ static void login_proxy_ready(GObject *source, GAsyncResult *result, gpointer da
     App *app = data;
     app->login_session = g_dbus_proxy_new_for_bus_finish(result, NULL);
     if (app->login_session == NULL) return;
+    if (app->shutting_down) { g_clear_object(&app->login_session); return; }
     g_signal_connect(app->login_session, "g-properties-changed", G_CALLBACK(login_changed), app);
     login_changed(app->login_session, NULL, NULL, app);
 }
@@ -1144,7 +1150,7 @@ static void login_bus_ready(GObject *source, GAsyncResult *result, gpointer data
 {
     (void)source;
     g_autoptr(GDBusConnection) connection = g_bus_get_finish(result, NULL);
-    if (connection == NULL) return;
+    if (connection == NULL || ((App *)data)->shutting_down) return;
     g_dbus_connection_call(connection, "org.freedesktop.login1", "/org/freedesktop/login1",
         "org.freedesktop.login1.Manager", "GetSessionByPID", g_variant_new("(u)", (guint)getpid()),
         G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, NULL, login_session_found, data);
@@ -1748,15 +1754,26 @@ static void show_usb_prompt(UsbDevice *device)
         app->smoke_test || !usb_device_current(app, device)) return;
     g_autofree gchar *key = usb_decision_key(device);
     g_hash_table_add(app->usb_decisions, g_strdup(key));
-    GtkWidget *dialog = adw_message_dialog_new(app->window, "Allow this USB device?", NULL);
-    g_autofree gchar *body = g_strdup_printf("%s\n%s\n\nUSB profile: %s\n\nKeep it blocked unless you expected this device. Device names are supplied by the hardware and do not prove its identity.", device->name, device->identity, device->profile);
+    gboolean already_allowed = g_str_equal(device->state, "allowed");
+    GtkWidget *dialog = adw_message_dialog_new(app->window, already_allowed ? "Remember this USB device?" : "Allow this USB device?", NULL);
+    g_autofree gchar *body = g_strdup_printf("%s\n%s\n\nUSB profile: %s\n\n%s Device names are supplied by the hardware and do not prove its identity.", device->name, device->identity, device->profile,
+        already_allowed ? "This device is currently allowed. Remember it only if you trust it in this profile." : "Keep it blocked unless you expected this device.");
     adw_message_dialog_set_body(ADW_MESSAGE_DIALOG(dialog), body);
-    GtkWidget *explanation = text_label("Allow once lasts until disconnect, a USB profile change or a USBGuard restart. Remember saves permission only in this USB profile.", "dim-label");
+    const char *scope = device->remembered ?
+        "This profile already remembers this device. Allow now resumes access; use Forget in the device list to remove its saved permission." : already_allowed ?
+        "Remember saves permission in this USB profile, so it applies when the device reconnects here. Other profiles receive no permission." :
+        "Allow once lasts until disconnect, a USB profile change or a USBGuard restart. Remember saves permission only in this USB profile.";
+    GtkWidget *explanation = text_label(scope, "dim-label");
     adw_message_dialog_set_extra_child(ADW_MESSAGE_DIALOG(dialog), explanation);
-    adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "block", "Keep blocked", "once", "Allow once", "profile", "Remember in profile", NULL);
+    if (already_allowed)
+        adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "block", "Cancel", "profile", "Remember in profile", NULL);
+    else {
+        adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "block", "Keep blocked", "once", device->remembered ? "Allow now" : "Allow once", "profile", "Remember in profile", NULL);
+        adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "once", ADW_RESPONSE_SUGGESTED);
+        adw_message_dialog_set_response_enabled(ADW_MESSAGE_DIALOG(dialog), "profile", !device->remembered);
+    }
     adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "block");
     adw_message_dialog_set_close_response(ADW_MESSAGE_DIALOG(dialog), "block");
-    adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "once", ADW_RESPONSE_SUGGESTED);
     app->usb_prompt = ADW_MESSAGE_DIALOG(dialog);
     UsbDevice *copy = usb_device_copy(device);
     g_object_set_data_full(G_OBJECT(dialog), "usb-device", copy, usb_device_free);
@@ -1767,7 +1784,7 @@ static void show_usb_prompt(UsbDevice *device)
 
 static void maybe_prompt_usb(App *app)
 {
-    if (!app->usb_automatic || app->shutting_down || app->usb_inventory_rows == NULL || app->usb_prompt != NULL || !app->local_session_ready ||
+    if ((!administrator_ready(app) && !app->usb_review_launch) || !app->usb_automatic || app->shutting_down || app->usb_inventory_rows == NULL || app->usb_prompt != NULL || !app->local_session_ready ||
         !app->usb_cache_valid || app->operation != NULL || app->preview != NULL || app->pending_request != NULL ||
         (app->session != NULL && !app->session->ready) || app->smoke_test) return;
     for (guint i = 0; i < app->usb_inventory_rows->len; i++) {
@@ -1791,6 +1808,8 @@ static void usb_revoke_clicked(GtkButton *button, gpointer data)
     App *app = device->app;
     if (!usb_device_current(app, device)) { toast(app, "Refresh the device list before changing this device"); return; }
     const char *mode = g_object_get_data(G_OBJECT(button), "usb-mode");
+    g_autofree gchar *key = usb_decision_key(device);
+    g_hash_table_add(app->usb_decisions, g_strdup(key));
     const char *args[] = {"usb", "revoke", device->id, device->token, device->profile, mode};
     start_action(app, g_str_equal(mode, "forget") ? "Forget USB approval" : "Block USB device", NULL, TRUE, TRUE, G_N_ELEMENTS(args), args);
 }
@@ -1877,6 +1896,7 @@ static void show_usb_devices(App *app, JsonArray *devices)
             GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
             if (blocked) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Review…", NULL));
             if (allowed) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Block…", "block"));
+            if (allowed && !device->remembered) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Remember…", NULL));
             if (device->remembered) gtk_box_append(GTK_BOX(buttons), usb_row_button(device, "Forget…", "forget"));
             adw_action_row_add_suffix(ADW_ACTION_ROW(row), buttons);
         }
@@ -2000,7 +2020,7 @@ static JsonNode *read_observation_cache(const char *filename, gint64 max_age)
 static gboolean refresh_status(gpointer data)
 {
     App *app = data;
-    if (app->status_rows == NULL) return G_SOURCE_CONTINUE;
+    if (app->shutting_down || app->status_rows == NULL) return G_SOURCE_CONTINUE;
     g_autoptr(JsonNode) root = read_observation_cache("status.json", 90);
     if (root != NULL && json_object_get_int_member(json_node_get_object(root), "checked_at") < app->status_not_before)
         g_clear_pointer(&root, json_node_unref);
@@ -2280,7 +2300,10 @@ static void build_usb(App *app)
     group_add(alerts, action_row(app, "notify-enable", "Enable alerts…", "preferences-system-notifications-symbolic"));
     GtkWidget *group = group_new(page, "Connected hardware", "Device state refreshes automatically. Review a blocked device to allow it once or remember it in this USB profile. Refresh never asks for another password during this administrator session.");
     group_add(group, status_row(app, "controls", "usb", "USB authorization"));
-    group_add(group, action_row(app, "usb-list", "Refresh", "view-refresh-symbolic"));
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    g_signal_connect(refresh, "clicked", G_CALLBACK(refresh_clicked), app);
+    g_ptr_array_add(app->operation_widgets, refresh);
+    group_add(group, control_row("Refresh device state", "Reads the latest observation without another administrator request.", refresh));
     app->usb_devices = GTK_LIST_BOX(gtk_list_box_new());
     gtk_list_box_set_selection_mode(app->usb_devices, GTK_SELECTION_NONE);
     gtk_widget_add_css_class(GTK_WIDGET(app->usb_devices), "boxed-list");
