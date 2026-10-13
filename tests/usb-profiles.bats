@@ -490,7 +490,8 @@ setup() {
 }
 
 @test "device display strips bidi overrides and C1 controls from human labels" {
-    printf '8: block id 5678:ef01 name "Office\u202e USB\u0085 disk" hash "storagehash" via-port "1-2"\n' >"$TEST_DEVICES"
+    # UTF-8 byte escapes also exercise real Unicode when the test locale is C.
+    printf '8: block id 5678:ef01 name "Office\342\200\256 USB\302\205 disk" hash "storagehash" via-port "1-2"\n' >"$TEST_DEVICES"
     run usb::devices_json
     [ "$status" -eq 0 ]
     jq -e '.[0].name == "Office USB disk" and .[0].label == "Office USB disk"' <<<"$output"
