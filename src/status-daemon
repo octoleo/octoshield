@@ -27,7 +27,7 @@ status_daemon::once() {
     # The maintenance marker covers dpkg file replacement, while the shared
     # flock prevents reporting the middle of an interactive profile switch.
     core::package_available >/dev/null 2>&1 || return 0
-    if declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
+    if [[ ${1:-full} == full ]] && declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
         (
             core::begin 'Reconcile expired firewall exception metadata' || exit 1
             profiles::expire
@@ -37,16 +37,31 @@ status_daemon::once() {
     exec 8>>"$CORE_STATE/lock" || return 1
     flock --shared --nonblock 8 || return 0
     core::package_available >/dev/null 2>&1 || return 0
-    status::refresh
+    if [[ ${1:-full} == usb ]]; then status::refresh_usb; else status::refresh; fi
 }
 
 case "${1:-}" in
+    --usb-once)
+        [[ $# -eq 1 ]] || exit 2
+        status_daemon::once usb
+        ;;
     --once)
         [[ $# -eq 1 ]] || exit 2
         status_daemon::once
         ;;
     '')
         [[ $# -eq 0 ]] || exit 2
+        # USB has its own short-lived snapshot. Slow firewall verification must
+        # not delay a device decision or make old firewall observations fresh.
+        (
+            while :; do
+                timeout --kill-after=1s 8s /bin/bash -p "$STATUS_SELF" --usb-once || printf 'OctoShield: USB status refresh unavailable.\n' >&2
+                sleep 2
+            done
+        ) &
+        status_usb_pid=$!
+        trap 'kill "$status_usb_pid" 2>/dev/null || :' EXIT
+        trap 'exit 0' TERM INT HUP
         while :; do
             # A maximum-size firewall can require two complete verifications
             # when expiry bookkeeping is due. The 60-second bound plus this
@@ -56,7 +71,7 @@ case "${1:-}" in
         done
         ;;
     *)
-        printf 'Usage: status-daemon [--once]\n' >&2
+        printf 'Usage: status-daemon [--once|--usb-once]\n' >&2
         exit 2
         ;;
 esac

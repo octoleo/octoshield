@@ -11,11 +11,13 @@ setup() {
     USB_STATE_DIR="$BATS_TEST_TMPDIR/state"
     USB_UNIT_DIR="$BATS_TEST_TMPDIR/units"
     USB_SYS_DIR="$BATS_TEST_TMPDIR/sys"
+    USB_PROC_DIR="$BATS_TEST_TMPDIR/proc"
     TEST_CALLS="$BATS_TEST_TMPDIR/calls"
     TEST_DEVICES="$BATS_TEST_TMPDIR/devices"
     TEST_RULE='allow id 1234:abcd hash "keyboardhash" via-port "1-1"'
     TEST_SECOND='allow id 5678:ef01 hash "storagehash" via-port "1-2"'
-    mkdir -p "$USB_CONFIG_DIR" "$USB_STATE_DIR/profiles" "$USB_UNIT_DIR" "$USB_SYS_DIR/dev/block"
+    mkdir -p "$USB_CONFIG_DIR" "$USB_STATE_DIR/profiles" "$USB_UNIT_DIR" "$USB_SYS_DIR/dev/block" "$USB_PROC_DIR/sys/kernel/random"
+    printf '11111111-2222-3333-4444-555555555555\n' >"$USB_PROC_DIR/sys/kernel/random/boot_id"
     chmod 700 "$USB_CONFIG_DIR" "$USB_STATE_DIR" "$USB_STATE_DIR/profiles"
     printf '%s\n' "$TEST_RULE" >"$USB_CONFIG_DIR/rules.conf"
     usb::_config >"$USB_CONFIG_DIR/usbguard-daemon.conf"
@@ -58,6 +60,7 @@ setup() {
     systemctl() {
         printf 'systemctl %s\n' "$*" >>"$TEST_CALLS"
         case "$1" in
+            show) printf '%s\n' "${TEST_INVOCATION:-0123456789abcdef0123456789abcdef}" ;;
             is-active) [[ ${TEST_ACTIVE:-yes} == yes ]] ;;
             restart)
                 [[ ${TEST_RESTART_FAIL:-no} != yes ]] || return 1
@@ -366,4 +369,129 @@ setup() {
     [ "$status" -eq 0 ]
     [[ $output == *'"state":"partial"'* ]]
     [[ $output == *'temporary or external device exceptions'* ]]
+}
+
+@test "attachment tokens are stable across authorization changes and omit private identities" {
+    local token changed
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    [[ $token =~ ^[a-f0-9]{64}$ ]]
+    changed=$(usb::_attachment_token 8 "8: $TEST_SECOND")
+    [ "$changed" = "$token" ]
+    run usb::devices_json
+    [ "$status" -eq 0 ]
+    jq -e --arg token "$token" '.[] | select(.id == 8) | .token == $token and .label == "USB device" and .profile == "legacy"' <<<"$output"
+    [[ $output != *storagehash* && $output != *keyboardhash* ]]
+}
+
+@test "attachment token changes for reused IDs, descriptor changes, restarts and reboots" {
+    local device token
+    device=$(usb::_device 8)
+    token=$(usb::_attachment_token 8 "$device")
+    [ "$(usb::_attachment_token 9 "9: ${device#8: }")" != "$token" ]
+    [ "$(usb::_attachment_token 8 "$device name \"Different device\"")" != "$token" ]
+    TEST_INVOCATION=abcdef0123456789abcdef0123456789
+    [ "$(usb::_attachment_token 8 "$device")" != "$token" ]
+    unset TEST_INVOCATION
+    printf '22222222-2222-3333-4444-555555555555\n' >"$USB_PROC_DIR/sys/kernel/random/boot_id"
+    [ "$(usb::_attachment_token 8 "$device")" != "$token" ]
+}
+
+@test "missing daemon invocation refuses an actionable inventory" {
+    TEST_INVOCATION=unavailable
+    run usb::devices_json
+    [ "$status" -ne 0 ]
+}
+
+@test "bound once approval keeps current profile unchanged without duplicate review" {
+    local token
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    run usb::approve 8 "$token" legacy once
+    [ "$status" -eq 0 ]
+    grep -Fx 'usbguard allow-device 8' "$TEST_CALLS"
+    run ! grep -q '^confirm\|^backup\|append-rule' "$TEST_CALLS"
+    [ ! -f "$USB_STATE_DIR/active-profile" ]
+}
+
+@test "bound remembered approval is written only to the effective USB profile" {
+    usb::profile_apply office
+    local token
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    : >"$TEST_CALLS"
+    run usb::approve 8 "$token" office profile
+    [ "$status" -eq 0 ]
+    grep -Fx "$TEST_SECOND" "$USB_STATE_DIR/profiles/office.rules"
+    [ "$(cat "$USB_STATE_DIR/legacy.rules")" = "$TEST_RULE" ]
+    run ! grep -q '^confirm' "$TEST_CALLS"
+}
+
+@test "bound approval rejects stale profile before any device or policy mutation" {
+    local token
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    run usb::approve 8 "$token" office profile
+    [ "$status" -ne 0 ]
+    [[ $output == *'device or active profile changed'* ]]
+    run ! grep -q 'allow-device\|append-rule\|^backup' "$TEST_CALLS"
+}
+
+@test "bound approval rejects replaced identity and restarted daemon before mutation" {
+    local token
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    sed -i 's/storagehash/replacedhash/' "$TEST_DEVICES"
+    run usb::approve 8 "$token" legacy once
+    [ "$status" -ne 0 ]
+    sed -i 's/replacedhash/storagehash/' "$TEST_DEVICES"
+    TEST_INVOCATION=abcdef0123456789abcdef0123456789
+    run usb::approve 8 "$token" legacy once
+    [ "$status" -ne 0 ]
+    run ! grep -q 'allow-device' "$TEST_CALLS"
+}
+
+@test "bound approval rejects invalid tokens and scopes before native operations" {
+    run usb::approve 8 invalid legacy once
+    [ "$status" -ne 0 ]
+    run usb::approve 8 "$(printf '%064d' 0)" legacy remember-all
+    [ "$status" -ne 0 ]
+    [ ! -s "$TEST_CALLS" ]
+}
+
+@test "bound approval rechecks daemon invocation immediately before authorizing" {
+    local token
+    token=$(usb::_attachment_token 8 "$(usb::_device 8)")
+    usb::_attachment_context() {
+        if [[ -f "$BATS_TEST_TMPDIR/context-read" ]]; then
+            printf 'new-invocation\n'
+        else
+            touch "$BATS_TEST_TMPDIR/context-read"
+            printf '11111111-2222-3333-4444-555555555555:0123456789abcdef0123456789abcdef\n'
+        fi
+    }
+    run usb::approve 8 "$token" legacy once
+    [ "$status" -ne 0 ]
+    run ! grep -q 'allow-device' "$TEST_CALLS"
+}
+
+@test "bound revocation keeps disruption confirmation and respects cancellation" {
+    local token
+    token=$(usb::_attachment_token 7 "$(usb::_device 7)")
+    TEST_DECLINE=yes
+    run usb::revoke 7 "$token" legacy block
+    [ "$status" -ne 0 ]
+    grep -q '^confirm Block this device' "$TEST_CALLS"
+    run ! grep -q 'block-device' "$TEST_CALLS"
+}
+
+@test "bound revocation rechecks profile after disruption confirmation" {
+    local token
+    token=$(usb::_attachment_token 7 "$(usb::_device 7)")
+    core::confirm() { printf 'office\n' >"$USB_STATE_DIR/active-profile"; }
+    run usb::revoke 7 "$token" legacy block
+    [ "$status" -ne 0 ]
+    run ! grep -q 'block-device' "$TEST_CALLS"
+}
+
+@test "device display strips bidi overrides and C1 controls from human labels" {
+    printf '8: block id 5678:ef01 name "Office\u202e USB\u0085 disk" hash "storagehash" via-port "1-2"\n' >"$TEST_DEVICES"
+    run usb::devices_json
+    [ "$status" -eq 0 ]
+    jq -e '.[0].name == "Office USB disk" and .[0].label == "Office USB disk"' <<<"$output"
 }

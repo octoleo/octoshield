@@ -86,13 +86,34 @@ fixture() {
     jq -e '.profiles.available == false and .controls.firewall.state == "unknown" and .controls.usb.state == "unknown"' <<<"$output"
 }
 
-@test 'public pending USB devices never contain identifying descriptors' {
+@test 'public USB inventory includes safe names and allowed devices without private identities' {
     usb::devices_json() {
-        printf '%s\n' '[{"id":2,"state":"blocked","name":"PRIVATE","serial":"SECRET","hash":"HASH"},{"id":3,"state":"allowed","name":"HIDDEN"},{"id":4,"state":"rejected"},{"id":-5,"state":"blocked"}]'
+        jq -cn --arg token "$(printf '%064d' 1)" '
+            {token:$token,category:"storage",profile:"office",vendor_product:"1234:abcd",port:"1-2",remembered:false} as $base |
+            [$base + {id:2,state:"blocked",name:"Office\u202e USB\n disk",serial:"SECRET",hash:"HASH"},
+             $base + {id:3,state:"allowed",name:"Allowed drive",remembered:true},
+             $base + {id:4,state:"rejected"}, $base + {id:-5,state:"blocked"},
+             $base + {id:6,state:"blocked",token:"invalid"}]'
     }
     run status::pending_devices
     [ "$status" -eq 0 ]
-    [ "$output" = '[{"id":2,"state":"blocked","label":"USB device"},{"id":4,"state":"rejected","label":"USB device"}]' ]
+    jq -e 'length == 3 and .[0].label == "Office USB disk" and .[1].state == "allowed" and .[1].remembered and .[2].label == "USB device" and all(.[]; .hash == null and .serial == null)' <<<"$output"
+    run status::collect
+    [ "$status" -eq 0 ]
+    jq -e '.usb.pending == 2 and (.usb.devices | length == 3)' <<<"$output"
+    status::validate_document <<<"$output"
+}
+
+@test 'cache validation refuses unsafe USB labels and invalid attachment tokens' {
+    local document row
+    document=$(status::collect)
+    row=$(jq -cn --arg token "$(printf '%064d' 1)" '{id:2,token:$token,state:"blocked",category:"storage",profile:"office",vendor_product:"1234:abcd",port:"1-2",remembered:false,name:"USB disk",label:"USB disk"}')
+    document=$(jq -c --argjson row "$row" '.usb.devices = [$row]' <<<"$document")
+    status::validate_document <<<"$document"
+    run status::validate_document <<<"$(jq '.usb.devices[0].token = "unbound"' <<<"$document")"
+    [ "$status" -ne 0 ]
+    run status::validate_document <<<"$(jq '.usb.devices[0].label = "USB\u202e disk"' <<<"$document")"
+    [ "$status" -ne 0 ]
 }
 
 @test 'cache rejects symlink targets and unsafe directories' {
@@ -275,4 +296,116 @@ fixture() {
     run status::collect
     [ "$status" -eq 0 ]
     jq -e '.usb.profile == "legacy" and .profiles.assignments.usb == "office"' <<<"$output"
+}
+
+usb_fixture() {
+    status::usb() { printf '{"state":"active","summary":"Verified USB policy","profile":"office","pending":1}\n'; }
+    usb::devices_json() {
+        jq -cn --arg token "$(printf '%064d' 1)" '[{id:7,token:$token,state:"blocked",category:"storage",profile:"office",vendor_product:"1234:abcd",port:"1-2",remembered:false,name:"USB disk"}]'
+    }
+    status::collect_usb >"$STATUS_DIRECTORY/usb.json"
+    chmod 0644 "$STATUS_DIRECTORY/usb.json"
+}
+
+@test 'fast USB cache is readable independently of the full inspection' {
+    usb_fixture
+    [ ! -e "$STATUS_DIRECTORY/status.json" ]
+    run status::read_usb
+    [ "$status" -eq 0 ]
+    jq -e '.schema == 1 and .usb.available and .usb.state == "active" and .usb.profile == "office" and .usb.pending == 1 and .usb.devices[0].name == "USB disk"' <<<"$output"
+}
+
+@test 'fast USB refresh never advances or replaces the full inspection' {
+    usb_fixture
+    fixture
+    local original
+    original=$(cat "$STATUS_DIRECTORY/status.json")
+    # Collector tests also run unprivileged in CI; only ownership-changing
+    # system calls are mocked, while paths and atomic replacement remain real.
+    chown() { :; }
+    if ((EUID == 0)); then status::refresh_usb; else
+        run status::refresh_usb
+        [ "$status" -ne 0 ]
+    fi
+    [ "$(cat "$STATUS_DIRECTORY/status.json")" = "$original" ]
+}
+
+@test 'fast USB cache distinguishes unavailable data from no devices' {
+    usb_fixture
+    usb::devices_json() { return 1; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    status::validate_usb_document <<<"$output"
+    jq -e '.usb.available == false and .usb.state == "unknown" and .usb.pending == 0 and (.usb.devices | length == 0)' <<<"$output"
+    usb::devices_json() { printf '[]\n'; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    jq -e '.usb.available and .usb.state == "active" and .usb.pending == 0 and (.usb.devices | length == 0)' <<<"$output"
+}
+
+@test 'inactive and unmanaged USB never expose actionable fast inventory' {
+    usb_fixture
+    status::usb() { status::result inactive 'USBGuard is not running.'; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    jq -e '.usb.available == false and .usb.state == "unknown" and (.usb.devices | length == 0)' <<<"$output"
+    status::usb() { status::result unknown 'USBGuard is not enrolled.'; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    jq -e '.usb.available == false and (.usb.devices | length == 0)' <<<"$output"
+}
+
+@test 'fast USB collection refuses invalid and mixed-profile inventories' {
+    usb_fixture
+    usb::devices_json() { printf '[{"id":7,"state":"blocked"}]\n'; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    jq -e '.usb.available == false' <<<"$output"
+    usb_fixture
+    status::usb() { printf '{"state":"active","summary":"New profile","profile":"conference"}\n'; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    jq -e '.usb.available == false and .usb.profile == "conference"' <<<"$output"
+}
+
+@test 'fast USB reader enforces its own short observation lifetime' {
+    usb_fixture
+    local document
+    document=$(jq --argjson checked "$(($(date +%s) - 11))" '.checked_at = $checked' "$STATUS_DIRECTORY/usb.json")
+    printf '%s\n' "$document" >"$STATUS_DIRECTORY/usb.json"
+    run status::read_usb
+    [ "$status" -ne 0 ]
+    usb_fixture
+    touch -d '20 seconds ago' "$STATUS_DIRECTORY/usb.json"
+    run status::read_usb
+    [ "$status" -ne 0 ]
+}
+
+@test 'fast USB reader refuses symlinks, writable files and malformed documents' {
+    usb_fixture
+    chmod 0664 "$STATUS_DIRECTORY/usb.json"
+    run status::read_usb
+    [ "$status" -ne 0 ]
+    chmod 0644 "$STATUS_DIRECTORY/usb.json"
+    mv "$STATUS_DIRECTORY/usb.json" "$STATUS_DIRECTORY/real-usb.json"
+    ln -s real-usb.json "$STATUS_DIRECTORY/usb.json"
+    run status::read_usb
+    [ "$status" -ne 0 ]
+    rm "$STATUS_DIRECTORY/usb.json"
+    printf '{"schema":1}\n' >"$STATUS_DIRECTORY/usb.json"
+    chmod 0644 "$STATUS_DIRECTORY/usb.json"
+    run status::read_usb
+    [ "$status" -ne 0 ]
+}
+
+@test 'fast USB validator refuses duplicate attachments and dishonest pending counts' {
+    usb_fixture
+    local document
+    document=$(cat "$STATUS_DIRECTORY/usb.json")
+    run status::validate_usb_document <<<"$(jq '.usb.devices += .usb.devices | .usb.pending = 2' <<<"$document")"
+    [ "$status" -ne 0 ]
+    run status::validate_usb_document <<<"$(jq '.usb.pending = 0' <<<"$document")"
+    [ "$status" -ne 0 ]
+    run status::validate_usb_document <<<"$(jq '.usb.available = false' <<<"$document")"
+    [ "$status" -ne 0 ]
 }

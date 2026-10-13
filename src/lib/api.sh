@@ -16,6 +16,11 @@ api::validate() {
             case "${2-}" in
                 list | devices) [[ $# -eq 2 ]] && return 0 ;;
                 enroll) [[ $# -eq 3 ]] && profiles::valid_name "$3" && return 0 ;;
+                approve | revoke)
+                    [[ $# -eq 6 && $4 =~ ^[a-f0-9]{64}$ ]] || return 1
+                    usb::_validate_id "$3" >/dev/null 2>&1 && profiles::valid_name "$5" || return 1
+                    case "$2:$6" in approve:once | approve:profile | revoke:block | revoke:forget) return 0 ;; esac
+                    ;;
                 allow)
                     [[ $# -eq 3 || ($# -eq 4 && $4 == --permanent) ]] || return 1
                     usb::_validate_id "$3" >/dev/null 2>&1 && return 0
@@ -44,7 +49,7 @@ api::validate() {
 api::mutates() {
     case "$1 ${2-}" in
         'profile '*) profiles::mutates "${@:2}" ;;
-        'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'monitor disable') return 0 ;;
+        'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'usb approve' | 'usb revoke' | 'monitor disable') return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -127,6 +132,8 @@ api::dispatch() {
                 list) usb::list ;;
                 devices) usb::devices_json ;;
                 enroll) usb::profile_enroll "$3" ;;
+                approve) usb::approve "${@:3}" ;;
+                revoke) usb::revoke "${@:3}" ;;
                 allow) usb::allow "${@:3}" ;;
                 block) usb::block "$3" ;;
                 forget) usb::forget "$3" ;;
@@ -164,7 +171,11 @@ api::operation() {
     # The background reader cannot take a coherent snapshot during a mutation.
     # Refresh synchronously under our existing operation lock before completion.
     if api::mutates "$@" && declare -F status::refresh >/dev/null; then
-        status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+        if [[ $1 == usb ]] && declare -F status::refresh_usb >/dev/null; then
+            status::refresh_usb >/dev/null 2>&1 || core::log 'USB status refresh failed; the background collector will retry.'
+        else
+            status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+        fi
     fi
     if api::mutates "$@"; then
         if ((result == 0)); then

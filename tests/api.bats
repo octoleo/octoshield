@@ -322,3 +322,47 @@ setup() {
     directories=("$BATS_TEST_TMPDIR"/gui.*)
     [ "${#directories[@]}" -eq 0 ]
 }
+
+@test 'bound USB decisions validate every field before creating state' {
+    local token
+    printf -v token '%064d' 0
+    for action in approve revoke; do
+        for arguments in '0' '4294967295' '--all' '7;id'; do
+            run api::main usb "$action" "$arguments" "$token" office once
+            [ "$status" -eq 2 ]
+        done
+    done
+    for invalid in short "${token}a" "${token:1}G"; do
+        run api::main usb approve 7 "$invalid" office once
+        [ "$status" -eq 2 ]
+    done
+    for profile in unmanaged '../office' 'office;id'; do
+        run api::main usb approve 7 "$token" "$profile" once
+        [ "$status" -eq 2 ]
+    done
+    run api::main usb approve 7 "$token" office forever
+    [ "$status" -eq 2 ]
+    run api::main usb revoke 7 "$token" office once
+    [ "$status" -eq 2 ]
+    run api::main usb approve 7 "$token" office once extra
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
+}
+
+@test 'bound USB decisions are serialized and refresh only the fast inventory' {
+    local token
+    printf -v token '%064d' 0
+    usb::approve() { printf 'approve %s\n' "$*" >>"$TEST_CALLS"; }
+    usb::revoke() { printf 'revoke %s\n' "$*" >>"$TEST_CALLS"; }
+    status::refresh() { printf 'unexpected full refresh\n' >>"$TEST_CALLS"; }
+    status::refresh_usb() { printf 'fast USB refresh\n' >>"$TEST_CALLS"; }
+    run api::main usb approve 7 "$token" office profile
+    [ "$status" -eq 0 ]
+    grep -Fx "begin GUI usb approve 7 $token office profile" "$TEST_CALLS"
+    grep -Fx "approve 7 $token office profile" "$TEST_CALLS"
+    grep -Fx 'fast USB refresh' "$TEST_CALLS"
+    run api::main usb revoke 7 "$token" office forget
+    [ "$status" -eq 0 ]
+    grep -Fx "revoke 7 $token office forget" "$TEST_CALLS"
+    run ! grep -F 'unexpected full refresh' "$TEST_CALLS"
+}
