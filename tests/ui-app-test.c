@@ -668,6 +668,13 @@ int main(int argc, char **argv)
     g_autoptr(GError) error = NULL;
     g_assert_true(g_application_register(G_APPLICATION(test_app.application), NULL, &error));
     activate(G_APPLICATION(test_app.application), &test_app);
+    /* Tests explicitly supply each observed state. The real host cache must
+     * not replace those fixtures while screenshots or async operations pump
+     * the main context: a timer tick would correctly dismiss the fixture's
+     * USB dialog because the runner has no corresponding connected device. */
+    g_assert_cmpuint(test_app.refresh_timer, !=, 0);
+    g_source_remove(test_app.refresh_timer);
+    test_app.refresh_timer = 0;
     test_app.usb_automatic = TRUE;
     g_test_add_func("/ui/window/all-pages", test_window);
     g_test_add_func("/ui/window/group-text-escaping", test_group_text_escaping);
