@@ -495,3 +495,34 @@ setup() {
     [ "$status" -eq 0 ]
     jq -e '.[0].name == "Office USB disk" and .[0].label == "Office USB disk"' <<<"$output"
 }
+
+@test "legacy enrollment descriptors remain remembered without rewriting native policy" {
+    local legacy='allow id 5678:ef01 serial "private-serial" name "USB disk" hash "storagehash" via-port "1-2" with-interface 08:06:50'
+    printf '%s\n' "$legacy" >"$USB_CONFIG_DIR/rules.conf"
+    printf '8: %s\n' "$legacy" >"$TEST_DEVICES"
+    run usb::devices_json
+    [ "$status" -eq 0 ]
+    jq -e '.[0].state == "allowed" and .[0].remembered and .[0].profile == "legacy"' <<<"$output"
+    [[ $output != *private-serial* && $output != *storagehash* ]]
+    [ "$(cat "$USB_CONFIG_DIR/rules.conf")" = "$legacy" ]
+    run ! grep -q 'append-rule\|allow-device\|block-device\|^backup' "$TEST_CALLS"
+}
+
+@test "legacy remembered display requires an exact vendor hash and port identity" {
+    local original='allow id 5678:ef01 name "USB disk" hash "storagehash" via-port "1-2"'
+    printf '8: %s\n' "$original" >"$TEST_DEVICES"
+    local different
+    for different in "${original/5678:ef01/1234:abcd}" "${original/storagehash/otherhash}" "${original/1-2/1-20}"; do
+        printf '%s\n' "$different" >"$USB_CONFIG_DIR/rules.conf"
+        run usb::devices_json
+        [ "$status" -eq 0 ]
+        jq -e '.[0].remembered == false' <<<"$output"
+    done
+}
+
+@test "legacy broad conditional and blocking rules cannot impersonate remembered approvals" {
+    printf 'allow\nallow id *:*\nallow id 5678:ef01 hash "storagehash" via-port "1-2" if true\nblock id 5678:ef01 hash "storagehash" via-port "1-2"\n' >"$USB_CONFIG_DIR/rules.conf"
+    run usb::devices_json
+    [ "$status" -eq 0 ]
+    jq -e 'all(.[]; .remembered == false)' <<<"$output"
+}
