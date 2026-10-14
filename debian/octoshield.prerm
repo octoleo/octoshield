@@ -10,7 +10,7 @@ maintenance_ready=false
 observer_state=unknown
 maintenance=/run/octoshield-package-maintenance
 # Registered below as an EXIT trap after validation succeeds.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 package_cleanup() {
     result=$?
     trap - EXIT HUP INT TERM
