@@ -62,6 +62,16 @@ The status cache is ephemeral at `/run/octoshield/status.json`. If it is stale, 
 
 Timed firewall permissions are runtime-only and stop permitting new connections at their kernel UTC deadline, including after uninstall. Existing established connections retain UFW's normal stateful behavior and are not forcibly terminated. A reboot or `sudo ufw reload` drops timed grants sooner while retaining permanent UFW rules. OctoShield reports that narrower state and allows explicit profile application to restore still-unexpired permissions. Expired permissions never reopen automatically during boot. Use `octoshield status` and `octoshield profile show NAME` to inspect actual state and saved deadlines, because `ufw status` alone does not list timed runtime grants. Applying a new timed grant requires a running observer for status and cleanup and kernel time-match support; unsupported matching is refused without an untimed fallback.
 
+## Operations and automatic recovery
+
+From 1.2.2, ordinary background observation no longer makes Apply immediately fail with “Another OctoShield operation is running.” A requested change closes admission to new readers, reports that it is waiting, and lets existing inspections finish before entering the normal review and confirmation flow. You do not need to keep retrying. No policy changes begin while the helper is waiting for the lock.
+
+Full inspections have a 60-second deadline and a three-second termination grace; USB-only workers have an eight-second deadline and a one-second grace. These limits also cover manual inspection and the final observation after a change. The supervisor targets only the worker it started and its descendants. The background service retries subsequent observations automatically; a failed snapshot never becomes a fresh successful observation. A writer waits at most 70 seconds for inspection locks. Finishing a CLI or GUI operation releases its locks even if its parent application remains open.
+
+An actual protection change is different from a status reader. A second change is refused while the first is running or waiting for your confirmation. Complete or decline that confirmation in the original window. The application does not kill another administrator's operation, terminate APT/dpkg mid-transaction, or delete lock files to pretend that a lock was released. If an unexpected external or older helper still owns the state after the bounded wait, the refusal explicitly says that the new change did not start. The existing operation remains intact for diagnosis.
+
+Do not stop the status service as a routine workaround: temporary firewall permissions need the enabled, running observer. Upgrading the application preserves the existing native policy, profile choices and USB permissions. After an upgrade, reopen the app and unlock a new administrator session.
+
 ## Graphical startup and authentication
 
 Start `octoshield-gtk` as the normal logged-in GNOME user to see startup diagnostics. Do not run the application with `sudo`. A package built for another Ubuntu release or CPU architecture is not a supported workaround for missing runtime libraries; install the matching build with APT.
