@@ -115,7 +115,7 @@ api::inspect() (
         # A manual refresh has the same deadline as background inspection.
         # timeout supervises only this read-only child and its descendants; it
         # never signals an administrator's protection change or guessed PID.
-        timeout --kill-after=3s 60s /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --inspect || result=$?
+        core::timeout --kill-after=3s 60s /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --inspect || result=$?
         case "$result" in
             0) ;;
             75)
@@ -177,6 +177,7 @@ api::operation() {
     core::require_root || return 1
     core::supported_os || return 1
     if api::mutates "$@"; then
+        core::timeout_program >/dev/null || return 1
         core::begin "GUI $*" || return 1
         API_CHANGE_STARTED=true
     fi

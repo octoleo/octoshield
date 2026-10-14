@@ -87,7 +87,10 @@ cli::system() {
     fi
     core::supported_os || return 1
     if [[ $1 != office-system ]]; then api::validate "$@" || return 2; fi
-    if [[ $1 == office-system ]] || api::mutates "$@"; then core::begin "$*" || return 1; fi
+    if [[ $1 == office-system ]] || api::mutates "$@"; then
+        core::timeout_program >/dev/null || return 1
+        core::begin "$*" || return 1
+    fi
     local result=0
     case "$1" in
         office-system) cli::office_system || result=$? ;;

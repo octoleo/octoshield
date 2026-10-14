@@ -39,6 +39,9 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends ca-certificates curl git build-essential shellcheck shfmt bats jq python3 apt-utils gnupg util-linux ufw debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils appstream xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+          if [ '${{ matrix.ubuntu }}' = 26.04 ]; then
+            apt-get install --yes --no-install-recommends gnu-coreutils
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -127,6 +130,9 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends ca-certificates curl jq util-linux ufw systemd
+          if [ '${{ matrix.ubuntu }}' = 26.04 ]; then
+            apt-get install --yes --no-install-recommends gnu-coreutils
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false

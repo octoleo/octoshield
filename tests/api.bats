@@ -52,6 +52,14 @@ setup() {
     jq -e -s 'length == 2 and .[-1] == {type:"done",success:false}' <<<"$output"
 }
 
+@test 'missing GNU supervision refuses a mutation before its transaction starts' {
+    core::timeout_program() { return 1; }
+    run api::main apply firewall
+    [ "$status" -ne 0 ]
+    [ ! -s "$TEST_CALLS" ]
+    jq -e -s '.[-1] == {type:"done",success:false,change_started:false}' <<<"$output"
+}
+
 @test 'profile helper validates every structured field before any mutation' {
     run api::main profile rule-add conference 443 tcp any 'wlan0;id' 30
     [ "$status" -eq 2 ]

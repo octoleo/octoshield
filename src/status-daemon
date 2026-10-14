@@ -103,7 +103,7 @@ case "${1:-}" in
         # not delay a device decision or make old firewall observations fresh.
         (
             while :; do
-                timeout --kill-after=1s 8s /bin/bash -p "$STATUS_SELF" --usb-once || printf 'OctoShield: USB status refresh unavailable.\n' >&2
+                core::timeout --kill-after=1s 8s /bin/bash -p "$STATUS_SELF" --usb-once || printf 'OctoShield: USB status refresh unavailable.\n' >&2
                 sleep 2
             done
         ) &
@@ -114,7 +114,7 @@ case "${1:-}" in
             # A maximum-size firewall can require two complete verifications
             # when expiry bookkeeping is due. The 60-second bound plus this
             # loop's 15-second pause stays within the 90-second cache lifetime.
-            timeout --kill-after=3s 60s /bin/bash -p "$STATUS_SELF" --once || printf 'OctoShield: live status refresh failed; the previous cache will become stale.\n' >&2
+            core::timeout --kill-after=3s 60s /bin/bash -p "$STATUS_SELF" --once || printf 'OctoShield: live status refresh failed; the previous cache will become stale.\n' >&2
             sleep 15
         done
         ;;

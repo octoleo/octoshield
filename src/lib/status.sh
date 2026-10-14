@@ -11,7 +11,9 @@ STATUS_ETC=/etc
 STATUS_SYS=/sys
 STATUS_PROC=/proc
 
-status::run() { timeout --kill-after=1s 6s env LC_ALL=C "$@" 2>/dev/null; }
+# Native probes stay in their observer's supervised group and never inherit
+# its locks. A probe descendant must not retain a lock after its observer exits.
+status::run() { core::timeout --foreground --kill-after=1s 6s env LC_ALL=C "$@" 6>&- 8>&- 9>&- 2>/dev/null; }
 
 status::result() {
     jq -cn --arg state "$1" --arg summary "$2" '{state:$state,summary:$summary}'

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # shellcheck disable=SC2030,SC2031,SC2317,SC2329
 setup() {
+    source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/status.sh"
     STATUS_DIRECTORY="$BATS_TEST_TMPDIR/run"
     STATUS_ETC="$BATS_TEST_TMPDIR/etc"
@@ -28,6 +29,26 @@ setup() {
     status::forwarding() { status::result partial 'Forwarding enabled'; }
     status::network_snapshot() { printf '{"connected_count":1,"fingerprint":"%064d"}\n' 0; }
     usb::devices_json() { printf '[]\n'; }
+}
+
+@test 'native status probes keep the observer process group without inheriting operation locks' {
+    exec 6>"$BATS_TEST_TMPDIR/admission" 8>"$BATS_TEST_TMPDIR/reader" 9>"$BATS_TEST_TMPDIR/writer"
+    core::timeout() {
+        [[ $1 == --foreground && $2 == --kill-after=1s && $3 == 6s && $4 == env && $5 == LC_ALL=C ]] || return 99
+        local descriptor
+        for descriptor in 6 8 9; do
+            if { : >&"$descriptor"; } 2>/dev/null; then return 98; fi
+        done
+        printf '%s\n' "${@:6}"
+    }
+    run status::run systemctl show 'unit with spaces'
+    [ "$status" -eq 0 ]
+    [ "$output" = $'systemctl\nshow\nunit with spaces' ]
+    # Redirections affect only the probe; its observer still owns its locks.
+    : >&6
+    : >&8
+    : >&9
+    exec 6>&- 8>&- 9>&-
 }
 
 @test 'background status uses the canonical CLI version without a second version constant' {

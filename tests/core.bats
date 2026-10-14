@@ -83,6 +83,29 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test 'status supervisor selects a fixed GNU binary and ignores a hostile PATH timeout' {
+    local selected
+    selected=$(core::timeout_program)
+    if [[ -x /usr/bin/gnutimeout ]]; then
+        [ "$selected" = /usr/bin/gnutimeout ]
+    else
+        [ "$selected" = /usr/bin/timeout ]
+    fi
+    [[ $(LC_ALL=C "$selected" --version) == *'(GNU coreutils)'* ]]
+    mkdir "$BATS_TEST_TMPDIR/hostile"
+    printf '#!/bin/sh\nexit 99\n' >"$BATS_TEST_TMPDIR/hostile/timeout"
+    chmod 0755 "$BATS_TEST_TMPDIR/hostile/timeout"
+    PATH="$BATS_TEST_TMPDIR/hostile:$PATH" run core::timeout 1s /bin/true
+    [ "$status" -eq 0 ]
+}
+
+@test 'supervision refuses to launch a child when a GNU supervisor is unavailable' {
+    core::timeout_program() { return 1; }
+    run core::timeout 1s /usr/bin/touch "$BATS_TEST_TMPDIR/unexpected-child"
+    [ "$status" -eq 125 ]
+    [ ! -e "$BATS_TEST_TMPDIR/unexpected-child" ]
+}
+
 @test 'backup preserves the first file value within a transaction' {
     local file="$BATS_TEST_TMPDIR/config"
     printf 'original' >"$file"

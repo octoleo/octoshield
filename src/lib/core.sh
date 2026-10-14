@@ -211,6 +211,29 @@ core::try_begin() {
     exec 6>&-
 }
 
+# Ubuntu 26.04 also ships Rust timeout, whose KILL escalation can leave child
+# processes holding locks. Use the side-by-side GNU utility without changing
+# system alternatives. Never select a supervisor from caller-controlled PATH.
+core::timeout_program() {
+    local candidate version
+    for candidate in /usr/bin/gnutimeout /usr/bin/timeout; do
+        [[ -x $candidate ]] || continue
+        version=$(LC_ALL=C "$candidate" --version 2>/dev/null) || continue
+        if [[ $version == *'(GNU coreutils)'* ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    core::die 'GNU timeout is required for safe status supervision. Repair the OctoShield package dependencies before changing protections.'
+    return 1
+}
+
+core::timeout() {
+    local supervisor
+    supervisor=$(core::timeout_program) || return 125
+    "$supervisor" "$@"
+}
+
 # A completed change must not keep the writer lock indefinitely merely because
 # its final status query stalls. The trusted child validates the inherited
 # locks and only observes state; the parent retains both locks until it returns.
@@ -221,7 +244,7 @@ core::refresh_status() {
         usb) deadline=8s grace=1s ;;
         *) return 2 ;;
     esac
-    timeout --kill-after="$grace" "$deadline" /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --after-change "$1"
+    core::timeout --kill-after="$grace" "$deadline" /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --after-change "$1"
 }
 
 core::record() {
