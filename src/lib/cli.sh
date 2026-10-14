@@ -95,17 +95,20 @@ cli::system() {
     esac
     if [[ $1 == office-system ]] || api::mutates "$@"; then
         if declare -F status::refresh >/dev/null; then
-            status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+            core::refresh_status full >/dev/null 2>&1 || core::log 'Live status refresh failed or timed out; the background collector will retry.'
         fi
     fi
     if [[ $1 != office-system ]] && ! api::mutates "$@"; then return "$result"; fi
     if ((result == 0)); then
-        core::record 'COMPLETE'
+        core::record 'COMPLETE' || result=1
         core::log "Saved change record: $CORE_STATE/backups/$CORE_TRANSACTION"
     else
-        core::record "FAILED exit=$result; inspect changes before retrying"
+        core::record "FAILED exit=$result; inspect changes before retrying" || :
         core::log "Operation failed; inspect $CORE_STATE/backups/$CORE_TRANSACTION and run octoshield recovery."
     fi
+    # A root-owned Whiptail menu can outlive one action. Release its locks when
+    # that action completes instead of blocking every other app while idle.
+    core::end
     return "$result"
 }
 

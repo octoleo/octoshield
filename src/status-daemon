@@ -23,31 +23,79 @@ for status_module in core controls usb monitor office profiles profile_firewall_
 done
 unset status_module
 
-status_daemon::once() {
+# Keep the supervised shell alive until timeout's KILL grace expires. Otherwise
+# a TERM-resistant descendant could outlive a shell that exits immediately and
+# retain its inherited read lock after timeout stops supervising the group.
+# shellcheck disable=SC2317,SC2329
+status_daemon::interrupted() {
+    trap '' TERM
+    while :; do sleep 1; done
+}
+
+status_daemon::after_change() {
+    local mode=$1 gate="$CORE_STATE/lock-admission" lock="$CORE_STATE/lock" actual expected descriptor
+    core::package_available || return 1
+    core::private_directory "$CORE_STATE" && core::safe_lock "$gate" && core::safe_lock "$lock" || return 1
+    for descriptor in 6 9; do
+        if [[ $descriptor == 6 ]]; then expected=$gate; else expected=$lock; fi
+        actual=$(stat -Lc '%d:%i' -- "/dev/fd/$descriptor") || return 1
+        [[ $actual == "$(stat -c '%d:%i' -- "$expected")" ]] || return 1
+        # An inherited lock's open description is already exclusive, so this
+        # cannot block or unlock the parent. Unrelated descriptors fail closed.
+        flock --exclusive --nonblock "$descriptor" || return 1
+    done
+    if [[ $mode == usb ]]; then status::refresh_usb; else status::refresh; fi
+}
+
+status_daemon::once() (
+    local mode=${1:-full} result=0
     # The maintenance marker covers dpkg file replacement, while the shared
     # flock prevents reporting the middle of an interactive profile switch.
-    core::package_available >/dev/null 2>&1 || return 0
-    if [[ ${1:-full} == full ]] && declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
-        (
-            core::begin 'Reconcile expired firewall exception metadata' || exit 1
-            profiles::expire
-        ) || printf 'OctoShield: firewall expiry metadata reconciliation failed; review the active profile. Kernel-enforced deadlines remain independent of this collector.\n' >&2
+    if [[ $mode == inspect ]]; then
+        core::package_available || return 1
+    else
+        core::package_available >/dev/null 2>&1 || return 0
     fi
-    core::private_directory "$CORE_STATE" && core::safe_lock "$CORE_STATE/lock" || return 1
-    exec 8>>"$CORE_STATE/lock" || return 1
-    flock --shared --nonblock 8 || return 0
-    core::package_available >/dev/null 2>&1 || return 0
-    if [[ ${1:-full} == usb ]]; then status::refresh_usb; else status::refresh; fi
-}
+    if [[ $mode == full ]] && declare -F profiles::expiry_due >/dev/null && profiles::expiry_due; then
+        (
+            core::try_begin 'Reconcile expired firewall exception metadata' || exit "$?"
+            profiles::expire
+        ) || result=$?
+        if ((result != 0 && result != 75)); then
+            printf 'OctoShield: firewall expiry metadata reconciliation failed; review the active profile. Kernel-enforced deadlines remain independent of this collector.\n' >&2
+        fi
+    fi
+    result=0
+    core::read_begin || result=$?
+    if ((result != 0)); then
+        if ((result == 75)) && [[ $mode != inspect ]]; then return 0; fi
+        return "$result"
+    fi
+    if [[ $mode == usb ]]; then status::refresh_usb; else status::refresh; fi
+)
 
 case "${1:-}" in
     --usb-once)
         [[ $# -eq 1 ]] || exit 2
+        trap 'status_daemon::interrupted' TERM
         status_daemon::once usb
         ;;
     --once)
         [[ $# -eq 1 ]] || exit 2
+        trap 'status_daemon::interrupted' TERM
         status_daemon::once
+        ;;
+    --inspect)
+        [[ $# -eq 1 ]] || exit 2
+        trap 'status_daemon::interrupted' TERM
+        # Explicit inspection is read-only: expiry metadata reconciliation is
+        # reserved for the background pass. Its caller supplies the deadline.
+        status_daemon::once inspect
+        ;;
+    --after-change)
+        [[ $# -eq 2 && ($2 == full || $2 == usb) ]] || exit 2
+        trap 'status_daemon::interrupted' TERM
+        status_daemon::after_change "$2"
         ;;
     '')
         [[ $# -eq 0 ]] || exit 2
@@ -71,7 +119,7 @@ case "${1:-}" in
         done
         ;;
     *)
-        printf 'Usage: status-daemon [--once|--usb-once]\n' >&2
+        printf 'Usage: status-daemon [--once|--usb-once|--inspect|--after-change full|usb]\n' >&2
         exit 2
         ;;
 esac

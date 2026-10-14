@@ -129,7 +129,7 @@ setup() {
     [ "$status" -eq 0 ]
     jq -e -s '.[0] == {type:"log",text:"exact firewall review"} and
       .[1] == {type:"confirm",id:1,text:"Apply firewall?"} and
-      .[-1] == {type:"done",success:true}' <<<"$output"
+      .[-1] == {type:"done",success:true,change_started:true}' <<<"$output"
     grep -Fx 'firewall mutation' "$TEST_CALLS"
     grep -Fx 'record COMPLETE' "$TEST_CALLS"
 }
@@ -139,7 +139,7 @@ setup() {
         : >"$TEST_CALLS"
         run api::main apply firewall <<<"$reply"
         [ "$status" -ne 0 ]
-        jq -e -s '.[-1] == {type:"done",success:false}' <<<"$output"
+        jq -e -s '.[-1] == {type:"done",success:false,change_started:true}' <<<"$output"
         run ! grep -q 'firewall mutation' "$TEST_CALLS"
     done
     run api::main apply firewall </dev/null
@@ -298,9 +298,33 @@ setup() {
     run api::main apply firewall <<<'1 yes'
     [ "$status" -ne 0 ]
     [ ! -s "$TEST_CALLS" ]
+    jq -e -s '.[-1] == {type:"done",success:false,change_started:false}' <<<"$output"
     core::require_root() { return 1; }
     run api::main status
     [ "$status" -ne 0 ]
+}
+
+@test 'lock refusal reports no started change and never dispatches or refreshes' {
+    core::begin() { core::die 'A protection change is running or waiting.'; }
+    core::refresh_status() { printf 'unexpected refresh\n' >>"$TEST_CALLS"; }
+    run api::main apply firewall <<<'1 yes'
+    [ "$status" -ne 0 ]
+    jq -e -s '.[-1] == {type:"done",success:false,change_started:false}' <<<"$output"
+    [ ! -s "$TEST_CALLS" ]
+}
+
+@test 'a failed started operation retains partial-change context after releasing its locks' {
+    controls::apply_firewall() { return 1; }
+    run api::main apply firewall
+    [ "$status" -ne 0 ]
+    jq -e -s '.[-1] == {type:"done",success:false,change_started:true}' <<<"$output"
+    grep -Fx 'record FAILED exit=1; inspect changes before retrying' "$TEST_CALLS"
+}
+
+@test 'read-only completion does not claim to know mutation state' {
+    run api::main profile list
+    [ "$status" -eq 0 ]
+    jq -e -s '.[-1] | has("change_started") | not' <<<"$output"
 }
 
 @test 'private runtime captures are removed after operation' {
@@ -356,6 +380,9 @@ setup() {
     usb::revoke() { printf 'revoke %s\n' "$*" >>"$TEST_CALLS"; }
     status::refresh() { printf 'unexpected full refresh\n' >>"$TEST_CALLS"; }
     status::refresh_usb() { printf 'fast USB refresh\n' >>"$TEST_CALLS"; }
+    core::refresh_status() {
+        if [[ $1 == usb ]]; then status::refresh_usb; else status::refresh; fi
+    }
     run api::main usb approve 7 "$token" office profile
     [ "$status" -eq 0 ]
     grep -Fx "begin GUI usb approve 7 $token office profile" "$TEST_CALLS"

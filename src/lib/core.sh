@@ -86,29 +86,142 @@ core::safe_lock() {
     fi
 }
 
-core::begin() {
+# Readers hold the admission lock only while acquiring their shared operation
+# lock. A writer keeps admission exclusive while existing readers drain and
+# throughout its transaction, so repeated background refreshes cannot starve it.
+# Descriptors 6, 8 and 9 are reserved for admission, reading and writing here.
+core::read_end() { exec 8>&-; }
+
+core::end() {
+    exec 9>&- 6>&-
+    CORE_TRANSACTION=
+}
+
+core::read_begin() {
+    local result=0
+    core::require_root || return 1
+    core::package_available || return 1
+    umask 077
+    if ! core::private_directory "$CORE_STATE" || ! core::safe_lock "$CORE_STATE/lock" ||
+        ! core::safe_lock "$CORE_STATE/lock-admission"; then
+        core::die 'State and locks must be private root-owned paths without symlinks or shared links.'
+        return 1
+    fi
+    exec 6>>"$CORE_STATE/lock-admission" || return 1
+    flock --shared --nonblock --conflict-exit-code 75 6 || result=$?
+    if ((result != 0)); then
+        exec 6>&-
+        if ((result == 75)); then return 75; fi
+        core::die 'Cannot acquire the status admission lock.'
+        return 1
+    fi
+    if ! exec 8>>"$CORE_STATE/lock"; then
+        exec 6>&-
+        return 1
+    fi
+    flock --shared --nonblock --conflict-exit-code 75 8 || result=$?
+    # Do not retain shared admission while inspecting: the next writer must be
+    # able to close admission to new readers immediately.
+    exec 6>&-
+    if ((result != 0)); then
+        core::read_end
+        if ((result == 75)); then return 75; fi
+        core::die 'Cannot acquire the status operation lock.'
+        return 1
+    fi
+    if ! core::package_available; then
+        core::read_end
+        return 1
+    fi
+}
+
+core::_begin() {
+    local admission_wait=$1 reader_wait=$2 result=0
+    shift 2
     core::require_root || return 1
     core::package_available || return 1
     umask 077
     if ! core::private_directory "$CORE_STATE" || ! core::private_directory "$CORE_STATE/backups" ||
-        ! core::safe_lock "$CORE_STATE/lock"; then
-        core::die 'State, backups and lock must be private root-owned paths without symlinks or shared links.'
+        ! core::safe_lock "$CORE_STATE/lock" || ! core::safe_lock "$CORE_STATE/lock-admission"; then
+        core::die 'State, backups and locks must be private root-owned paths without symlinks or shared links.'
         return 1
     fi
-    exec 9>"$CORE_STATE/lock" || return 1
-    flock -n 9 || {
-        core::die 'Another OctoShield operation is running.'
+    exec 6>>"$CORE_STATE/lock-admission" || return 1
+    flock --exclusive --wait "$admission_wait" --conflict-exit-code 75 6 || result=$?
+    if ((result != 0)); then
+        exec 6>&-
+        if ((result == 75)); then
+            if [[ $admission_wait != 0 ]]; then
+                core::die 'Another OctoShield protection change is running or waiting. No changes were started.'
+            fi
+            return 75
+        fi
+        core::die 'Cannot acquire the protection admission lock.'
         return 1
-    }
+    fi
+    if ! core::package_available || ! exec 9>>"$CORE_STATE/lock"; then
+        core::end
+        return 1
+    fi
+    flock --exclusive --nonblock --conflict-exit-code 75 9 || result=$?
+    if ((result == 75)) && [[ $reader_wait != 0 ]]; then
+        core::log 'Waiting for the current system inspection to finish. New background inspections are paused; no changes have started.' || {
+            core::end
+            return 1
+        }
+        result=0
+        flock --exclusive --wait "$reader_wait" --conflict-exit-code 75 9 || result=$?
+    fi
+    if ((result != 0)); then
+        core::end
+        if ((result == 75)); then
+            if [[ $reader_wait != 0 ]]; then
+                core::die 'System state is still in use after waiting. No changes were started; the current operation has been left intact.'
+            fi
+            return 75
+        fi
+        core::die 'Cannot acquire the protection operation lock.'
+        return 1
+    fi
     # A package operation may have acquired the same lock after our first check.
     # Its marker outlives the maintainer script while dpkg replaces program files.
     if ! core::package_available; then
-        exec 9>&-
+        core::end
         return 1
     fi
     CORE_TRANSACTION="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    install -d -m 0700 "$CORE_STATE/backups/$CORE_TRANSACTION/original" || return 1
-    core::record "BEGIN $*"
+    if ! install -d -m 0700 "$CORE_STATE/backups/$CORE_TRANSACTION/original" || ! core::record "BEGIN $*"; then
+        core::end
+        return 1
+    fi
+}
+
+# Full background inspections are supervised for at most 60 seconds, with a
+# three-second kill grace. Leave time for their descriptors to drain normally.
+core::begin() { core::_begin 1 70 "$@"; }
+
+# Background expiry bookkeeping is opportunistic. It never queues for a lock,
+# and releases admission once it owns the exclusive operation lock. This lets
+# an administrator claim admission and wait for bounded bookkeeping to finish;
+# that administrator then excludes further background readers and bookkeeping.
+# Only background callers may use this entry point. FD9 still protects every
+# metadata change until core::end or process exit releases the operation lock.
+core::try_begin() {
+    core::_begin 0 0 "$@" || return "$?"
+    exec 6>&-
+}
+
+# A completed change must not keep the writer lock indefinitely merely because
+# its final status query stalls. The trusted child validates the inherited
+# locks and only observes state; the parent retains both locks until it returns.
+core::refresh_status() {
+    local deadline grace
+    case "${1-}" in
+        full) deadline=60s grace=3s ;;
+        usb) deadline=8s grace=1s ;;
+        *) return 2 ;;
+    esac
+    timeout --kill-after="$grace" "$deadline" /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --after-change "$1"
 }
 
 core::record() {

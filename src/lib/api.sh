@@ -60,8 +60,9 @@ api::event() {
     local type=$1 text=${2-} prompt=${3:-0}
     {
         flock -x 8 || return 1
-        jq -cn --arg type "$type" --arg text "$text" --argjson prompt "$prompt" '
+        jq -cn --arg type "$type" --arg text "$text" --argjson prompt "$prompt" --arg started "${API_CHANGE_STARTED:-}" '
             if $type == "done" then {type:$type,success:($text == "true")}
+                + (if $started == "true" or $started == "false" then {change_started:($started == "true")} else {} end)
             else {type:$type,text:($text | gsub("[\u0000-\u0008\u000b-\u001f\u007f]"; "") | .[0:4096])}
                 | if $type == "confirm" then . + {id:$prompt} else . end
             end' >&3
@@ -108,17 +109,28 @@ api::backup_show() {
 }
 
 api::inspect() (
+    local result=0
     if declare -F status::refresh >/dev/null; then
         core::package_available || return 1
-        if [[ -e $CORE_STATE/lock || -L $CORE_STATE/lock ]]; then
-            core::private_directory "$CORE_STATE" && core::safe_lock "$CORE_STATE/lock" || return 1
-            exec 8<"$CORE_STATE/lock" || return 1
-            flock --shared --nonblock 8 || {
-                core::die 'Another OctoShield operation is still running.'
+        # A manual refresh has the same deadline as background inspection.
+        # timeout supervises only this read-only child and its descendants; it
+        # never signals an administrator's protection change or guessed PID.
+        timeout --kill-after=3s 60s /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --inspect || result=$?
+        case "$result" in
+            0) ;;
+            75)
+                core::die 'A protection change is running or waiting. Status will refresh when it finishes. No changes were started by this inspection.'
                 return 1
-            }
-        fi
-        status::refresh || return 1
+                ;;
+            124 | 137)
+                core::die 'The system inspection exceeded its time limit and was stopped automatically. No protection changes were started.'
+                return 1
+                ;;
+            *)
+                core::die 'The system inspection could not complete. No protection changes were started.'
+                return 1
+                ;;
+        esac
     fi
     cli::status
 )
@@ -166,15 +178,16 @@ api::operation() {
     core::supported_os || return 1
     if api::mutates "$@"; then
         core::begin "GUI $*" || return 1
+        API_CHANGE_STARTED=true
     fi
     api::dispatch "$@" || result=$?
     # The background reader cannot take a coherent snapshot during a mutation.
     # Refresh synchronously under our existing operation lock before completion.
     if api::mutates "$@" && declare -F status::refresh >/dev/null; then
         if [[ $1 == usb ]] && declare -F status::refresh_usb >/dev/null; then
-            status::refresh_usb >/dev/null 2>&1 || core::log 'USB status refresh failed; the background collector will retry.'
+            core::refresh_status usb >/dev/null 2>&1 || core::log 'USB status refresh failed; the background collector will retry.'
         else
-            status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+            core::refresh_status full >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
         fi
     fi
     if api::mutates "$@"; then
@@ -184,6 +197,7 @@ api::operation() {
             core::record "FAILED exit=$result; inspect changes before retrying" || :
         fi
         core::log "Saved change record: $CORE_STATE/backups/$CORE_TRANSACTION" || result=1
+        core::end
     fi
     return "$result"
 }
@@ -202,9 +216,10 @@ api::interrupted() {
 # Callbacks below are invoked indirectly by the shared control modules.
 # shellcheck disable=SC2317,SC2329
 api::serve() (
-    local callback=${1-} result=0 base=/run API_DIRECTORY API_CONFIRM_ID=0
+    local callback=${1-} result=0 base=/run API_DIRECTORY API_CONFIRM_ID=0 API_CHANGE_STARTED=''
     case "$callback" in api::operation | user_api::dispatch) ;; *) return 2 ;; esac
     shift
+    if [[ $callback == api::operation ]] && api::mutates "$@"; then API_CHANGE_STARTED=false; fi
     exec 3>&1 4<&0
     if ((EUID != 0)); then base=${XDG_RUNTIME_DIR:-/tmp}; fi
     [[ $base == /* && -d $base ]] || return 1
