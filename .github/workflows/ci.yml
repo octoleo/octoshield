@@ -90,20 +90,6 @@ jobs:
           dpkg-buildpackage -us -uc -b
           version=$(dpkg-parsechangelog -S Version)
           bash tests/package.sh "../octoshield_${version}_amd64.deb"
-      - name: Verify actual install, upgrade and removal in disposable container
-        env:
-          UBUNTU_VERSION: ${{ matrix.ubuntu }}
-        run: |
-          version=$(dpkg-parsechangelog -S Version)
-          baseline="octoshield_1.1.0_ubuntu${UBUNTU_VERSION}_amd64.deb"
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
-            "https://github.com/octoleo/octoshield/releases/download/v1.1.0/$baseline" --output "/tmp/$baseline"
-          case "$UBUNTU_VERSION" in
-            24.04) baseline_sha=6202f446aaa81b7ce0a41fd902ec7b27766f57ee1d04591e45947ad01630d6b0 ;;
-            26.04) baseline_sha=696ac2650e4b9d3d490740d68548614f882ca317fd1af5e6a69d412d6fdfc634 ;;
-          esac
-          printf '%s  %s\n' "$baseline_sha" "/tmp/$baseline" | sha256sum --check
-          bash tests/package-lifecycle.sh --disposable-system "../octoshield_${version}_amd64.deb" "/tmp/$baseline"
       - name: Prepare downloadable artifacts
         env:
           UBUNTU_VERSION: ${{ matrix.ubuntu }}
@@ -121,6 +107,50 @@ jobs:
             dist/SHA256SUMS-ubuntu*
           if-no-files-found: error
           retention-days: 30
+
+  upgrade:
+    name: Upgrade ${{ matrix.baseline }} on Ubuntu ${{ matrix.ubuntu }}
+    needs: check
+    runs-on: ubuntu-24.04
+    container: ubuntu:${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+        baseline: ['1.1.0', '1.2.0']
+    timeout-minutes: 15
+    steps:
+      - name: Install lifecycle test dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends ca-certificates curl jq util-linux ufw systemd
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: octoshield-ubuntu-${{ matrix.ubuntu }}-amd64
+          path: packages
+      - name: Verify actual install, busy-observer upgrade and removal
+        env:
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+          BASELINE_VERSION: ${{ matrix.baseline }}
+        run: |
+          version=$(bash scripts/version.sh)
+          baseline="octoshield_${BASELINE_VERSION}_ubuntu${UBUNTU_VERSION}_amd64.deb"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
+            "https://github.com/octoleo/octoshield/releases/download/v${BASELINE_VERSION}/$baseline" --output "/tmp/$baseline"
+          case "$BASELINE_VERSION:$UBUNTU_VERSION" in
+            1.1.0:24.04) baseline_sha=6202f446aaa81b7ce0a41fd902ec7b27766f57ee1d04591e45947ad01630d6b0 ;;
+            1.1.0:26.04) baseline_sha=696ac2650e4b9d3d490740d68548614f882ca317fd1af5e6a69d412d6fdfc634 ;;
+            1.2.0:24.04) baseline_sha=536c730d803dac3c21078d8c502127de2ccdada146ab6dc6cbc68513dc2716e1 ;;
+            1.2.0:26.04) baseline_sha=2ea18e51f7e275f15c6cf699b83d72d1e36bff619d0fd76d9cb8883f4f9db43a ;;
+            *) echo 'Unrecognized upgrade baseline'; exit 1 ;;
+          esac
+          printf '%s  %s\n' "$baseline_sha" "/tmp/$baseline" | sha256sum --check
+          (cd packages && sha256sum --check "SHA256SUMS-ubuntu${UBUNTU_VERSION}")
+          bash tests/package-lifecycle.sh --disposable-system \
+            "packages/octoshield_${version}_ubuntu${UBUNTU_VERSION}_amd64.deb" "/tmp/$baseline"
 
   apt-repository:
     name: Verify APT update repository
@@ -157,7 +187,7 @@ jobs:
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish)
-    needs: [check, apt-repository]
+    needs: [check, upgrade, apt-repository]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:

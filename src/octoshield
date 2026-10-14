@@ -10,11 +10,11 @@ if ((EUID == 0)); then
     export PATH
 fi
 
-readonly OCTOSHIELD_VERSION=1.2.0
+readonly OCTOSHIELD_VERSION=1.2.1
 
 bootstrap::help() {
     cat <<'HELP'
-OctoShield 1.2.0 — Ubuntu laptop protection
+OctoShield 1.2.1 — Ubuntu laptop protection
 
 Usage: octoshield [setup|status|install|backups|--help|--version]
 

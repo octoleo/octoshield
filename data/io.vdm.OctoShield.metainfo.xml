@@ -67,32 +67,32 @@
     <keyword>Ubuntu</keyword>
     <keyword>Octoleo</keyword>
   </keywords>
-  <!-- Captured application images are attached by the v1.2.0 release workflow.
+  <!-- Captured application images are attached by the v1.2.1 release workflow.
        Public store indexing also requires anonymously accessible release assets. -->
   <screenshots>
     <screenshot type="default">
       <caption>Review your laptop's protections from the light overview (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-overview-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-overview-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-overview-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-overview-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Choose and review individual system protections (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-protections-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-protections-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Review USB devices before authorizing access (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-usb-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-usb-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-office-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-office-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.0/OctoShield-monitoring-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.2.1/OctoShield-monitoring-dark.png</image>
     </screenshot>
   </screenshots>
   <provides>
@@ -104,6 +104,9 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="1.2.1" date="2026-10-14">
+      <description><p>Fix package upgrades being blocked by background status inspection. Upgrades safely pause the observer, preserve protection settings, and recover when upgrading from earlier packages. Regression tests cover active observation and real protection changes.</p></description>
+    </release>
     <release version="1.2.0" date="2026-10-13">
       <description>
         <p>A smoother administrator session and guided USB approval flow,
