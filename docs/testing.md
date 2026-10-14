@@ -7,6 +7,10 @@ Install test/build dependencies on Ubuntu:
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential bats shellcheck shfmt jq apt-utils gnupg appstream python3
+# Ubuntu 26.04 additionally requires its side-by-side GNU utilities package.
+if [ "$(. /etc/os-release; printf '%s' "$VERSION_ID")" = 26.04 ]; then
+    sudo apt-get install gnu-coreutils
+fi
 make check
 ```
 
@@ -29,6 +33,8 @@ Run ordinary tests from the repository root without root privileges. Temporary f
 The backend suite covers declined confirmations, failed backups/packages/native commands, invalid identifiers, preserved update origins, USB enrollment interruptions and drift, GNOME baseline validation/rollback, installer source/symlink handling, event provenance, bounded monitor parsing, thresholds, cooldowns, and notification state. A mocked successful command does not establish that a host's native package behaves identically.
 
 `tests/locking.bats` uses real kernel locks and separate processes in private fixtures. It verifies automatic continuation after a reader or expiry worker, priority over new readers, exclusion of simultaneous mutations, bounded failure without a transaction, package-maintenance races, unsafe lock paths, and lock release after persistent CLI operations. Its stalled-worker test runs the actual status worker with a TERM-resistant fixture descendant: GNU timeout kills that owned process group, releases inherited descriptors, and lets the waiting writer proceed without deleting locks or restarting services. Native policy commands remain isolated fixtures.
+
+Worker supervision requires GNU timeout's process-group termination behavior. Ubuntu 24.04 supplies it at `/usr/bin/timeout`; Ubuntu 26.04 supplies `/usr/bin/gnutimeout` through `gnu-coreutils`. The Debian build/runtime dependency and standalone installer ensure a GNU implementation is available. Installing `gnu-coreutils` alongside the default utilities does not switch the system's coreutils provider. CI retains Ubuntu 26.04's default tools and tests OctoShield's explicit GNU selection.
 
 Release tests check coherent versions, fixed documentation/media assembly, package-mapped AppStream/DEP-11 catalogues, and APT indexes. APT tests create disposable packages and a temporary signing key, verify signatures and hash chains, and exercise APT with isolated state; they do not install packages, change host sources, or import keys into your normal keyring. Catalogue preparation uses Python's standard library and `appstreamcli` during the build; the installed application has no Python runtime requirement. Production signing credentials are never required for these tests.
 

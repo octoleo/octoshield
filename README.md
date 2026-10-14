@@ -247,6 +247,8 @@ Keep the OS and applications patched, lock the screen when leaving the laptop, a
 
 ## Development
 
+On Ubuntu 26.04, also install `gnu-coreutils` with APT before running tests; [testing prerequisites](docs/testing.md#cli-and-shared-backend) explain the GNU supervisor requirement.
+
 ```bash
 sudo apt-get install build-essential bats shellcheck shfmt jq apt-utils gnupg appstream python3
 make check

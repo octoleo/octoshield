@@ -4,6 +4,8 @@ octoshield (1.2.2) unstable; urgency=medium
     changes priority over new readers, and retain exclusive mutation locking.
   * Bound manual status inspections and recover stalled observation workers
     without stopping firewall or USB enforcement.
+  * Require GNU timeout for process-group cleanup on Ubuntu 24.04 and 26.04
+    without replacing the system's default core utilities.
   * Reuse verified USB inventories to reduce repeated background polling work.
   * Cover runtime lock contention and upgrades from published 1.2.1 packages.
 
