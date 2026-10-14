@@ -1,3 +1,14 @@
+octoshield (1.2.1) unstable; urgency=medium
+
+  * Quiesce the background status observer before acquiring the package
+    replacement lock, avoiding false protection-change upgrade failures.
+  * Recover upgrades from the existing 1.1.0 and 1.2.0 maintainer scripts;
+    preserve protection state and restore the observer after aborted changes.
+  * Exercise upgrades with real reader and writer locks, including published
+    package baselines on both supported Ubuntu releases.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Wed, 14 Oct 2026 09:15:58 +0000
+
 octoshield (1.2.0) unstable; urgency=medium
 
   * Unlock each desktop application session once through the system's
