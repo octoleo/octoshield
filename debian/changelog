@@ -1,3 +1,14 @@
+octoshield (1.2.2) unstable; urgency=medium
+
+  * Let interactive changes wait for bounded status collection, give waiting
+    changes priority over new readers, and retain exclusive mutation locking.
+  * Bound manual status inspections and recover stalled observation workers
+    without stopping firewall or USB enforcement.
+  * Reuse verified USB inventories to reduce repeated background polling work.
+  * Cover runtime lock contention and upgrades from published 1.2.1 packages.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Wed, 14 Oct 2026 13:23:56 +0000
+
 octoshield (1.2.1) unstable; urgency=medium
 
   * Quiesce the background status observer before acquiring the package
