@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.2.1 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.2.2 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -87,7 +87,10 @@ cli::system() {
     fi
     core::supported_os || return 1
     if [[ $1 != office-system ]]; then api::validate "$@" || return 2; fi
-    if [[ $1 == office-system ]] || api::mutates "$@"; then core::begin "$*" || return 1; fi
+    if [[ $1 == office-system ]] || api::mutates "$@"; then
+        core::timeout_program >/dev/null || return 1
+        core::begin "$*" || return 1
+    fi
     local result=0
     case "$1" in
         office-system) cli::office_system || result=$? ;;
@@ -95,17 +98,20 @@ cli::system() {
     esac
     if [[ $1 == office-system ]] || api::mutates "$@"; then
         if declare -F status::refresh >/dev/null; then
-            status::refresh >/dev/null 2>&1 || core::log 'Live status refresh failed; the background collector will retry.'
+            core::refresh_status full >/dev/null 2>&1 || core::log 'Live status refresh failed or timed out; the background collector will retry.'
         fi
     fi
     if [[ $1 != office-system ]] && ! api::mutates "$@"; then return "$result"; fi
     if ((result == 0)); then
-        core::record 'COMPLETE'
+        core::record 'COMPLETE' || result=1
         core::log "Saved change record: $CORE_STATE/backups/$CORE_TRANSACTION"
     else
-        core::record "FAILED exit=$result; inspect changes before retrying"
+        core::record "FAILED exit=$result; inspect changes before retrying" || :
         core::log "Operation failed; inspect $CORE_STATE/backups/$CORE_TRANSACTION and run octoshield recovery."
     fi
+    # A root-owned Whiptail menu can outlive one action. Release its locks when
+    # that action completes instead of blocking every other app while idle.
+    core::end
     return "$result"
 }
 
@@ -123,7 +129,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.2.1 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.2.2 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -323,7 +329,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.2.1\n'
+            printf 'OctoShield 1.2.2\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then

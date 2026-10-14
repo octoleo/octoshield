@@ -29,6 +29,7 @@ setup() {
     }
     core::log() { printf '%s\n' "$*"; }
     core::record() { printf 'record %s\n' "$*" >>"$CALLS"; }
+    core::timeout_program() { printf '/usr/bin/timeout\n'; }
     core::install_packages() {
         printf 'packages %s\n' "$*" >>"$CALLS"
         [[ $FAIL != packages ]]
@@ -58,6 +59,27 @@ mock_install_environment() {
         if [[ $FAIL == launcher && ${*: -1} == "$INSTALL_EXECUTABLES/octoshield" ]]; then return 1; fi
         command mv "$@"
     }
+}
+
+@test 'standalone installation adds side-by-side GNU supervision only when absent' {
+    local available=0
+    core::timeout_program() { [[ $available == 1 ]]; }
+    core::install_packages() {
+        [[ $# == 1 && $1 == gnu-coreutils ]] || return 99
+        printf 'packages %s\n' "$*" >>"$CALLS"
+        available=1
+    }
+    install::ensure_timeout
+    [ "$(cat "$CALLS")" = 'packages gnu-coreutils' ]
+    install::ensure_timeout
+    [ "$(cat "$CALLS")" = 'packages gnu-coreutils' ]
+}
+
+@test 'standalone installation refuses an unusable GNU supervisor after dependency installation' {
+    core::timeout_program() { return 1; }
+    run install::ensure_timeout
+    [ "$status" -ne 0 ]
+    [ "$(cat "$CALLS")" = 'packages gnu-coreutils' ]
 }
 
 mock_bootstrap_download() {

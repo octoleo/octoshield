@@ -192,6 +192,14 @@ gboolean octoshield_event_parse(const gchar *line, gssize length,
         }
         parsed.type = OCTOSHIELD_EVENT_DONE;
         parsed.success = json_object_get_boolean_member(object, "success");
+        if (json_object_has_member(object, "change_started")) {
+            if (!member_type(object, "change_started", G_TYPE_BOOLEAN)) {
+                g_object_unref(parser);
+                return invalid_event(error, "A completion change_started field must be boolean.");
+            }
+            parsed.change_started_known = TRUE;
+            parsed.change_started = json_object_get_boolean_member(object, "change_started");
+        }
     } else {
         g_object_unref(parser);
         return invalid_event(error, "The helper event type is unsupported.");

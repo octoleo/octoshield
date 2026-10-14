@@ -21,6 +21,9 @@ setup() {
     install -d -m 0700 "$CORE_STATE" "$TEST_NATIVE"
     : >"$TEST_CALLS"
     core::supported_os() { return 0; }
+    # Keep native probes inside this isolated shell fixture. The separate real
+    # process/timeout boundary is exercised by tests/locking.bats.
+    core::refresh_status() { status::refresh; }
     controls::local_console() { return 0; }
     # Only redirect the transport's /run temporary directory. Private profile
     # and cache atomic writes still exercise the production mktemp behavior.
@@ -72,7 +75,7 @@ setup() {
 @test 'global profile and individual override persist and reach the public cache' {
     run api::main profile apply conference <<<'1 yes'
     [ "$status" -eq 0 ]
-    jq -e -s '.[-1] == {type:"done",success:true}' <<<"$output"
+    jq -e -s '.[-1] == {type:"done",success:true,change_started:true}' <<<"$output"
     jq -e '.global == "conference" and all(.active[]; . == "conference")' "$CORE_STATE/profiles/state.json"
     run api::main profile apply office usb <<<'1 yes'
     [ "$status" -eq 0 ]
@@ -98,7 +101,7 @@ setup() {
     TEST_FAIL_CONTROL=usb
     run api::main profile apply conference <<<'1 yes'
     [ "$status" -ne 0 ]
-    jq -e -s '.[-1] == {type:"done",success:false}' <<<"$output"
+    jq -e -s '.[-1] == {type:"done",success:false,change_started:true}' <<<"$output"
     jq -e '.global == "conference" and .active.firewall == "conference" and .active.usb == "unmanaged" and .results.usb.status == "failed"' "$CORE_STATE/profiles/state.json"
     run status::read
     [ "$status" -eq 0 ]

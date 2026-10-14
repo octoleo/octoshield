@@ -249,6 +249,16 @@ if [[ ${baseline_version:-} == 1.1.0 || ${baseline_version:-} == 1.2.0 ]]; then
     # package's own refusal followed by successful installation proves that
     # its failing prerm was recovered through the replacement package.
     grep -Fq 'OctoShield: a protection change is still running' "$observer_fixture/upgrade.log" || fail 'upgrade did not exercise the published baseline prerm refusal'
+elif [[ ${baseline_version:-} == 1.2.1 ]]; then
+    # This published baseline already quiesces its observer before locking.
+    # It must upgrade normally, without falling back to the new package's prerm.
+    # Match OctoShield's stable refusal text rather than dpkg's version-dependent
+    # error diagnostics, and verify that shutdown was requested exactly once.
+    if grep -Fq 'package changes were refused' "$observer_fixture/upgrade.log"; then
+        fail 'the corrected baseline refused an upgrade while only its observer was active'
+    fi
+    [[ $(grep -Fxc 'stop octoshield-status.service' "$PACKAGE_LIFECYCLE_OBSERVER_LOG") == 1 ]] || fail 'the corrected baseline did not complete a single observer shutdown during upgrade'
+    printf 'PASS: published %s upgrades normally with an active shared-lock observer.\n' "$baseline_version"
 fi
 [[ $(dpkg-query -W -f='${Version}' octoshield) == "$(dpkg-deb --field "$archive" Version)" ]] || fail 'new version was not installed'
 /usr/bin/octoshield --help >/dev/null

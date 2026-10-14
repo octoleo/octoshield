@@ -38,7 +38,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.2.1"
+#define OCTOSHIELD_VERSION "1.2.2"
 #endif
 
 typedef struct App App;
@@ -201,6 +201,8 @@ struct Operation {
     gboolean exit_success;
     gboolean done_seen;
     gboolean reported_success;
+    gboolean change_started_known;
+    gboolean change_started;
     gboolean protocol_failed;
     gboolean waiting_confirmation;
     gboolean answer_pending;
@@ -591,6 +593,8 @@ static void handle_line(Reader *reader)
         }
         operation->done_seen = TRUE;
         operation->reported_success = event.success;
+        operation->change_started_known = event.change_started_known;
+        operation->change_started = event.change_started;
         break;
     default:
         protocol_error(operation, "The helper sent an unsupported event.");
@@ -689,8 +693,15 @@ static void operation_maybe_finish(Operation *operation)
         append_log(app, "Operation completed successfully.");
         toast(app, "Operation completed");
     } else {
-        gtk_label_set_text(app->activity, "Operation declined or failed — review the details");
-        append_log(app, "Operation declined or failed. Earlier confirmed changes may still be in effect; consult Recovery before retrying.");
+        if (operation->done_seen && !operation->reported_success &&
+            !operation->protocol_failed && operation->change_started_known &&
+            !operation->change_started) {
+            gtk_label_set_text(app->activity, "Operation did not start — review the details");
+            append_log(app, "No protection changes were started. Review the details above before retrying.");
+        } else {
+            gtk_label_set_text(app->activity, "Operation declined or failed — review the details");
+            append_log(app, "Operation declined or failed. Earlier confirmed changes may still be in effect; consult Recovery before retrying.");
+        }
         toast(app, "Review the operation details");
     }
     gtk_spinner_stop(app->spinner);

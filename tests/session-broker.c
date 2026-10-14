@@ -219,6 +219,38 @@ static void test_bounded_stream(void)
     broker_clear(&broker);
 }
 
+static void test_completion_change_state(void)
+{
+    const gchar *states[] = {NULL, "false", "true", "\"false\"", "null", "0", "[]", "{}"};
+    for (guint i = 0; i < G_N_ELEMENTS(states); i++) {
+        Broker broker;
+        broker_init(&broker);
+        broker.request = 7;
+        g_autofree gchar *record = states[i] == NULL ?
+            g_strdup("{\"type\":\"done\",\"success\":false}") :
+            g_strdup_printf("{\"type\":\"done\",\"success\":false,\"change_started\":%s}", states[i]);
+        gboolean valid = i < 3;
+        g_assert_cmpint(forward_event(&broker, record, strlen(record)), ==, valid);
+        g_assert_cmpint(broker.done_seen, ==, valid);
+        if (!valid) {
+            g_assert_cmpuint(broker.pending->len, ==, 0);
+        } else {
+            g_autoptr(JsonParser) parser = json_parser_new();
+            g_assert_true(json_parser_load_from_data(parser, broker.pending->str, -1, NULL));
+            JsonObject *event = json_node_get_object(json_parser_get_root(parser));
+            g_assert_cmpint(json_object_get_int_member(event, "request"), ==, 7);
+            g_assert_false(json_object_get_boolean_member(event, "success"));
+            g_assert_cmpint(json_object_has_member(event, "change_started"), ==, states[i] != NULL);
+            if (states[i] != NULL) {
+                JsonNode *state = json_object_get_member(event, "change_started");
+                g_assert_cmpuint(json_node_get_value_type(state), ==, G_TYPE_BOOLEAN);
+                g_assert_cmpint(json_node_get_boolean(state), ==, g_str_equal(states[i], "true"));
+            }
+        }
+        broker_clear(&broker);
+    }
+}
+
 static GVariant *properties(guint32 uid, gboolean active, gboolean remote, gboolean locked, const gchar *type)
 {
     GVariantBuilder builder;
@@ -399,6 +431,7 @@ int main(int argc, char **argv)
     g_test_add_func("/session/request-sequence", test_request_sequence);
     g_test_add_func("/session/answer-binding", test_answer_binding);
     g_test_add_func("/session/streaming", test_streaming);
+    g_test_add_func("/session/completion-change-state", test_completion_change_state);
     g_test_add_func("/session/exact-answer-delivery", test_exact_answer_delivery);
     g_test_add_func("/session/bounded-stream", test_bounded_stream);
     g_test_add_func("/session/authority-properties", test_authority_properties);

@@ -311,6 +311,7 @@ archive=$1
 [[ -f $archive ]] || fail "archive does not exist: $archive"
 equal "$(dpkg-deb --field "$archive" Package)" octoshield 'binary package identity'
 dependencies=$(dpkg-deb --field "$archive" Depends)
+[[ $dependencies == *'coreutils (<< 9.5) | gnu-coreutils'* ]] || fail 'missing explicit GNU timeout runtime dependency'
 if grep -Eq '(^|,)[[:space:]]*(usbguard|ufw|apparmor|unattended-upgrades)([[:space:],(]|$)' <<<"$dependencies"; then
     fail 'installing the package could install a security control before explicit enrollment'
 fi

@@ -142,6 +142,12 @@ install::services() {
     return 0
 }
 
+install::ensure_timeout() {
+    core::timeout_program >/dev/null 2>&1 && return 0
+    core::install_packages gnu-coreutils || return 1
+    core::timeout_program >/dev/null
+}
+
 install::run() (
     local stage='' previous='' launcher='' destination directory published=0 succeeded=0
     core::require_root || return 1
@@ -165,6 +171,7 @@ install::run() (
         install::safe_directory "$destination" || return 1
     fi
     core::install_packages gcc libc6-dev curl ca-certificates whiptail jq || return 1
+    install::ensure_timeout || return 1
     stage=$(mktemp -d "$INSTALL_LIBRARY/.octoshield-install.XXXXXXXX") || return 1
     previous=$stage.previous
     launcher=$(mktemp "$INSTALL_EXECUTABLES/.octoshield-launcher.XXXXXXXX") || {

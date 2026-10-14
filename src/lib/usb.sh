@@ -206,6 +206,16 @@ usb::_device_deviations() {
         canonical=$(usb::_canonical "$line") || return 1
         allowed_rules+="$canonical"$'\n'
     done <<<"$policy"
+    # The status collector already has an attachment-checked inventory for
+    # this policy. Reuse its parsed identities instead of inspecting USBGuard
+    # and tokenizing every descriptor a second time.
+    if [[ $# == 2 ]]; then
+        jq -er 'if type == "array" and all(.[];
+            (.state | IN("allowed","blocked","rejected")) and (.remembered | type == "boolean"))
+            then [.[] | select((.state == "allowed") != .remembered)] | length
+            else error("Invalid USB inventory") end' <<<"$2"
+        return
+    fi
     devices=$(usbguard list-devices) || return
     while IFS= read -r line; do
         [[ -n $line ]] || continue
@@ -522,8 +532,8 @@ usb::devices_json() {
     jq -s '.' <<<"$rows"
 }
 
-usb::profile_status() {
-    local state=unknown summary='USB protection cannot be verified.' profile=legacy policy devices pending=0 remembered=0 verified=false deviations
+usb::profile_snapshot() {
+    local state=unknown summary='USB protection cannot be verified.' profile=legacy policy devices='[]' pending=0 remembered=0 verified=false deviations available=false policy_verified=false
     if ! usb::_managed >/dev/null 2>&1; then
         summary='USB protection requires explicit enrollment or its managed configuration has changed.'
     elif ! systemctl is-active --quiet usbguard.service; then
@@ -535,22 +545,33 @@ usb::profile_status() {
         if [[ -e "$USB_STATE_DIR/profile-pending" ]] || ! cmp -s "$USB_CONFIG_DIR/rules.conf" <(printf '%s\n' "$policy") || ! usb::_verified_policy "$policy"; then
             state=partial
             summary='USB profile differs from the running policy or a profile change is incomplete.'
-        elif devices=$(usb::devices_json); then
+        else policy_verified=true; fi
+        if devices=$(usb::devices_json) && [[ $(usb::active_profile) == "$profile" && $(usb::_profile_policy "$profile") == "$policy" ]] &&
+            jq -e --arg profile "$profile" 'type == "array" and all(.[]; .profile == $profile)' <<<"$devices" >/dev/null; then
+            available=true
             pending=$(jq '[.[] | select(.state == "blocked" or .state == "rejected")] | length' <<<"$devices") || return
-            deviations=$(usb::_device_deviations "$policy") || deviations=unknown
-            if [[ $deviations == 0 ]]; then
-                state=active
-                verified=true
-                summary="USB profile $profile is active; unknown devices stay blocked pending approval."
-            else
-                state=partial
-                summary="USB profile $profile has temporary or external device exceptions; inspect connected devices."
+            if [[ $policy_verified == true ]]; then
+                deviations=$(usb::_device_deviations "$policy" "$devices") || deviations=unknown
+                if [[ $deviations == 0 ]]; then
+                    state=active
+                    verified=true
+                    summary="USB profile $profile is active; unknown devices stay blocked pending approval."
+                else
+                    state=partial
+                    summary="USB profile $profile has temporary or external device exceptions; inspect connected devices."
+                fi
             fi
-        fi
+        else devices='[]'; fi
     fi
     jq -cn --arg state "$state" --arg summary "$summary" --arg profile "$profile" \
-        --argjson pending "$pending" --argjson remembered "$remembered" --argjson verified "$verified" \
-        '{state:$state,summary:$summary,profile:$profile,pending:$pending,remembered:$remembered,verified:$verified}'
+        --argjson pending "$pending" --argjson remembered "$remembered" --argjson verified "$verified" --argjson available "$available" --argjson devices "$devices" \
+        '{status:{state:$state,summary:$summary,profile:$profile,pending:$pending,remembered:$remembered,verified:$verified},available:$available,devices:$devices}'
+}
+
+usb::profile_status() {
+    local snapshot
+    snapshot=$(usb::profile_snapshot) || return
+    jq -c '.status' <<<"$snapshot"
 }
 
 usb::_config() {

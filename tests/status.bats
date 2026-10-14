@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # shellcheck disable=SC2030,SC2031,SC2317,SC2329
 setup() {
+    source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/status.sh"
     STATUS_DIRECTORY="$BATS_TEST_TMPDIR/run"
     STATUS_ETC="$BATS_TEST_TMPDIR/etc"
@@ -28,6 +29,26 @@ setup() {
     status::forwarding() { status::result partial 'Forwarding enabled'; }
     status::network_snapshot() { printf '{"connected_count":1,"fingerprint":"%064d"}\n' 0; }
     usb::devices_json() { printf '[]\n'; }
+}
+
+@test 'native status probes keep the observer process group without inheriting operation locks' {
+    exec 6>"$BATS_TEST_TMPDIR/admission" 8>"$BATS_TEST_TMPDIR/reader" 9>"$BATS_TEST_TMPDIR/writer"
+    core::timeout() {
+        [[ $1 == --foreground && $2 == --kill-after=1s && $3 == 6s && $4 == env && $5 == LC_ALL=C ]] || return 99
+        local descriptor
+        for descriptor in 6 8 9; do
+            if { : >&"$descriptor"; } 2>/dev/null; then return 98; fi
+        done
+        printf '%s\n' "${@:6}"
+    }
+    run status::run systemctl show 'unit with spaces'
+    [ "$status" -eq 0 ]
+    [ "$output" = $'systemctl\nshow\nunit with spaces' ]
+    # Redirections affect only the probe; its observer still owns its locks.
+    : >&6
+    : >&8
+    : >&9
+    exec 6>&- 8>&- 9>&-
 }
 
 @test 'background status uses the canonical CLI version without a second version constant' {
@@ -313,6 +334,51 @@ usb_fixture() {
     run status::read_usb
     [ "$status" -eq 0 ]
     jq -e '.schema == 1 and .usb.available and .usb.state == "active" and .usb.profile == "office" and .usb.pending == 1 and .usb.devices[0].name == "USB disk"' <<<"$output"
+}
+
+@test 'fast USB collection reuses a single verified snapshot without another inventory read' {
+    usb_fixture
+    usb::profile_snapshot() {
+        printf 'snapshot\n' >>"$BATS_TEST_TMPDIR/snapshot-calls"
+        jq '{available:.usb.available,status:{state:.usb.state,summary:.usb.summary,profile:.usb.profile,pending:.usb.pending},devices:.usb.devices}' "$STATUS_DIRECTORY/usb.json"
+    }
+    usb::devices_json() {
+        printf 'duplicate\n' >>"$BATS_TEST_TMPDIR/duplicate-calls"
+        return 1
+    }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    status::validate_usb_document <<<"$output"
+    jq -e '.usb.available and .usb.state == "active" and .usb.pending == 1' <<<"$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/snapshot-calls")" = snapshot ]
+    [ ! -e "$BATS_TEST_TMPDIR/duplicate-calls" ]
+}
+
+@test 'full inspection reuses the USB snapshot for status and public device rows' {
+    usb_fixture
+    usb::profile_snapshot() {
+        printf 'snapshot\n' >>"$BATS_TEST_TMPDIR/snapshot-calls"
+        jq '{available:.usb.available,status:{state:.usb.state,summary:.usb.summary,profile:.usb.profile,pending:.usb.pending},devices:.usb.devices}' "$STATUS_DIRECTORY/usb.json"
+    }
+    usb::devices_json() {
+        printf 'duplicate\n' >>"$BATS_TEST_TMPDIR/duplicate-calls"
+        return 1
+    }
+    run status::collect
+    [ "$status" -eq 0 ]
+    status::validate_document <<<"$output"
+    jq -e '.controls.usb.state == "active" and .usb.profile == "office" and .usb.pending == 1 and .usb.devices[0].name == "USB disk"' <<<"$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/snapshot-calls")" = snapshot ]
+    [ ! -e "$BATS_TEST_TMPDIR/duplicate-calls" ]
+}
+
+@test 'a failed verified USB snapshot never falls back to an unrelated actionable inventory' {
+    usb_fixture
+    usb::profile_snapshot() { return 1; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    status::validate_usb_document <<<"$output"
+    jq -e '(.usb.available | not) and .usb.state == "unknown" and (.usb.devices | length == 0)' <<<"$output"
 }
 
 @test 'fast USB refresh never advances or replaces the full inspection' {

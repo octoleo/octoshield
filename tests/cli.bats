@@ -23,6 +23,27 @@ setup() {
     [[ $output == *'usb allow ID'* && $output == *'monitor status'* && $output == *'office'* ]]
 }
 
+@test 'administrator CLI refuses changes when safe GNU supervision is unavailable' {
+    ((EUID == 0)) || skip 'the administrator branch requires root'
+    # setup substitutes cli::system for parser tests; a fresh interpreter keeps
+    # this prerequisite test on the real administrator dispatch path.
+    run bash -c '
+        source "$1/core.sh"
+        source "$1/cli.sh"
+        source "$1/api.sh"
+        fixture=$2
+        core::require_local() { :; }
+        core::supported_os() { :; }
+        core::timeout_program() { return 1; }
+        core::begin() { : >"$fixture/unexpected-transaction"; }
+        api::dispatch() { : >"$fixture/unexpected-dispatch"; }
+        cli::system apply firewall
+    ' _ "$BATS_TEST_DIRNAME/../src/lib" "$BATS_TEST_TMPDIR"
+    [ "$status" -ne 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/unexpected-transaction" ]
+    [ ! -e "$BATS_TEST_TMPDIR/unexpected-dispatch" ]
+}
+
 @test 'profile commands pass exact validated arguments through the shared boundary' {
     run cli::main profile apply office usb
     [ "$status" -eq 0 ]

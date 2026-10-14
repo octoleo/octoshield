@@ -31,11 +31,17 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
     timeout-minutes: 25
+    env:
+      # A stuck process fixture must fail with its test name and diagnostics.
+      BATS_TEST_TIMEOUT: 120
     steps:
       - name: Install test and package dependencies
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends ca-certificates curl git build-essential shellcheck shfmt bats jq python3 apt-utils gnupg util-linux ufw debhelper pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev desktop-file-utils libxml2-utils appstream xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+          if [ '${{ matrix.ubuntu }}' = 26.04 ]; then
+            apt-get install --yes --no-install-recommends gnu-coreutils
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -117,13 +123,16 @@ jobs:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
-        baseline: ['1.1.0', '1.2.0']
+        baseline: ['1.1.0', '1.2.0', '1.2.1']
     timeout-minutes: 15
     steps:
       - name: Install lifecycle test dependencies
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends ca-certificates curl jq util-linux ufw systemd
+          if [ '${{ matrix.ubuntu }}' = 26.04 ]; then
+            apt-get install --yes --no-install-recommends gnu-coreutils
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -145,6 +154,8 @@ jobs:
             1.1.0:26.04) baseline_sha=696ac2650e4b9d3d490740d68548614f882ca317fd1af5e6a69d412d6fdfc634 ;;
             1.2.0:24.04) baseline_sha=536c730d803dac3c21078d8c502127de2ccdada146ab6dc6cbc68513dc2716e1 ;;
             1.2.0:26.04) baseline_sha=2ea18e51f7e275f15c6cf699b83d72d1e36bff619d0fd76d9cb8883f4f9db43a ;;
+            1.2.1:24.04) baseline_sha=be3e4234c05d7e85ac4bae30950df82cb48dfa3c55660a541acafefa77ae1727 ;;
+            1.2.1:26.04) baseline_sha=122c5d9a517db1f292348c89c4127d13a30ac570a18adc8493af6081fab1faf0 ;;
             *) echo 'Unrecognized upgrade baseline'; exit 1 ;;
           esac
           printf '%s  %s\n' "$baseline_sha" "/tmp/$baseline" | sha256sum --check

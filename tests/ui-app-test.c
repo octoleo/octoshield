@@ -68,6 +68,16 @@ static int fixture(const char *name)
     }
     fputs("{\"type\":\"log\",\"text\":\"fixture inspection output\"}\n", stdout);
     fputs("fixture stderr diagnostic\n", stderr);
+    if (g_str_has_prefix(name, "failure-")) {
+        const gchar *state = g_str_equal(name, "failure-before-change") ? ",\"change_started\":false" :
+                             g_str_equal(name, "failure-after-change") ? ",\"change_started\":true" :
+                             g_str_equal(name, "failure-invalid-state") ? ",\"change_started\":\"false\"" :
+                             g_str_equal(name, "failure-invalid-after-done") ? ",\"change_started\":false" : "";
+        printf("{\"type\":\"done\",\"success\":false%s}\n", state);
+        if (g_str_equal(name, "failure-invalid-after-done"))
+            fputs("{\"type\":\"log\",\"text\":\"unexpected event after completion\"}\n", stdout);
+        return 1;
+    }
     if (g_str_equal(name, "prompts")) {
         fputs("{\"type\":\"log\",\"text\":\"allow id 1234:5678 name <untrusted device>\\nblock all other devices\"}\n", stdout);
         fputs("{\"type\":\"confirm\",\"id\":1,\"text\":\"Review these exact device rules?\"}\n", stdout);
@@ -464,6 +474,33 @@ static void test_oversize(void)
     g_assert_cmpuint(strlen(text), <, 5000);
 }
 
+static void test_failure_change_state(void)
+{
+    const struct { const gchar *fixture; gboolean unchanged; } cases[] = {
+        {"failure-before-change", TRUE},
+        {"failure-after-change", FALSE},
+        {"failure-unknown-state", FALSE},
+        {"failure-invalid-state", FALSE},
+        {"failure-invalid-after-done", FALSE}
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(cases); i++) {
+        g_test_message("Failure feedback for %s", cases[i].fixture);
+        launch_fixture(cases[i].fixture);
+        drain_operation(FALSE);
+        g_autofree gchar *text = log_text();
+        g_assert_null(strstr(text, "Operation completed successfully."));
+        if (cases[i].unchanged) {
+            g_assert_nonnull(strstr(text, "No protection changes were started."));
+            g_assert_null(strstr(text, "Earlier confirmed changes may still be in effect"));
+            g_assert_cmpstr(gtk_label_get_text(test_app.activity), ==,
+                            "Operation did not start — review the details");
+        } else {
+            g_assert_null(strstr(text, "No protection changes were started."));
+            g_assert_nonnull(strstr(text, "Earlier confirmed changes may still be in effect"));
+        }
+    }
+}
+
 static void test_confirmations(void)
 {
     launch_fixture("prompts");
@@ -695,6 +732,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);
+    g_test_add_func("/ui/process/failure-change-state", test_failure_change_state);
     g_test_add_func("/ui/process/bounded-oversized-event", test_oversize);
     g_test_add_func("/ui/process/correlated-prompts-and-visible-review", test_confirmations);
     int result = g_test_run();
