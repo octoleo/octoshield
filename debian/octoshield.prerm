@@ -1,44 +1,95 @@
 #!/bin/sh
 set -e
+umask 077
+
+# The marker is created before quiescing readers. Only this invocation's marker
+# may be removed on refusal; a marker from an interrupted dpkg operation still
+# belongs to that operation. Never signal an interactive protection helper.
+maintenance_owned=false
+maintenance_ready=false
+observer_state=unknown
+maintenance=/run/octoshield-package-maintenance
+# Registered below as an EXIT trap after validation succeeds.
+# shellcheck disable=SC2317
+package_cleanup() {
+    result=$?
+    trap - EXIT HUP INT TERM
+    if [ "$maintenance_owned" = true ] && [ "$maintenance_ready" = false ]; then
+        rm -f -- "$maintenance"
+        exec 9>&-
+        if [ "$observer_state" = status-active ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl start octoshield-status.service >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$result"
+}
+
+private_file() {
+    [ ! -L "$1" ] && [ -f "$1" ] || return 1
+    metadata=$(stat -c '%u:%a:%h' "$1") || return 1
+    case "$metadata" in 0:*:1) ;; *) return 1 ;; esac
+    mode=${metadata#0:}
+    mode=${mode%:1}
+    case "$mode" in [0-7][0-7][0-7] | [0-7][0-7][0-7][0-7]) ;; *) return 1 ;; esac
+    [ "$((0$mode & 077))" -eq 0 ]
+}
 
 case "$1" in
     remove | upgrade | failed-upgrade | deconfigure)
         if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
-        # Never wait here: an active control may itself be waiting for APT's
-        # package lock. Refuse replacement rather than deadlock or kill it.
         state=/var/lib/octoshield
-        maintenance=/run/octoshield-package-maintenance
         if [ -L "$state" ] || { [ -e "$state" ] && [ ! -d "$state" ]; }; then
             printf '%s\n' 'OctoShield: refusing package changes because its state directory is invalid.' >&2
             exit 1
         fi
         if [ ! -d "$state" ]; then mkdir -m 0700 "$state"; fi
         if [ "$(stat -c '%u:%a' "$state")" != '0:700' ] || [ -L "$state/lock" ] ||
-            { [ -e "$state/lock" ] && [ ! -f "$state/lock" ]; }; then
+            { [ -e "$state/lock" ] && ! private_file "$state/lock"; }; then
             printf '%s\n' 'OctoShield: its private state/lock needs administrator review before package changes.' >&2
             exit 1
         fi
-        exec 9>"$state/lock"
-        if ! flock -n 9; then
-            printf '%s\n' \
-                'OctoShield: a protection change is still running; package changes were refused.' \
-                'Let the operation finish, then retry APT. Do not force-kill it.' >&2
-            exit 1
-        fi
-        if [ -L "$maintenance" ] || { [ -e "$maintenance" ] && [ ! -f "$maintenance" ]; }; then
+        if [ -L "$maintenance" ] || { [ -e "$maintenance" ] && ! private_file "$maintenance"; }; then
             printf '%s\n' 'OctoShield: the package-maintenance marker needs administrator review.' >&2
             exit 1
         fi
-        # Blocks new system operations after this script releases its lock and
-        # until postinst/postrm reaches the appropriate completion/abort phase.
-        (
-            umask 077
-            : >"$maintenance"
-        )
+        trap 'package_cleanup' EXIT
+        trap 'exit 1' HUP INT TERM
+        if [ ! -e "$maintenance" ]; then
+            observer_state=status-inactive
+            if command -v systemctl >/dev/null 2>&1 &&
+                systemctl is-active --quiet octoshield-status.service >/dev/null 2>&1; then
+                observer_state=status-active
+            fi
+            maintenance_owned=true
+            printf '%s\n' "$observer_state" >"$maintenance"
+        fi
+        # Block new operations and readers before stopping the observer. Older
+        # packages try to acquire this lock first and can mistake its shared
+        # read lock for a protection change; dpkg retries with this new prerm's
+        # failed-upgrade action, so upgrades from those packages recover too.
         # Stop only our status process before its Bash modules are replaced.
         # UFW, USBGuard and all other native protection services keep running.
         if command -v systemctl >/dev/null 2>&1; then
-            systemctl stop octoshield-status.service >/dev/null 2>&1 || true
+            if ! systemctl stop octoshield-status.service >/dev/null 2>&1; then
+                # A booted systemd host must acknowledge the stop even if its
+                # state query failed. Chroots/build containers have no manager
+                # to stop, but still pass the operation-lock check below.
+                if [ -d /run/systemd/system ] || [ "$observer_state" = status-active ] ||
+                    systemctl is-active --quiet octoshield-status.service >/dev/null 2>&1; then
+                    printf '%s\n' 'OctoShield: its status observer could not be stopped safely; package changes were refused.' >&2
+                    exit 1
+                fi
+            fi
+        fi
+        exec 9>"$state/lock"
+        # Existing read-only inspections or a just-finished operation may need
+        # a moment to release their descriptors. Never wait indefinitely: a
+        # real protection helper could itself be waiting for APT's package lock.
+        if ! flock -w 5 9; then
+            printf '%s\n' \
+                'OctoShield: an operation is still using its protection files; package changes were refused.' \
+                'Let the operation finish, then retry APT. Do not force-kill it.' >&2
+            exit 1
         fi
         ;;
 esac
@@ -67,4 +118,5 @@ esac
 
 #DEBHELPER#
 
+maintenance_ready=true
 exit 0

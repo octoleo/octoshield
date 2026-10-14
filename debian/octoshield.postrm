@@ -1,6 +1,14 @@
 #!/bin/sh
 set -e
 
+observer_state=unknown
+maintenance=/run/octoshield-package-maintenance
+if [ -z "${DPKG_ROOT:-}" ] && [ "$1" = abort-upgrade ] &&
+    [ -f "$maintenance" ] && [ ! -L "$maintenance" ] &&
+    [ "$(stat -c '%u:%a:%h' "$maintenance")" = '0:600:1' ]; then
+    IFS= read -r observer_state <"$maintenance" || observer_state=unknown
+fi
+
 # Purge removes only package-owned service enablement. Security configuration,
 # USB device rules, and private recovery snapshots deliberately remain intact.
 if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
@@ -20,10 +28,20 @@ fi
 
 if [ -z "${DPKG_ROOT:-}" ]; then
     case "$1" in
-        remove | purge | failed-upgrade | abort-install | abort-upgrade)
-            rm -f -- /run/octoshield-package-maintenance
+        # failed-upgrade is dpkg's retry of an old postrm that failed during
+        # replacement. Like upgrade, it must keep exclusion until configure.
+        remove | purge | abort-install | abort-upgrade)
+            rm -f -- "$maintenance"
             ;;
     esac
+fi
+
+# dpkg follows new-postrm abort-upgrade with the old package's postinst. Older
+# versions only restart enabled observers, so restore a disabled-but-running
+# observer here too. This is best-effort: recovery may lack dependencies.
+if [ -z "${DPKG_ROOT:-}" ] && [ "$1" = abort-upgrade ] &&
+    [ "$observer_state" = status-active ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl start octoshield-status.service >/dev/null 2>&1 || true
 fi
 
 #DEBHELPER#

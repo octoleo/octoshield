@@ -1,6 +1,16 @@
 #!/bin/sh
 set -e
 
+observer_state=unknown
+maintenance=/run/octoshield-package-maintenance
+if [ -z "${DPKG_ROOT:-}" ] && [ -f "$maintenance" ] && [ ! -L "$maintenance" ] &&
+    [ "$(stat -c '%u:%a:%h' "$maintenance")" = '0:600:1' ]; then
+    # This is data, never shell code. Legacy packages leave an empty marker;
+    # their observer enablement remains the fallback below.
+    IFS= read -r observer_state <"$maintenance" || observer_state=unknown
+    case "$observer_state" in status-active | status-inactive) ;; *) observer_state=unknown ;; esac
+fi
+
 case "$1" in
     configure)
         if [ -n "${DPKG_ROOT:-}" ]; then exit 0; fi
@@ -19,26 +29,31 @@ esac
 if [ -z "${DPKG_ROOT:-}" ]; then
     case "$1" in
         configure | abort-upgrade | abort-remove | abort-deconfigure)
-            rm -f -- /run/octoshield-package-maintenance
+            rm -f -- "$maintenance"
             ;;
     esac
 fi
 
 # This observer reports existing settings; it never selects a protection
 # profile. Upgrade an already configured observer without overriding disable or
-# mask choices. 1.0.0 did not ship this unit, so enable it on that migration too.
+# mask choices. An explicit runtime state preserves disabled-but-running and
+# enabled-but-stopped observers across an update. 1.0.0 did not ship this unit,
+# so enable it on that migration too.
 if [ -z "${DPKG_ROOT:-}" ] && command -v systemctl >/dev/null 2>&1; then
     case "$1" in
         configure)
             if [ -z "${2:-}" ] || dpkg --compare-versions "$2" lt 1.1.0; then
                 systemctl enable octoshield-status.service >/dev/null 2>&1 || true
+                observer_state=unknown
             fi
-            if systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; then
+            if [ "$observer_state" = status-active ] ||
+                { [ "$observer_state" = unknown ] && systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; }; then
                 systemctl start octoshield-status.service >/dev/null 2>&1 || true
             fi
             ;;
         abort-upgrade | abort-remove | abort-deconfigure)
-            if systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; then
+            if [ "$observer_state" = status-active ] ||
+                { [ "$observer_state" = unknown ] && systemctl is-enabled --quiet octoshield-status.service >/dev/null 2>&1; }; then
                 systemctl start octoshield-status.service >/dev/null 2>&1 || true
             fi
             ;;
