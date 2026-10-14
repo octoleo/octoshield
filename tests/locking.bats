@@ -463,3 +463,76 @@ STATUS
         core::read_end
     done
 }
+
+locking::stage_after_change_collector() {
+    OCTOSHIELD_ROOT="$BATS_TEST_TMPDIR/after-change-collector"
+    mkdir -p "$OCTOSHIELD_ROOT/src/lib"
+    cp "$BATS_TEST_DIRNAME/../src/status-daemon" "$OCTOSHIELD_ROOT/src/status-daemon"
+    cp "$BATS_TEST_DIRNAME/../src/lib/core.sh" "$OCTOSHIELD_ROOT/src/lib/core.sh"
+    printf '\nCORE_STATE=%q\nCORE_PACKAGE_MAINTENANCE=%q\n' \
+        "$CORE_STATE" "$CORE_PACKAGE_MAINTENANCE" >>"$OCTOSHIELD_ROOT/src/lib/core.sh"
+    local module
+    for module in controls usb monitor office profiles profile_firewall_verify profile_controls; do
+        : >"$OCTOSHIELD_ROOT/src/lib/$module.sh"
+    done
+    # Keep the real worker, descriptor validation and timeout invocation. Only
+    # system observations are replaced; no host policy or cache is inspected.
+    cat >"$OCTOSHIELD_ROOT/src/lib/status.sh" <<'STATUS'
+status::_fixture_observe() {
+    # Reopening either inode must conflict with the inherited exclusive lock.
+    if flock --exclusive --nonblock "$CORE_STATE/lock-admission" true ||
+        flock --exclusive --nonblock "$CORE_STATE/lock" true; then return 99; fi
+    printf '%s\n' "$1" >>"$CORE_STATE/observations"
+}
+status::refresh() { status::_fixture_observe full; }
+status::refresh_usb() { status::_fixture_observe usb; }
+STATUS
+}
+
+@test 'after-change full and USB workers validate inherited locks without releasing the parent transaction' {
+    ((EUID == 0)) || skip 'the production status daemon requires administrator identity'
+    locking::stage_after_change_collector
+    core::begin 'Observe completed change'
+    local transaction=$CORE_TRANSACTION mode
+    for mode in full usb; do
+        run core::refresh_status "$mode"
+        [[ $status -eq 0 ]]
+        [[ $CORE_TRANSACTION == "$transaction" ]]
+        : >&6
+        : >&9
+        run command flock -n "$CORE_STATE/lock-admission" true
+        [[ $status -eq 1 ]]
+        run command flock -n "$CORE_STATE/lock" true
+        [[ $status -eq 1 ]]
+    done
+    [[ $(cat "$CORE_STATE/observations") == $'full\nusb' ]]
+    core::end
+    command flock -n "$CORE_STATE/lock-admission" flock -n "$CORE_STATE/lock" true
+}
+
+@test 'after-change workers refuse missing or unrelated inherited descriptors before observation' {
+    ((EUID == 0)) || skip 'the production status daemon requires administrator identity'
+    locking::stage_after_change_collector
+    run /bin/bash -c 'exec 6>&- 9>&-; exec /bin/bash -p "$1" --after-change full' _ "$OCTOSHIELD_ROOT/src/status-daemon"
+    [[ $status -ne 0 ]]
+    [[ ! -e $CORE_STATE/observations ]]
+    core::begin 'Validate completed change observation'
+    local descriptor
+    for descriptor in 6 9; do
+        run /bin/bash -c '
+            case "$2" in
+                6) exec 6>>"$3/unrelated" ;;
+                9) exec 9>>"$3/unrelated" ;;
+            esac
+            exec /bin/bash -p "$1" --after-change usb
+        ' _ "$OCTOSHIELD_ROOT/src/status-daemon" "$descriptor" "$CORE_STATE"
+        [[ $status -ne 0 ]]
+        [[ ! -e $CORE_STATE/observations ]]
+        run command flock -n "$CORE_STATE/lock-admission" true
+        [[ $status -eq 1 ]]
+        run command flock -n "$CORE_STATE/lock" true
+        [[ $status -eq 1 ]]
+    done
+    core::end
+    command flock -n "$CORE_STATE/lock-admission" flock -n "$CORE_STATE/lock" true
+}
