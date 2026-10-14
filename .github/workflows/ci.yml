@@ -31,6 +31,9 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
     timeout-minutes: 25
+    env:
+      # A stuck process fixture must fail with its test name and diagnostics.
+      BATS_TEST_TIMEOUT: 120
     steps:
       - name: Install test and package dependencies
         run: |
