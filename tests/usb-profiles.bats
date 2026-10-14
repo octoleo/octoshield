@@ -371,6 +371,47 @@ setup() {
     [[ $output == *'temporary or external device exceptions'* ]]
 }
 
+@test "USB profile snapshot observes devices once and reuses their verified identities" {
+    run usb::profile_snapshot
+    [ "$status" -eq 0 ]
+    jq -e '.available and .status.state == "active" and .status.verified and .status.pending == 1 and (.devices | length == 2)' <<<"$output"
+    [ "$(grep -c '^usbguard list-devices$' "$TEST_CALLS")" -eq 1 ]
+    [[ $output != *storagehash* && $output != *keyboardhash* ]]
+}
+
+@test "remembered but blocked devices remain a deviation in the reused inventory" {
+    printf '7: block %s\n' "${TEST_RULE#allow }" >"$TEST_DEVICES"
+    run usb::profile_snapshot
+    [ "$status" -eq 0 ]
+    jq -e '.available and .status.state == "partial" and (.status.verified | not) and .devices[0].remembered and .devices[0].state == "blocked"' <<<"$output"
+    [ "$(grep -c '^usbguard list-devices$' "$TEST_CALLS")" -eq 1 ]
+}
+
+@test "policy drift retains one actionable inventory without reporting verified protection" {
+    TEST_RUNTIME_DRIFT=yes
+    run usb::profile_snapshot
+    [ "$status" -eq 0 ]
+    jq -e '.available and .status.state == "partial" and (.status.verified | not) and (.devices | length == 2)' <<<"$output"
+    [ "$(grep -c '^usbguard list-devices$' "$TEST_CALLS")" -eq 1 ]
+}
+
+@test "unavailable attachment identity produces no actionable snapshot devices" {
+    TEST_INVOCATION=unavailable
+    run usb::profile_snapshot
+    [ "$status" -eq 0 ]
+    jq -e '(.available | not) and .status.state == "unknown" and (.status.verified | not) and (.devices | length == 0)' <<<"$output"
+}
+
+@test "profile changes while collecting discard the reused inventory" {
+    usb::devices_json() {
+        printf 'office\n' >"$USB_STATE_DIR/active-profile"
+        printf '[]\n'
+    }
+    run usb::profile_snapshot
+    [ "$status" -eq 0 ]
+    jq -e '(.available | not) and (.status.verified | not) and (.devices | length == 0)' <<<"$output"
+}
+
 @test "attachment tokens are stable across authorization changes and omit private identities" {
     local token changed
     token=$(usb::_attachment_token 8 "$(usb::_device 8)")

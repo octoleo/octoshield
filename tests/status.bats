@@ -315,6 +315,51 @@ usb_fixture() {
     jq -e '.schema == 1 and .usb.available and .usb.state == "active" and .usb.profile == "office" and .usb.pending == 1 and .usb.devices[0].name == "USB disk"' <<<"$output"
 }
 
+@test 'fast USB collection reuses a single verified snapshot without another inventory read' {
+    usb_fixture
+    usb::profile_snapshot() {
+        printf 'snapshot\n' >>"$BATS_TEST_TMPDIR/snapshot-calls"
+        jq '{available:.usb.available,status:{state:.usb.state,summary:.usb.summary,profile:.usb.profile,pending:.usb.pending},devices:.usb.devices}' "$STATUS_DIRECTORY/usb.json"
+    }
+    usb::devices_json() {
+        printf 'duplicate\n' >>"$BATS_TEST_TMPDIR/duplicate-calls"
+        return 1
+    }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    status::validate_usb_document <<<"$output"
+    jq -e '.usb.available and .usb.state == "active" and .usb.pending == 1' <<<"$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/snapshot-calls")" = snapshot ]
+    [ ! -e "$BATS_TEST_TMPDIR/duplicate-calls" ]
+}
+
+@test 'full inspection reuses the USB snapshot for status and public device rows' {
+    usb_fixture
+    usb::profile_snapshot() {
+        printf 'snapshot\n' >>"$BATS_TEST_TMPDIR/snapshot-calls"
+        jq '{available:.usb.available,status:{state:.usb.state,summary:.usb.summary,profile:.usb.profile,pending:.usb.pending},devices:.usb.devices}' "$STATUS_DIRECTORY/usb.json"
+    }
+    usb::devices_json() {
+        printf 'duplicate\n' >>"$BATS_TEST_TMPDIR/duplicate-calls"
+        return 1
+    }
+    run status::collect
+    [ "$status" -eq 0 ]
+    status::validate_document <<<"$output"
+    jq -e '.controls.usb.state == "active" and .usb.profile == "office" and .usb.pending == 1 and .usb.devices[0].name == "USB disk"' <<<"$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/snapshot-calls")" = snapshot ]
+    [ ! -e "$BATS_TEST_TMPDIR/duplicate-calls" ]
+}
+
+@test 'a failed verified USB snapshot never falls back to an unrelated actionable inventory' {
+    usb_fixture
+    usb::profile_snapshot() { return 1; }
+    run status::collect_usb
+    [ "$status" -eq 0 ]
+    status::validate_usb_document <<<"$output"
+    jq -e '(.usb.available | not) and .usb.state == "unknown" and (.usb.devices | length == 0)' <<<"$output"
+}
+
 @test 'fast USB refresh never advances or replaces the full inspection' {
     usb_fixture
     fixture

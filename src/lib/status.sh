@@ -416,12 +416,24 @@ status::pending_devices() {
 # This independent, inexpensive snapshot never advances the full inspection's
 # checked_at. A slow firewall/exposure inspection cannot keep a USB modal stale.
 status::collect_usb() {
-    local observed raw devices='[]' available=false profile=unmanaged checked
-    observed=$(status::usb 2>/dev/null) || observed=
+    local observed raw='' snapshot devices='[]' available=false profile=unmanaged checked
+    if declare -F usb::profile_snapshot >/dev/null; then
+        # Status and device rows must come from the same verified observation.
+        # This fast path runs every two seconds: do not repeat the inventory
+        # just to project its public fields and count pending decisions.
+        snapshot=$(usb::profile_snapshot 2>/dev/null) || snapshot='{}'
+        observed=$(jq -c '.status' <<<"$snapshot") || observed=
+        raw=$(jq -ce 'select(.available == true) | .devices' <<<"$snapshot") || raw=
+    else
+        observed=$(status::usb 2>/dev/null) || observed=
+        if [[ $(jq -r '.state' <<<"$observed" 2>/dev/null) =~ ^(active|partial)$ ]] && declare -F usb::devices_json >/dev/null; then
+            raw=$(usb::devices_json 2>/dev/null) || raw=
+        fi
+    fi
     status::valid_result <<<"$observed" || observed=$(status::result unknown 'USB protection cannot be verified.')
     profile=$(jq -r '.profile // "unmanaged"' <<<"$observed") || return 1
     [[ $profile =~ ^[a-z][a-z0-9-]{0,31}$ ]] || profile=unmanaged
-    if [[ $(jq -r .state <<<"$observed") =~ ^(active|partial)$ ]] && declare -F usb::devices_json >/dev/null && raw=$(usb::devices_json 2>/dev/null) && devices=$(status::_project_usb_devices <<<"$raw"); then
+    if [[ $(jq -r .state <<<"$observed") =~ ^(active|partial)$ && -n $raw ]] && devices=$(status::_project_usb_devices <<<"$raw"); then
         # Treat omitted/invalid rows or mixed profiles as an unavailable read,
         # never as a successful empty list or an actionable partial inventory.
         if jq -e --argjson raw "$raw" --arg profile "$profile" '
@@ -450,11 +462,15 @@ status::version() {
 }
 
 status::collect() {
-    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile version
+    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile version usb_snapshot=''
     version=$(status::version) || return 1
     profiles=$(status::profile_snapshot) || return 1
     for name in firewall usb network services monitor updates apparmor sudo; do
-        observed=$(status::control "$name") || return 1
+        if [[ $name == usb ]] && declare -F usb::profile_snapshot >/dev/null; then
+            usb_snapshot=$(usb::profile_snapshot 2>/dev/null) || usb_snapshot='{}'
+            observed=$(jq -c '.status' <<<"$usb_snapshot") || observed=
+            status::valid_result <<<"$observed" || observed=$(status::result unknown 'USB protection cannot be verified.')
+        else observed=$(status::control "$name") || return 1; fi
         # Project the adapter result, so device descriptors cannot accidentally
         # leak into the public cache as adapters gain more private fields.
         observed=$(jq -c '{state,summary,pending:(.pending // 0),profile:(if (.profile | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) then .profile else "unmanaged" end)}' <<<"$observed") || return 1
@@ -474,7 +490,9 @@ status::collect() {
         exposures=$(jq -cn --argjson current "$exposures" --arg name "$name" --argjson value "$observed" '$current + {($name):($value | {state,summary})}') || return 1
     done
     network=$(status::network_snapshot) || return 1
-    devices=$(status::pending_devices) || return 1
+    if [[ -n $usb_snapshot ]]; then
+        devices=$(jq -c 'if .available == true then .devices else [] end' <<<"$usb_snapshot" | status::_project_usb_devices) || return 1
+    else devices=$(status::pending_devices) || return 1; fi
     pending=$(jq -er --argjson devices "$devices" '[($devices | map(select(.state == "blocked" or .state == "rejected")) | length),(.usb.pending | if type == "number" and . >= 0 and . <= 65535 and floor == . then . else 0 end)] | max' <<<"$controls") || pending=0
     usb_profile=$(jq -er .usb.profile <<<"$controls") || return 1
     checked=$(date +%s) || return 1
