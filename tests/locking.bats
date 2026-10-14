@@ -11,6 +11,8 @@ setup() {
     CORE_TRANSACTION=
     mkdir -m 0700 "$CORE_STATE" "$CORE_STATE/backups"
     LOCKING_PIDS=()
+    LOCKING_GROUPS=()
+    LOCKING_GROUP_FILES=()
     core::require_root() { :; }
     stat() {
         local metadata
@@ -25,21 +27,89 @@ setup() {
 teardown() {
     core::read_end
     core::end
-    local pid
+    local pid file
+    # timeout may create a nested process group. Track the exact supervisor we
+    # launched, never discover or signal host processes by name or lock owner.
+    for file in "${LOCKING_GROUP_FILES[@]}"; do
+        [[ -f $file ]] || continue
+        IFS= read -r pid <"$file" || continue
+        locking::stop_group "$pid"
+    done
+    for pid in "${LOCKING_GROUPS[@]}"; do
+        locking::stop_group "$pid"
+    done
     for pid in "${LOCKING_PIDS[@]}"; do
         [[ -n $pid ]] || continue
-        kill "$pid" 2>/dev/null || :
         wait "$pid" 2>/dev/null || :
     done
 }
 
+locking::stop_group() {
+    local pid=$1 attempt
+    [[ $pid =~ ^[1-9][0-9]*$ && $pid -gt 1 && $pid != "$BASHPID" ]] || return 1
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || :
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if ! kill -0 -- "-$pid" 2>/dev/null && ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+        sleep 0.02
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || :
+    kill -KILL "$pid" 2>/dev/null || :
+}
+
+locking::diagnostics() {
+    local file pid
+    printf 'Locking fixture diagnostics:\n' >&2
+    printf 'Owned fixture process groups: %s\n' "${LOCKING_GROUPS[*]}" >&2
+    for file in "$BATS_TEST_TMPDIR"/*-output "$BATS_TEST_TMPDIR"/*-result "$BATS_TEST_TMPDIR"/*-pid "$BATS_TEST_TMPDIR"/*-program "$BATS_TEST_TMPDIR"/*-version; do
+        [[ -f $file ]] || continue
+        printf '%s:\n' "${file##*/}" >&2
+        head -c 16384 "$file" >&2
+    done
+    if command -v ps >/dev/null; then
+        for pid in "${LOCKING_GROUPS[@]}"; do
+            ps -o pid,ppid,pgid,sid,stat,args -g "$pid" >&2 || :
+        done
+    fi
+}
+
+# Every fixture starts a separate session so teardown can bound cleanup of its
+# entire descendant group. Close Bats' TAP descriptor before any child starts.
+# The caller provides only a fixed test script through stdin.
+locking::start_fixture() {
+    local name=$1 function_name
+    {
+        printf 'source %q\n' "$BATS_TEST_DIRNAME/../src/lib/core.sh"
+        printf 'source %q\n' "$BATS_TEST_DIRNAME/../src/lib/api.sh"
+        declare -p CORE_STATE CORE_PACKAGE_MAINTENANCE BATS_TEST_TMPDIR
+        if [[ -v OCTOSHIELD_ROOT ]]; then declare -p OCTOSHIELD_ROOT; fi
+        for function_name in core::require_root core::timeout stat cli::status status::refresh; do
+            if declare -F "$function_name" >/dev/null; then declare -f "$function_name"; fi
+        done
+        cat
+    } >"$BATS_TEST_TMPDIR/$name-script"
+    setsid /bin/bash "$BATS_TEST_TMPDIR/$name-script" 3>&- >"$BATS_TEST_TMPDIR/$name-output" 2>&1 &
+    LOCKING_LAST_PID=$!
+    LOCKING_PIDS+=("$LOCKING_LAST_PID")
+    LOCKING_GROUPS+=("$LOCKING_LAST_PID")
+}
+
+locking::send_release() {
+    # shellcheck disable=SC2016 # The child shell expands its own positional argument.
+    if ! core::timeout --kill-after=1s 3s /bin/bash -c 'printf "finish\n" >"$1"' _ "$1" 3>&-; then
+        printf 'The fixture stopped accepting its release signal: %s\n' "$1" >&2
+        locking::diagnostics
+        return 1
+    fi
+}
+
 locking::wait_for_file() {
     local attempt
-    for ((attempt = 0; attempt < 200; attempt++)); do
+    for ((attempt = 0; attempt < 500; attempt++)); do
         [[ -e $1 ]] && return 0
         sleep 0.02
     done
     printf 'Timed out waiting for fixture: %s\n' "$1" >&2
+    locking::diagnostics
     return 1
 }
 
@@ -52,6 +122,7 @@ locking::wait_for_writer() {
         sleep 0.02
     done
     printf 'Writer never acquired the admission gate.\n' >&2
+    locking::diagnostics
     return 1
 }
 
@@ -66,35 +137,64 @@ locking::reap() {
 
 locking::start_reader() {
     mkfifo "$BATS_TEST_TMPDIR/reader-release"
-    (
-        core::read_begin || exit "$?"
-        : >"$BATS_TEST_TMPDIR/reader-ready"
-        IFS= read -r _ <"$BATS_TEST_TMPDIR/reader-release"
-        core::read_end
-    ) >"$BATS_TEST_TMPDIR/reader-output" 2>&1 &
-    LOCKING_READER_PID=$!
-    LOCKING_PIDS+=("$LOCKING_READER_PID")
+    locking::start_fixture reader <<'READER'
+core::read_begin || exit "$?"
+: >"$BATS_TEST_TMPDIR/reader-ready"
+IFS= read -r _ <"$BATS_TEST_TMPDIR/reader-release"
+core::read_end
+READER
+    LOCKING_READER_PID=$LOCKING_LAST_PID
     locking::wait_for_file "$BATS_TEST_TMPDIR/reader-ready"
 }
 
 locking::release_reader() {
-    printf 'finish\n' >"$BATS_TEST_TMPDIR/reader-release"
+    locking::send_release "$BATS_TEST_TMPDIR/reader-release"
     locking::reap "$LOCKING_READER_PID"
 }
 
 locking::start_writer() {
-    (
-        local result=0
-        core::begin 'Apply fixture profile' || result=$?
-        if ((result == 0)); then
-            printf 'changed\n' >"$BATS_TEST_TMPDIR/mutation"
-            core::end
-        fi
-        printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/writer-result"
-    ) >"$BATS_TEST_TMPDIR/writer-output" 2>&1 &
-    LOCKING_WRITER_PID=$!
-    LOCKING_PIDS+=("$LOCKING_WRITER_PID")
+    locking::start_fixture writer <<'WRITER'
+result=0
+core::begin 'Apply fixture profile' || result=$?
+if ((result == 0)); then
+    printf 'changed\n' >"$BATS_TEST_TMPDIR/mutation"
+    core::end
+fi
+printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/writer-result"
+WRITER
+    LOCKING_WRITER_PID=$LOCKING_LAST_PID
     locking::wait_for_writer
+}
+
+locking::shorten_inspection_timeout() {
+    core::timeout() {
+        # Assert production limits, shorten only the outer test deadline, and
+        # preserve the real GNU selector and process-group signal behavior.
+        [[ $1 == --kill-after=3s && $2 == 60s ]] || return 99
+        shift 2
+        local result=0 program
+        program=$(core::timeout_program) || return 99
+        printf '%s\n' "$program" >"$BATS_TEST_TMPDIR/timeout-program"
+        "$program" --version >"$BATS_TEST_TMPDIR/timeout-version"
+        "$program" --kill-after=0.2s 3s "$@" 3>&- &
+        local supervisor_pid=$!
+        printf '%s\n' "$supervisor_pid" >"$BATS_TEST_TMPDIR/timeout-pid"
+        wait "$supervisor_pid" || result=$?
+        printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/timeout-result"
+        return "$result"
+    }
+    LOCKING_GROUP_FILES+=("$BATS_TEST_TMPDIR/timeout-pid")
+}
+
+locking::start_inspection() {
+    status::refresh() { return 99; }
+    cli::status() { : >"$BATS_TEST_TMPDIR/displayed-status"; }
+    locking::start_fixture inspection <<'INSPECTION'
+result=0
+api::inspect || result=$?
+printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/inspection-result"
+INSPECTION
+    LOCKING_INSPECTION_PID=$LOCKING_LAST_PID
 }
 
 locking::assert_no_transaction() {
@@ -191,14 +291,13 @@ locking::assert_descriptor_closed() {
 
 @test 'foreground change waits behind active expiry bookkeeping and prevents new background work' {
     mkfifo "$BATS_TEST_TMPDIR/expiry-release"
-    (
-        core::try_begin 'Reconcile expiry metadata' || exit "$?"
-        : >"$BATS_TEST_TMPDIR/expiry-ready"
-        IFS= read -r _ <"$BATS_TEST_TMPDIR/expiry-release"
-        core::end
-    ) >"$BATS_TEST_TMPDIR/expiry-output" 2>&1 &
-    local expiry_pid=$! result=0
-    LOCKING_PIDS+=("$expiry_pid")
+    locking::start_fixture expiry <<'EXPIRY'
+core::try_begin 'Reconcile expiry metadata' || exit "$?"
+: >"$BATS_TEST_TMPDIR/expiry-ready"
+IFS= read -r _ <"$BATS_TEST_TMPDIR/expiry-release"
+core::end
+EXPIRY
+    local expiry_pid=$LOCKING_LAST_PID result=0
     locking::wait_for_file "$BATS_TEST_TMPDIR/expiry-ready"
     # Bookkeeping excludes mutations through the main lock but leaves the
     # admission gate available for a foreground operation to claim priority.
@@ -216,7 +315,7 @@ locking::assert_descriptor_closed() {
     [[ $result -eq 75 ]]
     [[ -z $CORE_TRANSACTION ]]
     locking::assert_writer_descriptors_closed
-    printf 'finish\n' >"$BATS_TEST_TMPDIR/expiry-release"
+    locking::send_release "$BATS_TEST_TMPDIR/expiry-release"
     locking::reap "$expiry_pid"
     locking::wait_for_file "$BATS_TEST_TMPDIR/writer-result"
     locking::reap "$LOCKING_WRITER_PID"
@@ -349,15 +448,14 @@ locking::assert_descriptor_closed() {
 
 @test 'readers skip a legacy exclusive writer and close failed acquisition descriptors' {
     mkfifo "$BATS_TEST_TMPDIR/legacy-release"
-    (
-        exec 9>"$CORE_STATE/lock"
-        chmod 0600 "$CORE_STATE/lock"
-        command flock -x 9
-        : >"$BATS_TEST_TMPDIR/legacy-ready"
-        IFS= read -r _ <"$BATS_TEST_TMPDIR/legacy-release"
-    ) >"$BATS_TEST_TMPDIR/legacy-output" 2>&1 &
-    local pid=$! result=0
-    LOCKING_PIDS+=("$pid")
+    locking::start_fixture legacy <<'LEGACY'
+exec 9>"$CORE_STATE/lock"
+chmod 0600 "$CORE_STATE/lock"
+command flock -x 9
+: >"$BATS_TEST_TMPDIR/legacy-ready"
+IFS= read -r _ <"$BATS_TEST_TMPDIR/legacy-release"
+LEGACY
+    local pid=$LOCKING_LAST_PID result=0
     locking::wait_for_file "$BATS_TEST_TMPDIR/legacy-ready"
     core::read_begin || result=$?
     [[ $result -eq 75 ]]
@@ -365,7 +463,7 @@ locking::assert_descriptor_closed() {
     locking::assert_descriptor_closed 8
     command flock -n "$CORE_STATE/lock-admission" true
     kill -0 "$pid"
-    printf 'finish\n' >"$BATS_TEST_TMPDIR/legacy-release"
+    locking::send_release "$BATS_TEST_TMPDIR/legacy-release"
     locking::reap "$pid"
 }
 
@@ -396,25 +494,9 @@ status::refresh() {
 STATUS
     mkfifo "$CORE_STATE/collector-release"
     printf 'previous verified snapshot\n' >"$CORE_STATE/previous-cache"
-    status::refresh() { return 99; }
-    cli::status() { : >"$BATS_TEST_TMPDIR/displayed-status"; }
-    timeout() {
-        # Assert the real caller's production limits, then shorten only this
-        # test's deadline. GNU timeout still owns and signals the whole group.
-        [[ $1 == --kill-after=3s && $2 == 60s ]] || return 99
-        shift 2
-        local result=0
-        command timeout --kill-after=0.2s 3s "$@" || result=$?
-        printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/timeout-result"
-        return "$result"
-    }
-    (
-        result=0
-        api::inspect || result=$?
-        printf '%s\n' "$result" >"$BATS_TEST_TMPDIR/inspection-result"
-    ) >"$BATS_TEST_TMPDIR/inspection-output" 2>&1 &
-    local inspection_pid=$! inode
-    LOCKING_PIDS+=("$inspection_pid")
+    locking::shorten_inspection_timeout
+    locking::start_inspection
+    local inode
     locking::wait_for_file "$CORE_STATE/collector-ready"
     inode=$(command stat -c %i "$CORE_STATE/lock")
     locking::start_writer
@@ -422,7 +504,7 @@ STATUS
     locking::wait_for_file "$BATS_TEST_TMPDIR/writer-result"
     locking::wait_for_file "$BATS_TEST_TMPDIR/inspection-result"
     locking::reap "$LOCKING_WRITER_PID"
-    locking::reap "$inspection_pid"
+    locking::reap "$LOCKING_INSPECTION_PID"
     # TERM alone cannot release the descendant's inherited SH lock. Exit 137
     # proves the real supervisor escalated to KILL before the writer continued.
     [[ $(cat "$BATS_TEST_TMPDIR/timeout-result") == 137 ]]
@@ -534,5 +616,64 @@ STATUS
         [[ $status -eq 1 ]]
     done
     core::end
+    command flock -n "$CORE_STATE/lock-admission" flock -n "$CORE_STATE/lock" true
+}
+
+@test 'nested native status probes stay in the outer supervisor group without inheriting operation locks' {
+    ((EUID == 0)) || skip 'the production status daemon requires administrator identity'
+    locking::stage_after_change_collector
+    # Exercise the production status::run and core::timeout together. Only the
+    # native observation command is a fixture; its inner 6+1-second bound is
+    # unchanged and must not provide the outer 3+0.2-second recovery.
+    cp "$BATS_TEST_DIRNAME/../src/lib/status.sh" "$OCTOSHIELD_ROOT/src/lib/status.sh"
+    cat >>"$OCTOSHIELD_ROOT/src/lib/status.sh" <<'STATUS'
+status::refresh() {
+    local process state parent group remaining
+    IFS= read -r process </proc/self/stat
+    read -r state parent group remaining <<<"${process##*) }"
+    printf '%s\n' "$group" >"$CORE_STATE/observer-group"
+    status::run /bin/bash "$CORE_STATE/native-probe" "$CORE_STATE"
+}
+STATUS
+    cat >"$CORE_STATE/native-probe" <<'PROBE'
+state_directory=$1
+trap '' TERM
+IFS= read -r process </proc/self/stat
+read -r state parent group remaining <<<"${process##*) }"
+printf '%s\n' "$group" >"$state_directory/probe-group"
+for descriptor in 6 8 9; do
+    if { : >&"$descriptor"; } 2>/dev/null; then
+        printf '%s\n' "$descriptor" >"$state_directory/inherited-lock"
+        exit 98
+    fi
+done
+: >"$state_directory/collector-ready"
+counter=0
+while :; do
+    printf '%s\n' "$counter" >"$state_directory/probe-heartbeat"
+    counter=$((counter + 1))
+    sleep 0.02
+done
+PROBE
+    locking::shorten_inspection_timeout
+    locking::start_inspection
+    locking::wait_for_file "$CORE_STATE/collector-ready"
+    [[ ! -e $CORE_STATE/inherited-lock ]]
+    # Comparing the real kernel process groups prevents this regression from
+    # passing merely because an escaped inner supervisor eventually expires.
+    [[ $(cat "$CORE_STATE/probe-group") == "$(cat "$CORE_STATE/observer-group")" ]]
+    locking::start_writer
+    [[ ! -e $BATS_TEST_TMPDIR/mutation ]]
+    locking::wait_for_file "$BATS_TEST_TMPDIR/inspection-result"
+    locking::wait_for_file "$BATS_TEST_TMPDIR/writer-result"
+    locking::reap "$LOCKING_INSPECTION_PID"
+    locking::reap "$LOCKING_WRITER_PID"
+    [[ $(cat "$BATS_TEST_TMPDIR/timeout-result") == 137 ]]
+    [[ $(cat "$BATS_TEST_TMPDIR/inspection-result") == 1 ]]
+    [[ $(cat "$BATS_TEST_TMPDIR/writer-result") == 0 ]]
+    local heartbeat
+    heartbeat=$(cat "$CORE_STATE/probe-heartbeat")
+    sleep 0.2
+    [[ $(cat "$CORE_STATE/probe-heartbeat") == "$heartbeat" ]]
     command flock -n "$CORE_STATE/lock-admission" flock -n "$CORE_STATE/lock" true
 }
