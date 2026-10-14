@@ -17,12 +17,12 @@ Read the [feature guide](docs/features.md) for the complete capability overview 
 
 ### Desktop application and CLI: install the package
 
-Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version 1.2.0 is published after this release branch merges and its checks pass. Its release provides these packages:
+Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version 1.2.1 is published after this release branch merges and its checks pass. Its release provides these packages:
 
-| Ubuntu / architecture | Download | Package install command for version 1.2.0 |
+| Ubuntu / architecture | Download | Package install command for version 1.2.1 |
 | --- | --- | --- |
-| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.0/octoshield_1.2.0_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.0/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.2.0_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.0/octoshield_1.2.0_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.0/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.2.0_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.1/octoshield_1.2.1_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.1/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.2.1_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.2.1/octoshield_1.2.1_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.2.1/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.2.1_ubuntu26.04_amd64.deb` |
 
 Choose the package matching **both your Ubuntu release and CPU architecture**:
 
@@ -46,7 +46,9 @@ fi
 
 Open **OctoShield** from GNOME's application launcher, or run `octoshield-gtk`. No reboot is required. Run it as your normal desktop user: the system administrator dialog unlocks the application once, and its authenticated session lasts until the window closes. You can then refresh status and review changes without entering a password for every action. Locking the application or desktop also ends the authorization and requires another unlock. The GTK process still runs as your own user; only the fixed system-control helper receives administrator privileges. Installation starts the background status observer, but does not apply hardening, enroll USB devices, select a profile, or enable security-event collection automatically.
 
-To upgrade an existing 1.0.0 or 1.1.0 installation, download the matching 1.2.0 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
+To upgrade an existing 1.0.0, 1.1.0 or 1.2.0 installation, download the matching 1.2.1 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
+
+Version 1.2.1 fixes upgrades incorrectly blocked by background status inspection. The installer pauses that observer before acquiring its replacement lock and restores its previous running state afterward. An older package may print a failed `prerm` warning before dpkg automatically recovers using the new package's script. You do not need to uninstall first or delete a lock file. A real protection change must finish before replacement; the installer waits briefly and safely refuses if that operation is still busy. See [upgrade troubleshooting](docs/distribution.md#upgrade-troubleshooting).
 
 The package also installs `/usr/bin/octoshield`:
 
@@ -61,7 +63,7 @@ If you previously installed the standalone version, `/usr/local/bin/octoshield` 
 For CLI-only use, install from the public release checkout. With Git available:
 
 ```bash
-git clone --branch v1.2.0 --depth 1 https://github.com/octoleo/octoshield.git
+git clone --branch v1.2.1 --depth 1 https://github.com/octoleo/octoshield.git
 cd octoshield
 bash src/octoshield install
 ```
@@ -233,7 +235,7 @@ Disabling desktop notifications does not disable the firewall, USB policy, or sy
 
 `octoshield desktop restore` restores only the saved GNOME settings from before first apply. System snapshots are private and are not automatically reapplied; see [docs/recovery.md](docs/recovery.md) for targeted recovery, partial failures, and USB lockout instructions.
 
-`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.2.0.
+`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.2.1.
 
 ## Scope and limits
 
