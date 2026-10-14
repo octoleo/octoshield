@@ -50,7 +50,17 @@ profile_checksum=''
 usb_policy_checksum=''
 monitor_enabled=false
 policy_snapshot=$(mktemp)
-trap 'rm -f -- "$policy_snapshot"' EXIT
+observer_fixture=$(mktemp -d)
+observer_pid=''
+cleanup() {
+    if [[ -n $observer_pid ]]; then
+        kill "$observer_pid" 2>/dev/null || :
+        wait "$observer_pid" 2>/dev/null || :
+    fi
+    rm -f -- "$policy_snapshot"
+    rm -rf -- "$observer_fixture"
+}
+trap cleanup EXIT
 for directory in /etc/ufw /etc/usbguard /etc/NetworkManager /etc/sudoers.d /etc/apparmor.d; do
     if [[ -d $directory ]]; then
         find "$directory" -type f -exec sha256sum {} + >>"$policy_snapshot"
@@ -89,6 +99,74 @@ check_inactive_services() {
             fail 'installation started the security monitor without an operator choice'
         fi
     fi
+}
+
+# These disposable CI containers do not boot systemd. Model only the status
+# unit's service-manager boundary while keeping the real dpkg scripts and flock
+# behavior. No protection daemon, policy command or unrelated unit is mocked.
+export PACKAGE_LIFECYCLE_OBSERVER_PID="$observer_fixture/pid"
+export PACKAGE_LIFECYCLE_OBSERVER_ACTIVE="$observer_fixture/active"
+export PACKAGE_LIFECYCLE_OBSERVER_LOG="$observer_fixture/systemctl.log"
+export PACKAGE_LIFECYCLE_SYSTEMCTL
+PACKAGE_LIFECYCLE_SYSTEMCTL=$(command -v systemctl)
+mkdir "$observer_fixture/bin"
+cat >"$observer_fixture/bin/systemctl" <<'MOCK'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PACKAGE_LIFECYCLE_OBSERVER_LOG"
+case "$*" in
+    'is-active --quiet octoshield-status.service') test -f "$PACKAGE_LIFECYCLE_OBSERVER_ACTIVE" ;;
+    'stop octoshield-status.service')
+        if [ -f "$PACKAGE_LIFECYCLE_OBSERVER_PID" ]; then
+            pid=$(cat "$PACKAGE_LIFECYCLE_OBSERVER_PID")
+            kill "$pid" || exit 1
+            attempts=0
+            while kill -0 "$pid" 2>/dev/null; do
+                state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || break
+                [ "$state" != Z ] || break
+                attempts=$((attempts + 1))
+                [ "$attempts" -lt 200 ] || exit 1
+                sleep 0.01
+            done
+            rm -f "$PACKAGE_LIFECYCLE_OBSERVER_PID"
+        fi
+        rm -f "$PACKAGE_LIFECYCLE_OBSERVER_ACTIVE"
+        ;;
+    'start octoshield-status.service') touch "$PACKAGE_LIFECYCLE_OBSERVER_ACTIVE" ;;
+    *) exec "$PACKAGE_LIFECYCLE_SYSTEMCTL" "$@" ;;
+esac
+MOCK
+chmod 0755 "$observer_fixture/bin/systemctl"
+start_observer_fixture() {
+    [[ -z $observer_pid ]] || fail 'previous observer fixture was not reaped'
+    rm -f "$observer_fixture/ready"
+    : >"$PACKAGE_LIFECYCLE_OBSERVER_LOG"
+    (
+        umask 077
+        exec 9>>/var/lib/octoshield/lock
+        flock --shared 9
+        touch "$observer_fixture/ready"
+        exec sleep 120
+    ) &
+    observer_pid=$!
+    printf '%s\n' "$observer_pid" >"$PACKAGE_LIFECYCLE_OBSERVER_PID"
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        [[ ! -e $observer_fixture/ready ]] || break
+        sleep 0.01
+    done
+    [[ -e $observer_fixture/ready ]] || fail 'observer fixture did not acquire its shared lock'
+    touch "$PACKAGE_LIFECYCLE_OBSERVER_ACTIVE"
+    if flock --nonblock /var/lib/octoshield/lock true; then fail 'observer fixture does not hold a real shared operation lock'; fi
+}
+upgrade_with_observer_fixture() {
+    local result=0
+    PATH="$observer_fixture/bin:$PATH" timeout 30 dpkg --install "$archive" >"$observer_fixture/upgrade.log" 2>&1 || result=$?
+    cat "$observer_fixture/upgrade.log"
+    ((result == 0)) || fail 'package upgrade failed while only the read-only observer held a shared lock'
+    wait "$observer_pid" 2>/dev/null || :
+    observer_pid=''
+    [[ ! -e $PACKAGE_LIFECYCLE_OBSERVER_PID ]] || fail 'package upgrade did not stop the old observer'
+    [[ -e $PACKAGE_LIFECYCLE_OBSERVER_ACTIVE ]] || fail 'package upgrade did not restart the previously running observer'
+    [[ ! -e /run/octoshield-package-maintenance ]] || fail 'package upgrade left maintenance exclusion behind'
 }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -142,14 +220,33 @@ ln -s /usr/lib/systemd/system/octoshield-monitor.service /etc/systemd/system/mul
 monitor_enabled=true
 
 # CI supplies the published previous release to exercise a genuine upgrade.
-# A running control must cause nonblocking refusal before package replacement.
+# A running control must cause bounded refusal before package replacement.
 exec 8>/var/lib/octoshield/lock
+chmod 0600 /var/lib/octoshield/lock
 flock -n 8 || fail 'cannot acquire disposable operation lock'
 if dpkg --install "$archive"; then fail 'upgrade was allowed during an active protection change'; fi
+[[ $(dpkg-query -W -f='${Version}' octoshield) == "$(dpkg-deb --field "$baseline" Version)" ]] || fail 'refused upgrade replaced the installed baseline'
+if flock --nonblock /var/lib/octoshield/lock true; then fail 'refused upgrade released the active operation lock'; fi
 [[ ! -e /run/octoshield-package-maintenance ]] || fail 'refused upgrade left a maintenance marker'
 flock -u 8
 exec 8>&-
-dpkg --install "$archive"
+
+start_observer_fixture
+if [[ ${baseline_version:-} == 1.1.0 || ${baseline_version:-} == 1.2.0 ]]; then
+    # Demonstrate the actual published failure before trying the fixed package.
+    # The old script must reject a shared read lock before it can stop the unit.
+    previous_result=0
+    PATH="$observer_fixture/bin:$PATH" /bin/sh /var/lib/dpkg/info/octoshield.prerm upgrade "$destination_version" >"$observer_fixture/old-prerm.log" 2>&1 || previous_result=$?
+    [[ $previous_result -eq 1 ]] || fail 'published baseline no longer reproduces the reported observer-lock failure'
+    grep -Fq 'a protection change is still running' "$observer_fixture/old-prerm.log" || fail 'baseline failed for a different reason'
+    [[ ! -s $PACKAGE_LIFECYCLE_OBSERVER_LOG ]] || fail 'baseline unexpectedly reached observer shutdown before its lock refusal'
+    [[ ! -e /run/octoshield-package-maintenance ]] || fail 'baseline refusal left maintenance exclusion behind'
+    printf 'PASS: published %s reproduces the shared observer-lock refusal before replacement.\n' "$baseline_version"
+fi
+upgrade_with_observer_fixture
+if [[ ${baseline_version:-} == 1.1.0 || ${baseline_version:-} == 1.2.0 ]]; then
+    grep -Fq 'trying prerm maintainer script from the new' "$observer_fixture/upgrade.log" || fail 'dpkg did not exercise failed-upgrade recovery from the published baseline'
+fi
 [[ $(dpkg-query -W -f='${Version}' octoshield) == "$(dpkg-deb --field "$archive" Version)" ]] || fail 'new version was not installed'
 /usr/bin/octoshield --help >/dev/null
 [[ ! -e /run/octoshield-package-maintenance ]] || fail 'upgrade did not release maintenance exclusion'
@@ -165,7 +262,8 @@ check_inactive_services
 
 # Old baselines without named profiles acquire a persistence fixture now.
 if [[ -z $profile_checksum ]]; then seed_profile_choices; fi
-dpkg --install "$archive"
+start_observer_fixture
+upgrade_with_observer_fixture
 check_preserved_state
 check_inactive_services
 
@@ -177,4 +275,4 @@ check_preserved_state
 apt-get purge --yes octoshield
 [[ ! -e /etc/xdg/autostart/io.vdm.OctoShield.UsbAgent.desktop ]] || fail 'package purge left its USB autostart entry installed'
 check_preserved_state
-printf '%s\n' 'PASS: actual disposable-CI install, version upgrade, reinstall, remove, and purge preserved native policies, profiles, user preferences, and recovery snapshots.'
+printf '%s\n' 'PASS: published-baseline lock recovery, observer-active upgrade/reinstall, exclusive-mutation refusal, removal and purge preserved native policies, profiles, user preferences, and recovery snapshots.'

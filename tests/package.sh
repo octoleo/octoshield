@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Validate source metadata, mocked lifecycle behavior, and optionally a built .deb.
+# Validate metadata, real advisory-lock lifecycle behavior, and optionally a .deb.
 # No package is installed and no real service or security control is invoked.
 set -Eeuo pipefail
 IFS=$' \t\n'
@@ -12,6 +12,7 @@ mkdir "$fixture/mock-bin"
 export PACKAGE_TEST_STATE="$fixture/state"
 maintenance="$fixture/package-maintenance"
 mkdir "$fixture/lifecycle"
+mkdir -m 0700 "$PACKAGE_TEST_STATE"
 for script in prerm postinst postrm; do
     sed -e "s@/var/lib/octoshield@$PACKAGE_TEST_STATE@g" \
         -e "s@/run/octoshield-package-maintenance@$maintenance@g" \
@@ -84,7 +85,37 @@ grep -Fx 'Icon=io.vdm.OctoShield' "$repo/data/io.vdm.OctoShield.desktop" >/dev/n
 cat >"$fixture/mock-bin/systemctl" <<'MOCK'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >>"$PACKAGE_TEST_LOG"
-exit "${PACKAGE_TEST_SYSTEMCTL_EXIT:-0}"
+if [ "${PACKAGE_TEST_SYSTEMCTL_EXIT:-0}" -ne 0 ]; then exit "$PACKAGE_TEST_SYSTEMCTL_EXIT"; fi
+case "$*" in
+    'is-active --quiet octoshield-status.service') test -f "$PACKAGE_TEST_OBSERVER_ACTIVE" ;;
+    'is-enabled --quiet octoshield-status.service') test -f "$PACKAGE_TEST_OBSERVER_ENABLED" ;;
+    'stop octoshield-status.service')
+        if [ "${PACKAGE_TEST_REQUIRE_MARKER:-false}" = true ] && [ ! -f "$PACKAGE_TEST_MAINTENANCE" ]; then
+            touch "$PACKAGE_TEST_BAD_STOP"
+            exit 1
+        fi
+        [ "${PACKAGE_TEST_STOP_FAILURE:-false}" != true ] || exit 1
+        if [ -f "$PACKAGE_TEST_OBSERVER_PID" ]; then
+            pid=$(cat "$PACKAGE_TEST_OBSERVER_PID")
+            kill "$pid" || exit 1
+            # A real observer process owns a real shared flock. Wait until it
+            # exits (or is awaiting its parent's wait), as systemctl stop does.
+            attempts=0
+            while kill -0 "$pid" 2>/dev/null; do
+                state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || break
+                [ "$state" != Z ] || break
+                attempts=$((attempts + 1))
+                [ "$attempts" -lt 200 ] || exit 1
+                sleep 0.01
+            done
+            rm -f "$PACKAGE_TEST_OBSERVER_PID"
+        fi
+        rm -f "$PACKAGE_TEST_OBSERVER_ACTIVE"
+        ;;
+    'start octoshield-status.service') touch "$PACKAGE_TEST_OBSERVER_ACTIVE" ;;
+    'enable octoshield-status.service') touch "$PACKAGE_TEST_OBSERVER_ENABLED" ;;
+    'disable octoshield-status.service') rm -f "$PACKAGE_TEST_OBSERVER_ENABLED" ;;
+esac
 MOCK
 cat >"$fixture/mock-bin/loginctl" <<'MOCK'
 #!/bin/sh
@@ -93,56 +124,158 @@ MOCK
 cat >"$fixture/mock-bin/stat" <<'MOCK'
 #!/bin/sh
 # Maintainer scripts run as root; fixture directories may belong to a CI user.
-if [ "$*" = "-c %u:%a $PACKAGE_TEST_STATE" ]; then
-    printf '%s\n' 0:700
-else
-    exec /usr/bin/stat "$@"
-fi
+# Preserve actual modes and hard-link counts so unsafe-file tests stay real.
+case "$*" in
+    "-c %u:%a $PACKAGE_TEST_STATE") printf '0:%s\n' "$(/usr/bin/stat -c %a "$PACKAGE_TEST_STATE")" ;;
+    "-c %u:%a:%h $PACKAGE_TEST_STATE/lock" | "-c %u:%a:%h $PACKAGE_TEST_MAINTENANCE")
+        printf '0:%s\n' "$(/usr/bin/stat -c '%a:%h' "$3")"
+        ;;
+    *) exec /usr/bin/stat "$@" ;;
+esac
 MOCK
 chmod 0755 "$fixture/mock-bin/systemctl" "$fixture/mock-bin/loginctl" "$fixture/mock-bin/stat"
-
+export PACKAGE_TEST_MAINTENANCE="$maintenance"
+export PACKAGE_TEST_OBSERVER_ACTIVE="$fixture/observer-active"
+export PACKAGE_TEST_OBSERVER_ENABLED="$fixture/observer-enabled"
+export PACKAGE_TEST_OBSERVER_PID="$fixture/observer-pid"
+export PACKAGE_TEST_BAD_STOP="$fixture/stop-without-marker"
+observer_pid=''
+cleanup() {
+    if [[ -n $observer_pid ]]; then
+        kill "$observer_pid" 2>/dev/null || :
+        wait "$observer_pid" 2>/dev/null || :
+    fi
+    rm -rf -- "$fixture"
+}
+trap cleanup EXIT
+observer_state() {
+    rm -f "$PACKAGE_TEST_OBSERVER_ENABLED" "$PACKAGE_TEST_OBSERVER_ACTIVE"
+    if [[ $1 == enabled ]]; then touch "$PACKAGE_TEST_OBSERVER_ENABLED"; fi
+    if [[ $2 == active ]]; then touch "$PACKAGE_TEST_OBSERVER_ACTIVE"; fi
+}
+observer_start() {
+    [[ -z $observer_pid ]] || fail 'fixture observer already started'
+    rm -f "$fixture/observer-ready"
+    (
+        umask 077
+        exec 9>"$PACKAGE_TEST_STATE/lock"
+        flock --shared 9
+        touch "$fixture/observer-ready"
+        exec sleep 120
+    ) &
+    observer_pid=$!
+    printf '%s\n' "$observer_pid" >"$PACKAGE_TEST_OBSERVER_PID"
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        [[ ! -f $fixture/observer-ready ]] || break
+        sleep 0.01
+    done
+    [[ -f $fixture/observer-ready ]] || fail 'fixture observer did not acquire its shared lock'
+    touch "$PACKAGE_TEST_OBSERVER_ACTIVE"
+    if flock --nonblock "$PACKAGE_TEST_STATE/lock" true; then fail 'shared fixture observer does not hold the actual operation lock'; fi
+}
+observer_wait() {
+    wait "$observer_pid" 2>/dev/null || :
+    observer_pid=''
+    rm -f "$PACKAGE_TEST_OBSERVER_PID"
+}
 lifecycle() {
+    local result=0 marker_required=false
     : >"$PACKAGE_TEST_LOG"
-    PATH="$fixture/mock-bin:/usr/bin:/bin" /bin/sh "$fixture/lifecycle/$1" "${@:2}" >"$fixture/lifecycle-output" 2>&1
+    [[ $1 != prerm ]] || marker_required=true
+    PACKAGE_TEST_REQUIRE_MARKER="$marker_required" PATH="$fixture/mock-bin:/usr/bin:/bin" /bin/sh "$fixture/lifecycle/$1" "${@:2}" >"$fixture/lifecycle-output" 2>&1 || result=$?
+    [[ ! -e $PACKAGE_TEST_BAD_STOP ]] || fail 'observer was stopped before excluding new operations'
+    return "$result"
 }
 
+observer_state disabled inactive
 lifecycle postinst configure
 equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl enable octoshield-status.service\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'installation starts only the status observer'
 lifecycle postinst configure 1.0.0
 equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl enable octoshield-status.service\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'migration from 1.0 starts the new observer without changing controls'
 lifecycle postinst configure 1.1.0
 equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl is-enabled --quiet octoshield-status.service\nsystemctl start octoshield-status.service' 'later upgrade retains observer enablement choice'
-PACKAGE_TEST_SYSTEMCTL_EXIT=1 lifecycle postinst configure 1.1.0
+observer_state disabled inactive
+lifecycle postinst configure 1.1.0
 equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl is-enabled --quiet octoshield-status.service' 'disabled observer is not enabled or started by later upgrade'
-lifecycle prerm upgrade
-equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl stop octoshield-status.service' 'upgrade pauses only observer before replacing its modules'
-[[ -f $maintenance && $(stat -c %a "$maintenance") == 600 ]] || fail 'upgrade must leave a private maintenance marker while dpkg replaces files'
-lifecycle postrm upgrade
-equal "$(cat "$PACKAGE_TEST_LOG")" '' 'upgrade must not disable controls'
-[[ -f $maintenance ]] || fail 'old package postrm upgrade must not unlock the replacing package'
-lifecycle postinst configure
-[[ ! -e $maintenance ]] || fail 'successful configuration must release maintenance exclusion'
 
-# An active root operation makes removal and upgrade fail without waiting,
-# stopping services, creating a maintenance marker, or force-killing anything.
+# The old installed prerm can fail on a read-only observer; dpkg then calls the
+# new script with failed-upgrade. Exercise both entry points with a real child
+# holding the shared operation lock, released only by the mocked service stop.
+for action in upgrade failed-upgrade; do
+    observer_state disabled active
+    observer_start
+    lifecycle prerm "$action"
+    observer_wait
+    equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl is-active --quiet octoshield-status.service\nsystemctl stop octoshield-status.service' 'upgrade pauses only the observer before acquiring exclusive access'
+    equal "$(cat "$maintenance")" status-active 'maintenance remembers a running observer even when disabled'
+    [[ $(stat -c %a "$maintenance") == 600 ]] || fail 'maintenance marker must be private'
+    [[ ! -e $PACKAGE_TEST_OBSERVER_ACTIVE ]] || fail 'observer remained active during package replacement'
+    flock --nonblock "$PACKAGE_TEST_STATE/lock" true || fail 'observer lock leaked after prerm completed'
+    lifecycle postrm upgrade
+    lifecycle postrm failed-upgrade
+    equal "$(cat "$PACKAGE_TEST_LOG")" '' 'upgrade must not disable controls'
+    [[ -f $maintenance ]] || fail 'old package postrm upgrade must not unlock the replacing package'
+    lifecycle postinst configure 1.2.0
+    equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl daemon-reload\nsystemctl start octoshield-status.service' 'upgrade restores a previously running disabled observer without enabling it'
+    [[ ! -e $maintenance && -e $PACKAGE_TEST_OBSERVER_ACTIVE && ! -e $PACKAGE_TEST_OBSERVER_ENABLED ]] || fail 'successful configuration changed the observer choice or kept maintenance exclusion'
+done
+observer_state enabled inactive
+lifecycle prerm upgrade
+equal "$(cat "$maintenance")" status-inactive 'maintenance remembers a deliberately stopped observer'
+lifecycle postinst configure 1.2.0
+equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl daemon-reload' 'upgrade must preserve a stopped observer even when enabled'
+[[ ! -e $PACKAGE_TEST_OBSERVER_ACTIVE ]] || fail 'upgrade started a deliberately stopped observer'
+
+# An active root mutation remains protected. The observer may be quiesced, but
+# refusal must restore its exact running state, remove only our new marker and
+# leave the exclusive lock holder alive. No native protection is stopped.
 exec 8>"$PACKAGE_TEST_STATE/lock"
+chmod 0600 "$PACKAGE_TEST_STATE/lock"
 flock -n 8 || fail 'cannot acquire fixture operation lock'
 for action in remove upgrade failed-upgrade deconfigure; do
+    observer_state disabled active
     if lifecycle prerm "$action"; then fail 'package change ignored an active protection change'; fi
-    equal "$(cat "$PACKAGE_TEST_LOG")" '' 'active operation refusal must precede service changes'
-    [[ ! -e $maintenance ]] || fail 'refused package operation created a maintenance marker'
+    equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl is-active --quiet octoshield-status.service\nsystemctl stop octoshield-status.service\nsystemctl start octoshield-status.service' 'active mutation refusal must restore the observer and leave native protections alone'
+    [[ ! -e $maintenance ]] || fail 'refused package operation left a maintenance marker'
+    [[ -e $PACKAGE_TEST_OBSERVER_ACTIVE && ! -e $PACKAGE_TEST_OBSERVER_ENABLED ]] || fail 'refused package operation changed observer enablement or activity'
     grep -Fq 'Let the operation finish, then retry APT' "$fixture/lifecycle-output" || fail 'active operation refusal must explain how to retry'
+    if flock --nonblock "$PACKAGE_TEST_STATE/lock" true; then fail 'refusal released another process operation lock'; fi
 done
+observer_state enabled inactive
+if lifecycle prerm upgrade; then fail 'inactive observer bypassed an exclusive mutation lock'; fi
+[[ ! -e $PACKAGE_TEST_OBSERVER_ACTIVE && ! -e $maintenance ]] || fail 'refusal started a previously stopped observer or left its marker'
 flock -u 8
 exec 8>&-
-# dpkg retries a failed old prerm through the new prerm's failed-upgrade action;
-# that recovery entry point must perform the same check, never bypass the lock.
-lifecycle prerm failed-upgrade
-[[ -f $maintenance ]] || fail 'failed-upgrade recovery must retain maintenance exclusion'
-lifecycle postinst abort-upgrade
-[[ ! -e $maintenance ]] || fail 'aborted upgrade must release maintenance exclusion'
+
+# Failure to stop the observer is a genuine quiescence failure: retain its
+# live process, reject replacement and roll back the newly-created marker.
+observer_state disabled active
+observer_start
+if PACKAGE_TEST_STOP_FAILURE=true lifecycle prerm upgrade; then fail 'upgrade ignored failure to stop an active observer'; fi
+kill -0 "$observer_pid" || fail 'stop failure killed the observer outside systemctl'
+[[ ! -e $maintenance && -e $PACKAGE_TEST_OBSERVER_ACTIVE ]] || fail 'observer stop failure did not restore pre-upgrade state'
+kill "$observer_pid"
+observer_wait
+
+for action in abort-upgrade abort-remove abort-deconfigure; do
+    observer_state disabled active
+    lifecycle prerm upgrade
+    lifecycle postinst "$action"
+    equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl start octoshield-status.service' 'aborted package change restores its previously active observer'
+    [[ ! -e $maintenance && -e $PACKAGE_TEST_OBSERVER_ACTIVE ]] || fail "postinst $action did not restore observer and release exclusion"
+done
+# A new postrm abort-upgrade can run before the old package's postinst. It
+# must restore a disabled-but-running observer itself before clearing the data
+# that the old script would otherwise be unable to understand.
+observer_state disabled active
+lifecycle prerm upgrade
+lifecycle postrm abort-upgrade
+equal "$(cat "$PACKAGE_TEST_LOG")" 'systemctl start octoshield-status.service' 'new postrm abort recovery restores a previously active disabled observer'
+[[ ! -e $maintenance && -e $PACKAGE_TEST_OBSERVER_ACTIVE && ! -e $PACKAGE_TEST_OBSERVER_ENABLED ]] || fail 'postrm abort recovery lost the observer running choice'
+
+observer_state disabled inactive
 lifecycle prerm remove
-equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl stop octoshield-status.service\nsystemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1000@.host stop octoshield-usb-agent.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host stop octoshield-usb-agent.service' 'removal stops our observer, monitor and USB agent and disables our notifier for numeric active users'
+equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl is-active --quiet octoshield-status.service\nsystemctl stop octoshield-status.service\nsystemctl stop octoshield-monitor.service\nsystemctl --user --machine=1000@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1000@.host stop octoshield-usb-agent.service\nsystemctl --user --machine=1001@.host disable --now octoshield-notify.service\nsystemctl --user --machine=1001@.host stop octoshield-usb-agent.service' 'removal stops only package-owned observers and user agents'
 grep -Fq 'security settings and private backups remain' "$fixture/lifecycle-output" || fail 'removal must disclose retained security settings'
 [[ -f $maintenance ]] || fail 'removal must exclude new protection changes'
 lifecycle postrm remove
@@ -151,10 +284,11 @@ lifecycle postrm purge
 equal "$(cat "$PACKAGE_TEST_LOG")" $'systemctl disable octoshield-status.service\nsystemctl disable octoshield-monitor.service\nsystemctl --global disable octoshield-notify.service\nsystemctl daemon-reload' 'purge affects only package-owned service enablement'
 for action in abort-upgrade abort-remove abort-deconfigure; do
     : >"$maintenance"
+    chmod 0600 "$maintenance"
     lifecycle postinst "$action"
-    [[ ! -e $maintenance ]] || fail "postinst $action failed to release maintenance exclusion"
+    [[ ! -e $maintenance ]] || fail "postinst $action failed to release legacy maintenance exclusion"
 done
-for action in failed-upgrade abort-install abort-upgrade purge; do
+for action in abort-install abort-upgrade purge; do
     : >"$maintenance"
     lifecycle postrm "$action"
     [[ ! -e $maintenance ]] || fail "postrm $action failed to release maintenance exclusion"
@@ -169,7 +303,7 @@ for stage in 'postinst configure' 'prerm remove' 'postrm purge'; do
 done
 PACKAGE_TEST_SYSTEMCTL_EXIT=1 lifecycle prerm remove
 PACKAGE_TEST_SYSTEMCTL_EXIT=1 lifecycle postrm purge
-printf '%s\n' 'PASS: desktop metadata, PolicyKit boundary, and mocked install/upgrade/remove/purge behavior.'
+printf '%s\n' 'PASS: desktop metadata, PolicyKit boundary, real upgrade locks, and isolated install/upgrade/remove/purge behavior.'
 
 if (($# == 0)); then exit 0; fi
 (($# == 1)) || fail 'usage: bash tests/package.sh [built-package.deb]'
