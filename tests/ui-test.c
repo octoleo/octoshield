@@ -36,6 +36,7 @@ static void parse_valid(void)
     g_assert_no_error(error);
     g_assert_cmpint(event.type, ==, OCTOSHIELD_EVENT_DONE);
     g_assert_true(event.success);
+    g_assert_false(event.change_started_known);
     g_assert_null(event.text);
     g_assert_cmpuint(event.id, ==, 0);
     octoshield_event_clear(&event);
@@ -44,6 +45,24 @@ static void parse_valid(void)
         "{\"type\":\"done\",\"success\":false}", -1, &event, &error));
     g_assert_no_error(error);
     g_assert_false(event.success);
+    g_assert_false(event.change_started_known);
+    octoshield_event_clear(&event);
+
+    g_assert_true(octoshield_event_parse(
+        "{\"type\":\"done\",\"success\":false,\"change_started\":false}", -1, &event, &error));
+    g_assert_no_error(error);
+    g_assert_false(event.success);
+    g_assert_true(event.change_started_known);
+    g_assert_false(event.change_started);
+    octoshield_event_clear(&event);
+    g_assert_false(event.change_started_known);
+
+    g_assert_true(octoshield_event_parse(
+        "{\"type\":\"done\",\"success\":false,\"change_started\":true}", -1, &event, &error));
+    g_assert_no_error(error);
+    g_assert_false(event.success);
+    g_assert_true(event.change_started_known);
+    g_assert_true(event.change_started);
     octoshield_event_clear(&event);
     octoshield_event_clear(&event);
     octoshield_event_clear(NULL);
@@ -79,6 +98,12 @@ static void parse_invalid(void)
         "{\"type\":\"done\",\"success\":null}",
         "{\"type\":\"done\",\"success\":[]}",
         "{\"type\":\"done\",\"success\":{}}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":\"false\"}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":0}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":1.0}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":null}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":[]}",
+        "{\"type\":\"done\",\"success\":false,\"change_started\":{}}",
         "{\"type\":\"done\",\"success\":true",
         "{\"type\":\"log\",\"text\":\"a\"}\n{\"type\":\"done\",\"success\":true}",
         "{\"type\":\"log\",\"text\":\"a\"}\n\n",

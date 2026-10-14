@@ -26,6 +26,8 @@ typedef struct {
     OctoshieldEventType type;
     gchar *text;
     gboolean success;
+    gboolean change_started_known;
+    gboolean change_started;
     guint64 id;
 } OctoshieldEvent;
 
@@ -37,6 +39,8 @@ GQuark octoshield_protocol_error_quark(void);
  * Text is owned by the event, sanitized for plain-text display, and must NEVER
  * be passed to a markup interpreter. Unknown fields are ignored for protocol
  * extensibility; required fields and their JSON types are checked strictly.
+ * Completion may include boolean change_started; absence leaves its state
+ * unknown, while false means no protection transaction was started.
  * Confirmations require an integer id in 1..OCTOSHIELD_CONFIRM_MAX_ID. Other
  * events have id zero. The caller must enforce increasing confirmation ids
  * within each helper process and include the id in every approval response. */

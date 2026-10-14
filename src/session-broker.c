@@ -516,6 +516,8 @@ static gboolean forward_event(Broker *broker, const gchar *line, gsize length)
         broker->done_seen = TRUE;
         broker->done_success = event.success;
         json_object_set_boolean_member(object, "success", event.success);
+        if (event.change_started_known)
+            json_object_set_boolean_member(object, "change_started", event.change_started);
     } else json_object_set_string_member(object, "text", event.text);
     if (valid) valid = queue_event(broker, object);
     json_object_unref(object);
