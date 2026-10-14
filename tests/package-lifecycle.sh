@@ -245,7 +245,10 @@ if [[ ${baseline_version:-} == 1.1.0 || ${baseline_version:-} == 1.2.0 ]]; then
 fi
 upgrade_with_observer_fixture
 if [[ ${baseline_version:-} == 1.1.0 || ${baseline_version:-} == 1.2.0 ]]; then
-    grep -Fq 'trying prerm maintainer script from the new' "$observer_fixture/upgrade.log" || fail 'dpkg did not exercise failed-upgrade recovery from the published baseline'
+    # dpkg versions phrase their recovery diagnostic differently. The old
+    # package's own refusal followed by successful installation proves that
+    # its failing prerm was recovered through the replacement package.
+    grep -Fq 'OctoShield: a protection change is still running' "$observer_fixture/upgrade.log" || fail 'upgrade did not exercise the published baseline prerm refusal'
 fi
 [[ $(dpkg-query -W -f='${Version}' octoshield) == "$(dpkg-deb --field "$archive" Version)" ]] || fail 'new version was not installed'
 /usr/bin/octoshield --help >/dev/null
