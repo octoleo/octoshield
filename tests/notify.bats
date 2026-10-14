@@ -9,46 +9,52 @@ setup() {
     CURRENT='{"controls":{"firewall":{"state":"active"}},"network":{"fingerprint":"same"},"usb":{"pending":1,"devices":[{"id":1,"state":"blocked"}]}}'
 }
 
+notify_fixture::status_changes() {
+    local previous_job=${!:-} notification_job result=0
+    notify::status_changes "$@" || result=$?
+    notification_job=${!:-}
+    # The notifier starts at most one asynchronous approval notification. Wait
+    # only for that new child, never for Bats' own per-test timeout watchdog.
+    if [[ -n $notification_job && $notification_job != "$previous_job" ]]; then
+        wait "$notification_job" || result=$?
+    fi
+    return "$result"
+}
+
 @test 'pending USB is announced when notifier first starts' {
-    notify::status_changes '' "$CURRENT"
-    wait
+    notify_fixture::status_changes '' "$CURRENT"
     [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
 }
 
 @test 'active automatic USB prompts suppress the duplicate approval notification' {
     usb_prompt::enabled() { return 0; }
     timeout() { [[ $* == '3s systemctl --user is-active --quiet octoshield-usb-agent.service' ]]; }
-    notify::status_changes '' "$CURRENT"
-    wait
+    notify_fixture::status_changes '' "$CURRENT"
     [ ! -e "$NOTIFY_LOG" ]
 }
 
 @test 'disabled automatic USB prompts retain notification fallback' {
     usb_prompt::enabled() { return 1; }
-    notify::status_changes '' "$CURRENT"
-    wait
+    notify_fixture::status_changes '' "$CURRENT"
     [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
 }
 
 @test 'stopped USB prompt agent retains notification fallback' {
     usb_prompt::enabled() { return 0; }
     timeout() { return 1; }
-    notify::status_changes '' "$CURRENT"
-    wait
+    notify_fixture::status_changes '' "$CURRENT"
     [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
 }
 
 @test 'unchanged status does not repeat notifications' {
-    notify::status_changes "$CURRENT" "$CURRENT"
-    wait
+    notify_fixture::status_changes "$CURRENT" "$CURRENT"
     [ ! -e "$NOTIFY_LOG" ]
 }
 
 @test 'replacement blocked USB with unchanged count produces a fresh notice' {
     local next
     next=$(jq '.usb.devices[0].id = 2' <<<"$CURRENT")
-    notify::status_changes "$CURRENT" "$next"
-    wait
+    notify_fixture::status_changes "$CURRENT" "$next"
     [ "$(cat "$NOTIFY_LOG")" = 'USB approval required' ]
 }
 
