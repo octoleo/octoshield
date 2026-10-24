@@ -11,7 +11,7 @@ protective baseline. Administrators can copy and delete custom profiles.
 A global switch applies firewall, USB, network, services, and monitoring
 settings. Selecting a different profile for one control creates an explicit
 override. An incomplete switch must never be reported as fully applied.
-Security updates, AppArmor, sudo authentication, and user screen locking remain
+Security updates, AppArmor, and user screen locking remain
 independent baseline controls rather than being weakened by location changes.
 
 Profiles are root-owned JSON data beneath `/var/lib/octoshield`; no stored

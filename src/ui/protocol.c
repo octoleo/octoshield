@@ -383,7 +383,7 @@ static gboolean connections_action(gsize argc, const gchar *const *args)
 static gboolean privileged_action(gsize argc, const gchar *const *args)
 {
     static const gchar *const controls[] = {
-        "firewall", "network", "services", "sudo", "updates", "apparmor",
+        "firewall", "network", "services", "updates", "apparmor",
         "usb", "monitor", NULL
     };
     static const gchar *const services[] = {
@@ -394,7 +394,7 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
 
     if (argc == 1) {
         return g_str_equal(args[0], "status") || g_str_equal(args[0], "inspect") ||
-               g_str_equal(args[0], "backups");
+               g_str_equal(args[0], "backups") || g_str_equal(args[0], "repair");
     }
     if (g_str_equal(args[0], "apply")) {
         return argc == 2 && one_of(args[1], controls);

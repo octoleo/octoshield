@@ -61,7 +61,6 @@ setup() {
     status::monitor() { status::result active 'Native monitor fixture is active.'; }
     status::updates() { status::result unknown 'Not inspected in this integration fixture.'; }
     status::apparmor() { status::result unknown 'Not inspected in this integration fixture.'; }
-    status::sudo() { status::result unknown 'Not inspected in this integration fixture.'; }
     status::secure_boot() { status::result unsupported 'No firmware fixture.'; }
     status::disk_encryption() { status::result unknown 'No storage fixture.'; }
     status::thunderbolt() { status::result unsupported 'No Thunderbolt fixture.'; }

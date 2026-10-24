@@ -151,7 +151,7 @@ setup() {
 }
 
 @test 'all supported controls have exact validated routes' {
-    for control in firewall network services sudo updates apparmor usb monitor; do
+    for control in firewall network services updates apparmor usb monitor; do
         run api::validate apply "$control"
         [ "$status" -eq 0 ]
     done
@@ -159,6 +159,35 @@ setup() {
     [ "$status" -eq 0 ]
     run api::validate backup-show 20261012T120000Z-123
     [ "$status" -eq 0 ]
+}
+
+@test 'repair rejects arbitrary arguments and retired sudo activation before a transaction' {
+    run api::main repair /etc/sudoers
+    [ "$status" -eq 2 ]
+    run api::main repair --force
+    [ "$status" -eq 2 ]
+    run api::main apply sudo
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
+}
+
+@test 'repair uses one reviewed transaction and propagates cancellation' {
+    repair::run() {
+        printf 'Review retired OctoShield policy\n'
+        core::confirm 'Apply this repair?' || return 1
+        printf 'repair mutation\n' >>"$TEST_CALLS"
+    }
+    run api::main repair <<<'1 no'
+    [ "$status" -ne 0 ]
+    jq -e -s '.[0].text == "Review retired OctoShield policy" and .[1].type == "confirm" and .[-1].success == false' <<<"$output"
+    run ! grep -q '^repair mutation$' "$TEST_CALLS"
+    : >"$TEST_CALLS"
+    run api::main repair <<<'1 yes'
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^begin GUI repair$' "$TEST_CALLS")" -eq 1 ]
+    grep -Fx 'repair mutation' "$TEST_CALLS"
+    grep -Fx 'record COMPLETE' "$TEST_CALLS"
+    jq -e -s '.[-1] == {type:"done",success:true,change_started:true}' <<<"$output"
 }
 
 @test 'office input validation rejects broad CIDR and arbitrary service units' {

@@ -38,7 +38,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.3.1"
+#define OCTOSHIELD_VERSION "1.3.2"
 #endif
 
 typedef struct App App;
@@ -123,7 +123,6 @@ static const Action actions[] = {
     {"usb-policy", "USB authorization", "Enroll trusted devices and block unfamiliar USB hardware.", "Disconnect untrusted devices now. Keep your required keyboard, mouse and trusted adapters connected. You will review the actual USB policy before enrollment; an incorrectly enrolled input device could lock you out.", TRUE, TRUE, {"apply", "usb", NULL}},
     {"network", "Connection privacy", "Apply the Conference profile's connection and discovery settings.", "Apply the Conference profile's automatic connection and discovery choices. Saved connections and local name resolution may change; Access & exceptions can restore an individual trusted connection.", TRUE, TRUE, {"apply", "network", NULL}},
     {"services", "Listening services", "Apply the Conference profile's service settings.", "The helper previews how the Conference profile changes installed services. Remote sessions, Bluetooth input devices and printing may disconnect when their services are stopped.", TRUE, TRUE, {"apply", "services", NULL}},
-    {"sudo", "Fresh administrator authentication", "Reduce reuse of cached sudo credentials.", "Require fresh authentication for sudo operations. You may be asked for your password more often. The helper checks its configuration before installing it.", TRUE, TRUE, {"apply", "sudo", NULL}},
     {"updates", "Security updates", "Enable Ubuntu's unattended security update mechanism.", "Install or configure unattended security updates. Package changes can take several minutes. Keep this window open while the package manager finishes.", TRUE, TRUE, {"apply", "updates", NULL}},
     {"apparmor", "Application confinement", "Enable the available AppArmor security service.", "Enable the installed AppArmor confinement mechanism. This does not create profiles for unconfined applications or guarantee that every application is confined.", TRUE, TRUE, {"apply", "apparmor", NULL}},
     {"monitor", "Security event monitoring", "Watch firewall, authentication and blocked USB events.", "Enable the system event collector. It reports meaningful thresholds and does not claim to detect passive sniffing or every attack. Desktop notifications are enabled separately for your user.", TRUE, TRUE, {"apply", "monitor", NULL}},
@@ -138,6 +137,7 @@ static const Action actions[] = {
     {"notify-disable", "Disable desktop notifications", "Stop notifications for this user without changing policy.", "Disable the notification service for this user. The system collector and preventive controls continue independently.", FALSE, TRUE, {"monitor", "disable-desktop", NULL}},
     {"notify-status", "Desktop notification status", "Inspect this user's notification service.", NULL, FALSE, FALSE, {"monitor", "status", NULL}},
     {"backups", "List configuration backups", "Show recorded system changes and recovery transactions.", NULL, TRUE, FALSE, {"backups", NULL}},
+    {"repair", "Repair system", "Inspect and clean up known retired OctoShield settings.", "Review the exact retired settings to repair. Changes run through this administrator session after your confirmation.", TRUE, TRUE, {"repair", NULL}},
     {"recovery", "Read recovery guide", "Inspect the installed recovery and backup instructions.", NULL, FALSE, FALSE, {"recovery", NULL}},
     {"update-check", "Check for OctoShield updates", "Check the official GitHub release for a newer Debian package.", NULL, FALSE, FALSE, {"updates", "check", NULL}}
 };
@@ -1831,7 +1831,17 @@ static GtkWidget *status_row(App *app, const char *section, const char *key, con
 static void update_status_row(StatusRow *row, JsonObject *root)
 {
     JsonObject *data = object_member(object_member(root, row->section), row->key);
+    gboolean repairs = g_str_equal(row->section, "recovery") && g_str_equal(row->key, "repairs");
     const char *state = string_member(data, "state", "unknown");
+    if (repairs) {
+        const char *summary = string_member(data, "summary", NULL);
+        if (summary == NULL || g_utf8_strlen(summary, -1) > 1024 ||
+            (!g_str_equal(state, "active") && !g_str_equal(state, "inactive") &&
+             !g_str_equal(state, "partial") && !g_str_equal(state, "unknown") && !g_str_equal(state, "unsupported"))) {
+            data = NULL;
+            state = "unknown";
+        }
+    }
     JsonObject *profile_state = object_member(root, "profiles");
     JsonNode *available = profile_state != NULL ? json_object_get_member(profile_state, "available") : NULL;
     const char *result = string_member(object_member(object_member(object_member(root, "profiles"), "results"), row->key), "status", "");
@@ -1850,6 +1860,11 @@ static void update_status_row(StatusRow *row, JsonObject *root)
     if (g_str_equal(state, "active") && g_str_equal(row->key, "disk_encryption")) label = "Encryption detected";
     if (g_str_equal(state, "active") && g_str_equal(row->key, "containers")) label = "Bindings inspected";
     if (g_str_equal(state, "unknown") && g_str_equal(row->key, "forwarding")) label = "Review routing";
+    if (repairs) {
+        if (g_str_equal(state, "active")) label = "Up to date";
+        else if (g_str_equal(state, "partial")) label = "Repair available";
+        else if (g_str_equal(state, "unknown")) label = "Needs review";
+    }
     gtk_label_set_text(row->badge, label);
     gtk_image_set_from_icon_name(row->icon, icon);
     static const char *const classes[] = {"dim-label", "success", "warning"};
@@ -1859,7 +1874,9 @@ static void update_status_row(StatusRow *row, JsonObject *root)
     }
     gtk_widget_add_css_class(GTK_WIDGET(row->badge), css);
     gtk_widget_add_css_class(GTK_WIDGET(row->icon), css);
-    const char *summary = string_member(data, "summary", "No recent verified observation. Check the status service or run an inspection.");
+    const char *summary = string_member(data, "summary", repairs ?
+        "System repairs have not been inspected yet. Select Repair system to review known retired settings." :
+        "No recent verified observation. Check the status service or run an inspection.");
     g_autofree gchar *safe = octoshield_text_sanitize(summary, -1);
     JsonObject *profiles = object_member(root, "profiles");
     const char *assignment = g_str_equal(row->section, "controls") ? string_member(object_member(profiles, "assignments"), row->key, NULL) : NULL;
@@ -2467,7 +2484,7 @@ static void build_protections(App *app)
         group_add(group, control_row("Adjust this protection", NULL, buttons));
     }
     group = group_new(page, "Baseline protection", "These independent controls stay in place when switching environments.");
-    static const char *const baseline[][3] = {{"sudo", "Fresh administrator authentication", "dialog-password-symbolic"}, {"updates", "Security updates", "software-update-available-symbolic"}, {"apparmor", "Application confinement", "security-high-symbolic"}};
+    static const char *const baseline[][3] = {{"updates", "Security updates", "software-update-available-symbolic"}, {"apparmor", "Application confinement", "security-high-symbolic"}};
     for (gsize i = 0; i < G_N_ELEMENTS(baseline); i++) {
         group_add(group, status_row(app, "controls", baseline[i][0], baseline[i][1]));
         group_add(group, action_row(app, baseline[i][0], "Activate", baseline[i][2]));
@@ -3247,7 +3264,10 @@ static void build_monitoring(App *app)
 static void build_recovery(App *app)
 {
     GtkWidget *page = page_new(app, "recovery", "Recovery, updates & change records", "Restore recorded settings with an explicit preview. Updates install over the existing Debian package and retain your saved configuration.");
-    GtkWidget *group = group_new(page, "Restore system settings", "Restore the baseline recorded before profile management. The helper previews changes and reports any incomplete recovery.");
+    GtkWidget *group = group_new(page, "System repairs", "Inspect known retired OctoShield settings and review exact changes before they run through this administrator session.");
+    group_add(group, status_row(app, "recovery", "repairs", "Known retired settings"));
+    group_add(group, action_row(app, "repair", "Review…", "preferences-system-symbolic"));
+    group = group_new(page, "Restore system settings", "Restore the baseline recorded before profile management. The helper previews changes and reports any incomplete recovery.");
     group_add(group, control_row("Previous system settings", NULL, profile_button(app, "Restore…", PROFILE_RESTORE, NULL, NULL, NULL, NULL, NULL)));
     group = group_new(page, "OctoShield updates", "Download the Debian package for your Ubuntu version, then open it with the system installer. Administrator authentication is handled by the package manager.");
     group_add(group, action_row(app, "update-check", "Check", "software-update-available-symbolic"));

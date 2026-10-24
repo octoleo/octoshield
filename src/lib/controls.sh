@@ -43,31 +43,6 @@ controls::apply_services() {
     profiles::apply conference services
 }
 
-controls::apply_sudo() {
-    local temporary
-    core::require_root || return 1
-    core::confirm 'Require authentication for every sudo command by setting timestamp_timeout=0? Existing NOPASSWD rules are not removed.' || return 1
-    core::install_packages sudo || return 1
-    visudo --check || return 1
-    temporary=$(mktemp) || return 1
-    if ! printf '%s\n' '# Managed by Octoshield; passwordless grants still bypass passwords.' 'Defaults timestamp_timeout=0' >"$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    if ! visudo --check --file "$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    if ! core::write_file /etc/sudoers.d/99-octoshield 0440 <"$temporary"; then
-        rm -f -- "$temporary"
-        return 1
-    fi
-    rm -f -- "$temporary" || return 1
-    visudo --check || return 1
-    core::record 'sudo: timestamp_timeout=0; existing NOPASSWD/per-user overrides require manual review' || return 1
-    core::log 'The global sudo timeout is zero. Existing NOPASSWD or more specific Defaults rules may override authentication; review sudo -l for your account.'
-}
-
 controls::apply_updates() {
     core::require_root || return 1
     core::confirm 'Enable daily unattended security updates without automatic reboot? Existing additional update origins will be preserved.' || return 1

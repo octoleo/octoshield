@@ -51,6 +51,12 @@ generated policy are skipped when identifying the pre-activation state. An
 original absence results in removal of the generated file. Missing or
 inconsistent recovery evidence is reported explicitly in the review.
 
+Conflicting originals recorded within the same second require manual review.
+A recovered original is copied into the current private transaction, checked
+against its reviewed digest and syntax-checked before publication. Its exact
+policy difference is shown as escaped plain text before confirmation; policies
+too large for the bounded review require manual recovery.
+
 The current configuration is backed up privately outside the sudoers include
 directory. The complete sudoers policy is checked before and after the change.
 If validation fails, the just-saved policy is restored before returning failure.

@@ -214,13 +214,6 @@ status::apparmor() {
     else status::result active 'Installed AppArmor profiles are enforcing; applications without a profile are not confined by this check.'; fi
 }
 
-status::sudo() {
-    local config="$STATUS_ETC/sudoers.d/99-octoshield"
-    if [[ -r $config ]] && grep -Eq '^[[:space:]]*Defaults[[:space:]]+timestamp_timeout=0[[:space:]]*$' "$config"; then
-        status::result partial 'The zero-timeout sudo policy exists. User-specific overrides and passwordless grants still require review.'
-    else status::result inactive 'OctoShield has not configured fresh authentication for each sudo command.'; fi
-}
-
 status::secure_boot() {
     local observed
     if [[ ! -d $STATUS_SYS/firmware/efi ]]; then
@@ -482,7 +475,7 @@ status::profile_snapshot() {
     # Explicit projection excludes any future private fields added by adapters.
     jq -ce --argjson available "$available" '
         def safeid: type == "string" and test("^[a-z][a-z0-9_-]{0,47}$");
-        def mappings: if type == "object" then with_entries(select((.key | IN("firewall","usb","network","services","monitor","sudo","updates","apparmor")) and (.value | safeid))) else {} end;
+        def mappings: if type == "object" then with_entries(select((.key | IN("firewall","usb","network","services","monitor","updates","apparmor")) and (.value | safeid))) else {} end;
         {available:$available,active:(if (.global | safeid) then .global else "unmanaged" end),
          global:(if (.global | safeid) then .global else "unmanaged" end),
          assignments:(.active | mappings), overrides:(.overrides | mappings),
@@ -563,10 +556,10 @@ status::version() {
 }
 
 status::collect() {
-    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile version usb_snapshot=''
+    local controls='{}' exposures='{}' name observed profiles network pending checked devices usb_profile version usb_snapshot='' repairs=''
     version=$(status::version) || return 1
     profiles=$(status::profile_snapshot) || return 1
-    for name in firewall usb network services monitor updates apparmor sudo; do
+    for name in firewall usb network services monitor updates apparmor; do
         if [[ $name == usb ]] && declare -F usb::profile_snapshot >/dev/null; then
             usb_snapshot=$(usb::profile_snapshot 2>/dev/null) || usb_snapshot='{}'
             observed=$(jq -c '.status' <<<"$usb_snapshot") || observed=
@@ -590,6 +583,10 @@ status::collect() {
         status::valid_result <<<"$observed" || observed=$(status::result unknown 'This exposure could not be inspected.')
         exposures=$(jq -cn --argjson current "$exposures" --arg name "$name" --argjson value "$observed" '$current + {($name):($value | {state,summary})}') || return 1
     done
+    if declare -F repair::status >/dev/null && repairs=$(repair::status 2>/dev/null); then
+        repairs=$(jq -cse 'select(length == 1) | .[0] | {state,summary}' <<<"$repairs" 2>/dev/null) || repairs=
+    else repairs=; fi
+    status::valid_result <<<"$repairs" || repairs=$(status::result unknown 'System repair status could not be verified. Run Repair system to inspect known retired settings.')
     network=$(status::network_snapshot) || return 1
     if [[ -n $usb_snapshot ]]; then
         devices=$(jq -c 'if .available == true then .devices else [] end' <<<"$usb_snapshot" | status::_project_usb_devices) || return 1
@@ -599,8 +596,8 @@ status::collect() {
     checked=$(date +%s) || return 1
     jq -cn --arg version "$version" --argjson checked "$checked" \
         --argjson controls "$controls" --argjson exposures "$exposures" --argjson profiles "$profiles" \
-        --argjson network "$network" --argjson pending "$pending" --argjson devices "$devices" --arg usb_profile "$usb_profile" \
-        '{schema:1,version:$version,checked_at:$checked,controls:$controls,exposures:$exposures,profiles:$profiles,network:$network,usb:{pending:$pending,devices:$devices,profile:$usb_profile}}'
+        --argjson network "$network" --argjson pending "$pending" --argjson devices "$devices" --argjson repairs "$repairs" --arg usb_profile "$usb_profile" \
+        '{schema:1,version:$version,checked_at:$checked,controls:$controls,exposures:$exposures,profiles:$profiles,network:$network,usb:{pending:$pending,devices:$devices,profile:$usb_profile},recovery:{repairs:$repairs}}'
 }
 
 status::validate_document() {
@@ -610,8 +607,10 @@ status::validate_document() {
         (.version | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
         (.checked_at | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .) and
         (.controls | type == "object") and
-        (["firewall","usb","network","services","monitor","updates","apparmor","sudo"] - (.controls | keys) | length == 0) and
+        (["firewall","usb","network","services","monitor","updates","apparmor"] - (.controls | keys) | length == 0) and
         (all(.controls[]; (.state | state) and (.summary | type == "string" and length <= 1024))) and
+        ((has("recovery") | not) or (.recovery | type == "object" and
+            ((has("repairs") | not) or (.repairs | type == "object" and (.state | state) and (.summary | type == "string" and length <= 1024))))) and
         (.exposures | type == "object") and
         (all(.exposures[]; (.state | state) and (.summary | type == "string" and length <= 1024))) and
         (.profiles.active | type == "string") and (.profiles.catalog | type == "array") and

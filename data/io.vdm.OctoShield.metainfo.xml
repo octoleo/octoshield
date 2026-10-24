@@ -27,12 +27,14 @@
       password requests, and choose actions beside each connected device.</li>
       <li>Limit automatic network connections and unnecessary services, and
       configure GNOME screen locking and removable-media behavior.</li>
-      <li>Review AppArmor confinement, automatic security updates, and sudo
-      authentication settings using Ubuntu's native security mechanisms.</li>
+      <li>Review AppArmor confinement and automatic security updates using
+      Ubuntu's native security mechanisms.</li>
       <li>Monitor meaningful firewall, USB, and authentication events, and enable
       restrained security notifications in your desktop session.</li>
       <li>Inspect saved action history and recovery guidance, and make selected
       office adjustments without globally undoing your protections.</li>
+      <li>Review and repair known retired OctoShield settings after updates,
+      with private recovery records and preserved administrator changes.</li>
       <li>Inspect container exposure, Thunderbolt and USB4 protection indicators,
       Secure Boot and encryption status, with unavailable results made explicit.</li>
       <li>Check official releases on request and upgrade with the normal system
@@ -67,32 +69,32 @@
     <keyword>Ubuntu</keyword>
     <keyword>Octoleo</keyword>
   </keywords>
-  <!-- Captured application images are attached by the v1.3.1 release workflow.
+  <!-- Captured application images are attached by the v1.3.2 release workflow.
        Public store indexing also requires anonymously accessible release assets. -->
   <screenshots>
     <screenshot type="default">
       <caption>Review your laptop's protections from the light overview (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-overview-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-overview-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Inspect the same security overview in the dark theme (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-overview-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-overview-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Choose and review individual system protections (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-protections-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-protections-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Review USB devices before authorizing access (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-usb-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-usb-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Allow narrowly scoped access for trusted office resources (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-office-light.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-office-light.png</image>
     </screenshot>
     <screenshot>
       <caption>Manage the security-event collector and desktop alerts (demonstration)</caption>
-      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.1/OctoShield-monitoring-dark.png</image>
+      <image type="source">https://github.com/octoleo/octoshield/releases/download/v1.3.2/OctoShield-monitoring-dark.png</image>
     </screenshot>
   </screenshots>
   <provides>
@@ -104,6 +106,14 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="1.3.2" date="2026-10-24">
+      <description>
+        <p>Remove the retired fresh sudo authentication control and add Repair
+        system under Recovery &amp; updates. Review and clean up the old sudo
+        setting after upgrading, with original-policy recovery, preserved
+        administrator changes, native validation and private recovery records.</p>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-10-24">
       <description><p>Save individual network settings reliably, review external changes, and restore recorded settings with verified results. Automatic connection saves no longer require reconnect guidance. Native NetworkManager integration checks gate release publication.</p></description>
     </release>

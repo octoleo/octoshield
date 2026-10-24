@@ -46,6 +46,28 @@ systemctl --user disable --now octoshield-notify.service
 
 After removal, an offline user's previous enablement may remain as a dangling link at `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/graphical-session.target.wants/octoshield-notify.service`. Inspect it with `readlink` and remove only that exact link if it is dangling and points to the removed packaged unit. Retain working standalone or custom unit links; do not remove the entire user systemd directory.
 
+## Repair retired OctoShield settings
+
+After upgrading, open **Recovery & updates → Repair system**, or run this from your normal local terminal:
+
+```bash
+octoshield repair
+```
+
+If a standalone installation is also present, select the updated package explicitly with `/usr/bin/octoshield repair`. The graphical action uses the application's existing administrator session. The CLI requests elevation once for the complete repair operation, including inspection, backup and validation. A zero sudo timeout does not require a separate password for every command inside that already-authorized operation.
+
+Repair inspects a fixed catalogue of known changes needed by the installed version. It shows the applicable cleanup before asking for confirmation, records the operation under `/var/lib/octoshield/backups`, and checks the result. A completed repair is safe to run again: native state is inspected again and a setting that no longer needs cleanup is left alone. An error or a preserved conflict remains visible; the action does not claim that every possible system problem has been repaired.
+
+The first repair removes the retired **Fresh administrator authentication** policy. Earlier versions wrote `/etc/sudoers.d/99-octoshield` with `Defaults timestamp_timeout=0`, which requires a new authentication for each separate sudo command whose policy requires a password. This was a system sudo setting, not a temporary account-password change. Sudo's timestamp cache records recent authentication rather than retaining the account password.
+
+The repair recognizes the unchanged generated file and consults its original transaction history, walking back from the newest activation past backups of the generated policy. When OctoShield created the file, cleanup removes that one drop-in. When it replaced an existing file, cleanup restores the verified original configuration from that activation chain. A successfully restored original is recognized on subsequent inspections. If no original snapshot is available, the preview explicitly explains that only the recognized generated file can be removed, and retains a recovery copy. A record claiming that an original existed but lacking its safe original contents is a conflict; it is not treated as permission to delete the file. Locally modified files, unsafe paths, invalid markers, and conflicting recovery evidence are preserved and reported for review. The repair retains a private copy outside `/etc/sudoers.d`, checks the full configuration with `visudo --check`, and restores its pre-repair copy if validation after the change fails.
+
+The computer's existing distribution and administrator policy determines the resulting timeout. Repair does not set a new universal timeout, remove passwordless grants, or alter unrelated sudo rules. It also does not change account passwords, apply pending profile edits, or restore firewall/USB/network baselines. Use the corresponding profile controls for those deliberate changes.
+
+Package installation and upgrade preserve native policy; the cleanup runs only when you choose **Repair system**. Stopping OctoShield, rebooting, changing your password, or uninstalling the application does not remove an existing zero-timeout drop-in. Review the repair after updating instead of reactivating the removed feature from an older standalone copy.
+
+If automatic repair reports a conflict, use the transaction instructions below and the [manual sudo recovery guidance](#sudo-updates-and-apparmor). Preserve the current file and keep a trusted administrator shell open until the full configuration validates. A fresh normal-user sudo authentication followed promptly by another harmless sudo command in the same terminal can confirm whether the existing policy allows reuse again. Separate PolicyKit dialogs in the graphical application are governed by its application session, not by sudo's terminal timestamp.
+
 ## Profiles, overrides and restoration
 
 Version 1.1 keeps 1.0.0 policies as they are until you explicitly adopt a profile. The profile selector is desired configuration; the live indicators report what was actually observed. A partial or failed switch can leave different areas in different states. Read each result before retrying. The observer deliberately does not treat a successful command as proof that all protections match.
@@ -226,7 +248,7 @@ For other units such as Samba, inspect the recorded state and unmask only the re
 
 ## Sudo, updates, and AppArmor
 
-From an existing trusted administrator shell, restore the saved `/etc/sudoers.d/99-octoshield` if its marker says `existing`; remove that one drop-in if the marker says `absent` and you intentionally want the previous timeout. Validate with `visudo --check` before closing your administrator shell. OctoShield does not remove existing passwordless grants.
+First use **Recovery & updates → Repair system** or `octoshield repair` to review the retired sudo policy. For a conflict requiring manual recovery, retain a private copy of the current `/etc/sudoers.d/99-octoshield` outside `/etc/sudoers.d` and inspect the relevant activation transactions from an existing trusted administrator shell. Restore the saved original file if its marker says `existing`; remove only the unchanged OctoShield-generated drop-in if the genuine original marker says `absent`. Later activation backups can contain the already-installed zero-timeout policy, so inspect the earlier history before choosing a baseline. Preserve administrator changes and unrelated sudo rules. Validate the complete configuration with `visudo --check` before closing the administrator shell. OctoShield does not remove existing passwordless grants.
 
 Automatic-update settings live in `/etc/apt/apt.conf.d/90-octoshield`. Restore/remove only this drop-in according to its snapshot marker, then inspect `apt-config dump`. Timer enablement is separate runtime state; review the timers before changing them. AppArmor activation retains installed profile modes; diagnose a specific denied application using its logs instead of disabling AppArmor globally.
 

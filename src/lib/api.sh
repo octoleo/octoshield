@@ -13,7 +13,7 @@ api::validate() {
         diagnostics) diagnostics::validate "${@:2}" && return 0 ;;
         apply)
             [[ $# -eq 2 ]] || return 1
-            case "$2" in firewall | network | services | sudo | updates | apparmor | usb | monitor) return 0 ;; esac
+            case "$2" in firewall | network | services | updates | apparmor | usb | monitor) return 0 ;; esac
             ;;
         usb)
             case "${2-}" in
@@ -39,7 +39,7 @@ api::validate() {
                 service) [[ $# -eq 3 ]] && office::valid_service "$3" && return 0 ;;
             esac
             ;;
-        backups | status | inspect) [[ $# -eq 1 ]] && return 0 ;;
+        backups | status | inspect | repair) [[ $# -eq 1 ]] && return 0 ;;
         backup-show) [[ $# -eq 2 ]] && api::valid_backup_id "$2" && return 0 ;;
         monitor)
             [[ $# -eq 2 ]] || return 1
@@ -55,7 +55,7 @@ api::mutates() {
         'connections '*) connections::mutates "${@:2}" ;;
         'diagnostics '*) return 1 ;;
         'profile '*) profiles::mutates "${@:2}" ;;
-        'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'usb approve' | 'usb revoke' | 'monitor disable') return 0 ;;
+        'repair ' | 'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'usb approve' | 'usb revoke' | 'monitor disable') return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -213,6 +213,7 @@ api::dispatch() {
         backups) core::backups ;;
         backup-show) api::backup_show "$2" ;;
         status | inspect) api::inspect ;;
+        repair) repair::run ;;
         monitor)
             case "$2" in
                 status) monitor::status ;;

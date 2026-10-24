@@ -22,6 +22,7 @@ setup() {
         printf '%s\n' '{"global":"conference","active":{"firewall":"conference","usb":"office"},"overrides":{"usb":"office"},"results":{},"catalog":[{"id":"conference","name":"Conference"},{"id":"home","name":"Home"}]}'
     }
     status::control() { status::result active 'Verified test control'; }
+    repair::status() { status::result active 'No known retired settings need repair.'; }
     status::secure_boot() { status::result unknown 'Not verified'; }
     status::disk_encryption() { status::result unknown 'Not verified'; }
     status::thunderbolt() { status::result unsupported 'Not available'; }
@@ -81,6 +82,60 @@ fixture() {
     run status::read
     [ "$status" -eq 0 ]
     jq -e '.schema == 1 and .profiles.available and .profiles.active == "conference" and .profiles.overrides.usb == "office" and .profiles.catalog[1].name == "Home" and .exposures.forwarding.state == "partial"' <<<"$output"
+}
+
+@test 'repair observations replace the retired sudo control without publishing private fields' {
+    repair::status() { printf '%s\n' '{"state":"partial","summary":"A retired setting can be repaired.","private":"PRIVATE RECOVERY DATA"}'; }
+    run status::collect
+    [ "$status" -eq 0 ]
+    jq -e '(.controls | has("sudo") | not) and .recovery.repairs == {state:"partial",summary:"A retired setting can be repaired."}' <<<"$output"
+    [[ $output != *'PRIVATE RECOVERY DATA'* ]]
+    status::validate_document <<<"$output"
+}
+
+@test 'missing or failed repair inspection leaves other observations usable' {
+    unset -f repair::status
+    run status::collect
+    [ "$status" -eq 0 ]
+    jq -e '.recovery.repairs.state == "unknown" and .controls.firewall.state == "active"' <<<"$output"
+    status::validate_document <<<"$output"
+    repair::status() { return 1; }
+    run status::collect
+    [ "$status" -eq 0 ]
+    jq -e '.recovery.repairs.state == "unknown" and .controls.firewall.state == "active"' <<<"$output"
+    status::validate_document <<<"$output"
+}
+
+@test 'invalid repair output falls back to unknown instead of claiming a completed repair' {
+    local repair_fixture
+    repair::status() { printf '%s\n' "$repair_fixture"; }
+    for repair_fixture in '' 'not json' 'null' '[]' '{"state":"active"}' '{"state":"complete","summary":"Invalid state"}' $'{"state":"active","summary":"First"}\n{"state":"active","summary":"Second"}'; do
+        run status::collect
+        [ "$status" -eq 0 ]
+        jq -e '.recovery.repairs.state == "unknown" and .controls.firewall.state == "active"' <<<"$output"
+        status::validate_document <<<"$output"
+    done
+}
+
+@test 'older status caches remain readable without an optional repair observation' {
+    local document
+    document=$(status::collect)
+    document=$(jq 'del(.recovery) | .controls.sudo = {state:"partial",summary:"Legacy observer output"}' <<<"$document")
+    printf '%s\n' "$document" >"$STATUS_DIRECTORY/status.json"
+    chmod 0644 "$STATUS_DIRECTORY/status.json"
+    run status::read
+    [ "$status" -eq 0 ]
+    jq -e '(has("recovery") | not) and .controls.firewall.state == "active"' <<<"$output"
+    status::validate_document <<<"$(jq '.recovery = {}' <<<"$document")"
+}
+
+@test 'optional repair observations are validated when present' {
+    local document alteration
+    document=$(status::collect)
+    for alteration in '.recovery = null' '.recovery = []' '.recovery.repairs = null' '.recovery.repairs = []' '.recovery.repairs.state = "complete"' '.recovery.repairs.summary = 10' '.recovery.repairs.summary = ("x" * 1025)'; do
+        run status::validate_document <<<"$(jq "$alteration" <<<"$document")"
+        [ "$status" -ne 0 ]
+    done
 }
 
 @test 'profile projection removes control bytes and private fields' {

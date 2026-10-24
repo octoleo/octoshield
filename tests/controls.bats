@@ -56,7 +56,6 @@ setup() {
             'show --property=ActiveState --value '*) printf 'active\n' ;;
         esac
     }
-    visudo() { fake visudo "$@"; }
     apt-config() { fake apt-config "$@"; }
     aa-enabled() { fake aa-enabled "$@"; }
     aa-status() { fake aa-status; }
@@ -70,7 +69,7 @@ setup() {
 
 @test 'all security controls reject insufficient privilege before mutation' {
     FAIL=root
-    for control in firewall network services sudo updates apparmor; do
+    for control in firewall network services updates apparmor; do
         run "controls::apply_$control"
         [ "$status" -ne 0 ]
     done
@@ -100,23 +99,6 @@ setup() {
     [ "$output" = $'MANAGE_BUILTINS=no\nIPV6=yes' ]
     run controls::ufw_defaults "$BATS_TEST_TMPDIR/missing"
     [ "$status" -ne 0 ]
-}
-
-@test 'sudo configuration is syntax checked and uses a sudoers-compatible filename and mode' {
-    run controls::apply_sudo
-    [ "$status" -eq 0 ]
-    grep -Fx 'Defaults timestamp_timeout=0' "$WRITES/etc/sudoers.d/99-octoshield"
-    grep -Fx 'write /etc/sudoers.d/99-octoshield 0440' "$CALLS"
-    [ "$(grep -c '^visudo --check$' "$CALLS")" -eq 2 ]
-    grep -q '^visudo --check --file ' "$CALLS"
-}
-
-@test 'pre-existing invalid sudo configuration prevents any new write' {
-    FAIL='visudo --check'
-    run controls::apply_sudo
-    [ "$status" -ne 0 ]
-    run grep -q '^write' "$CALLS"
-    [ "$status" -eq 1 ]
 }
 
 @test 'updates append security origins without clearing existing policies or automatic reboot' {
@@ -157,10 +139,9 @@ setup() {
 
 @test 'all package installation failures stop their security control' {
     local control package
-    for control in sudo updates apparmor; do
+    for control in updates apparmor; do
         case "$control" in
             firewall) package=ufw ;;
-            sudo) package=sudo ;;
             updates) package=unattended-upgrades ;;
             apparmor) package='apparmor apparmor-utils' ;;
         esac

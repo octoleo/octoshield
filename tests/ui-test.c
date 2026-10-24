@@ -256,7 +256,7 @@ static void action_privileged(void)
 {
     static const gchar *const actions[][5] = {
         {"apply", "firewall", NULL}, {"apply", "network", NULL},
-        {"apply", "services", NULL}, {"apply", "sudo", NULL},
+        {"apply", "services", NULL}, {"repair", NULL},
         {"apply", "updates", NULL}, {"apply", "apparmor", NULL},
         {"apply", "usb", NULL}, {"apply", "monitor", NULL},
         {"usb", "list", NULL}, {"usb", "allow", "1", NULL},
@@ -308,6 +308,8 @@ static void action_reject(void)
     static const gchar *const actions[][6] = {
         {"sh", "-c", "id", NULL}, {"/bin/sh", NULL},
         {"apply", NULL}, {"apply", "all", NULL}, {"apply", "firewall;id", NULL},
+        {"apply", "sudo", NULL}, {"repair", "sudo", NULL},
+        {"repair", "--force", NULL}, {"repair", "/etc/sudoers", NULL},
         {"apply", "firewall", "--force", NULL},
         {"usb", NULL}, {"usb", "allow", NULL}, {"usb", "allow", "0", NULL},
         {"usb", "allow", "01", NULL}, {"usb", "allow", "4294967295", NULL},
@@ -360,6 +362,8 @@ static void action_reject(void)
     reject_action(FALSE, 3, desktop);
     const gchar *const monitor[] = {"monitor", "disable"};
     reject_action(FALSE, 2, monitor);
+    const gchar *const repair[] = {"repair"};
+    reject_action(FALSE, 1, repair);
     const gchar *const missing[] = {"apply", NULL};
     reject_action(TRUE, 2, missing);
     reject_action(TRUE, 0, apply);
