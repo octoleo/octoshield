@@ -129,7 +129,7 @@ jobs:
       - name: Install lifecycle test dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates curl jq util-linux ufw systemd
+          apt-get install --yes --no-install-recommends ca-certificates curl jq util-linux iproute2 ufw systemd
           if [ '${{ matrix.ubuntu }}' = 26.04 ]; then
             apt-get install --yes --no-install-recommends gnu-coreutils
           fi
