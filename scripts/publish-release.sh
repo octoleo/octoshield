@@ -124,11 +124,13 @@ publish::checksum() {
 }
 
 publish::validate() {
-    local root=$1 tag=$2 commit=$3 packages=$4 assets=$5 version=${2#v} ubuntu path name page theme
-    local -a debs=()
+    local root=$1 tag=$2 commit=$3 packages=$4 assets=$5 version=${2#v} ubuntu path name gallery_paths dimensions width height
+    local -a debs=() gallery_names=()
     # The same header validation used when assembling the original captures.
     # shellcheck source=release-assets.sh
     source "$root/scripts/release-assets.sh"
+    mapfile -t gallery_names < <(release_assets::gallery_names)
+    gallery_paths=$(printf 'gallery/%s\n' "${gallery_names[@]}" | jq -Rsc 'split("\n")[:-1] | sort') || return 1
     shopt -s nullglob
     debs=("$packages"/*.deb)
     ((${#debs[@]} == 2)) || {
@@ -152,10 +154,20 @@ publish::validate() {
     publish::regular "$assets/release-assets/manifest.json" || return 1
     jq -e --arg version "$version" --arg commit "$commit" '
       .application_id == "io.vdm.OctoShield" and .version == $version and
-      .source.commit == $commit and .source.worktree_dirty == false and
-      (.gallery | length) == 12 and (.branding | length) == 2' \
+      .source.commit == $commit and .source.worktree_dirty == false' \
         "$assets/release-assets/manifest.json" >/dev/null || {
         publish::error 'Release asset provenance does not match the clean release commit.'
+        return 1
+    }
+    jq -e --argjson expected "$gallery_paths" '
+      (.gallery | type) == "array" and
+      all(.gallery[]; type == "object" and (.path | type) == "string" and
+        (.width | type) == "number" and (.height | type) == "number" and
+        .width > 0 and .height > 0 and .width == (.width | floor) and .height == (.height | floor)) and
+      ([.gallery[].path] | sort) == $expected and
+      (.branding | type) == "array" and (.branding | length) == 2' \
+        "$assets/release-assets/manifest.json" >/dev/null || {
+        publish::error 'Release asset gallery does not match the expected application screenshots.'
         return 1
     }
     # Recompute the complete checksum manifest instead of allowing untrusted
@@ -194,12 +206,17 @@ publish::validate() {
         }
     done <"$PUBLISH_TEMP/tree"
     PUBLISH_FILES+=("$assets/$name" "$assets/SHA256SUMS-assets")
-    for page in overview protections usb office monitoring recovery; do
-        for theme in light dark; do
-            path="$assets/release-assets/gallery/OctoShield-$page-$theme.png"
-            release_assets::png_dimensions "$path" >/dev/null || return 1
-            PUBLISH_FILES+=("$path")
-        done
+    for name in "${gallery_names[@]}"; do
+        path="$assets/release-assets/gallery/$name"
+        dimensions=$(release_assets::png_dimensions "$path") || return 1
+        read -r width height <<<"$dimensions"
+        jq -e --arg path "gallery/$name" --argjson width "$width" --argjson height "$height" \
+            'any(.gallery[]; .path == $path and .width == $width and .height == $height)' \
+            "$assets/release-assets/manifest.json" >/dev/null || {
+            publish::error "Screenshot dimensions do not match the asset manifest: $name."
+            return 1
+        }
+        PUBLISH_FILES+=("$path")
     done
     path="$assets/release-assets/data/io.vdm.OctoShield.metainfo.xml"
     publish::regular "$path" || return 1
@@ -238,7 +255,8 @@ publish::draft() {
 }
 
 publish::notes() {
-    local tag=$1 commit=$2 version=${1#v}
+    local tag=$1 commit=$2 version=${1#v} gallery_count
+    gallery_count=$(release_assets::gallery_names | wc -l) || return 1
     cat <<NOTES
 OctoShield $tag is a native Ubuntu security application maintained by **Vast Development Method**, part of the **Octoleo** suite. https://www.vdm.io
 
@@ -282,7 +300,7 @@ Remove the application with \`sudo apt remove octoshield\`. Native security poli
 - [Installation, updates and removal](https://github.com/$GH_REPO/blob/$tag/docs/distribution.md)
 - [Configuration recovery](https://github.com/$GH_REPO/blob/$tag/docs/recovery.md)
 
-The asset archive contains documentation, metadata, original branding and twelve real native-interface screenshots. Package and archive SHA-256 manifests are provided below.
+The asset archive contains documentation, metadata, original branding and $gallery_count real native-interface screenshots. Package and archive SHA-256 manifests are provided below.
 
 Built from commit \`$commit\` after the automated test, lint, native-interface and Debian lifecycle checks passed for both supported Ubuntu releases.
 NOTES

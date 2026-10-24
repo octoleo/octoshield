@@ -10,6 +10,17 @@ release_assets::error() {
     return 1
 }
 
+# One canonical gallery is shared by assembly and publication. A new page must
+# be captured in both themes before either stage can accept the release assets.
+release_assets::gallery_names() {
+    local page theme
+    for page in overview protections usb office privacy diagnostics monitoring recovery; do
+        for theme in light dark; do
+            printf 'OctoShield-%s-%s.png\n' "$page" "$theme"
+        done
+    done
+}
+
 release_assets::require_file() {
     [[ -f $1 && ! -L $1 ]] || {
         release_assets::error "Missing regular input file: $1"
@@ -74,7 +85,7 @@ Files:
   LICENSE                         Project license
   docs/features.md                Detailed application capabilities
   docs/distribution.md            Native installation and lifecycle instructions
-  gallery/                        All sixteen light/dark application page captures
+  gallery/                        All light/dark application page captures
   branding/                       Original supplied PNG artwork, unchanged
   data/                           Standard AppStream and desktop-entry metadata
   manifest.json                   Version, source commit and image dimensions
@@ -103,12 +114,12 @@ release_assets::main() {
         release_assets::error 'Usage: scripts/release-assets.sh OUTPUT_DIR (new directory; parent must exist)'
         return 2
     }
-    local root output version commit dirty=false file page theme name dimensions record changes
+    local root output version commit dirty=false file theme name dimensions record changes
     local -a sources=(
         README.md LICENSE docs/features.md docs/distribution.md
         data/io.vdm.OctoShield.metainfo.xml data/io.vdm.OctoShield.desktop
     )
-    local -a gallery_records=() branding_records=()
+    local -a gallery_names=() gallery_records=() branding_records=()
     local -A image_dimensions=()
     for file in jq git od realpath install sha256sum find sort xargs; do
         command -v "$file" >/dev/null || {
@@ -132,14 +143,12 @@ release_assets::main() {
     [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
     for file in "${sources[@]}"; do release_assets::require_file "$root/$file" || return 1; done
     # Validate all input media before creating the output directory.
-    for page in overview protections usb office privacy diagnostics monitoring recovery; do
-        for theme in light dark; do
-            name="OctoShield-$page-$theme.png"
-            dimensions=$(release_assets::png_dimensions "$root/build/screenshots/$name") || return 1
-            image_dimensions[$name]=$dimensions
-            record=$(release_assets::image_record "gallery/$name" "$dimensions") || return 1
-            gallery_records+=("$record")
-        done
+    mapfile -t gallery_names < <(release_assets::gallery_names)
+    for name in "${gallery_names[@]}"; do
+        dimensions=$(release_assets::png_dimensions "$root/build/screenshots/$name") || return 1
+        image_dimensions[$name]=$dimensions
+        record=$(release_assets::image_record "gallery/$name" "$dimensions") || return 1
+        gallery_records+=("$record")
     done
     for theme in light dark; do
         dimensions=$(release_assets::png_dimensions "$root/data/branding/OctoShield-$theme.png") || return 1

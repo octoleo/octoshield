@@ -5,29 +5,43 @@ setup() {
     bats_require_minimum_version 1.5.0
     export FIXTURE="$BATS_TEST_TMPDIR/project" PACKAGES="$BATS_TEST_TMPDIR/packages" ASSETS="$BATS_TEST_TMPDIR/assets"
     export GH_STATE="$BATS_TEST_TMPDIR/github" GH_REPO=octoleo/octoshield GH_TOKEN=fixture-token-canary
-    export RELEASE_COMMIT=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$BATS_TEST_TMPDIR/outputs"
-    mkdir -p "$FIXTURE/scripts" "$FIXTURE/data" "$PACKAGES" "$ASSETS" "$GH_STATE" "$BATS_TEST_TMPDIR/bin"
+    export RELEASE_COMMIT GITHUB_OUTPUT="$BATS_TEST_TMPDIR/outputs"
+    mkdir -p "$FIXTURE/scripts" "$FIXTURE/data/branding" "$FIXTURE/docs" "$FIXTURE/build/screenshots" \
+        "$PACKAGES" "$ASSETS" "$GH_STATE" "$BATS_TEST_TMPDIR/bin"
     cp "$BATS_TEST_DIRNAME/../scripts/"{publish-release,release-assets}.sh "$FIXTURE/scripts/"
     cat >"$FIXTURE/scripts/version.sh" <<'VERSION'
 #!/usr/bin/env bash
-[[ $* == '--check v1.0.0' ]]
+case "$*" in
+    '') printf '1.0.0\n' ;;
+    '--check'|'--check v1.0.0') ;;
+    *) exit 1 ;;
+esac
 VERSION
     printf '<component><id>io.vdm.OctoShield</id></component>\n' >"$FIXTURE/data/io.vdm.OctoShield.metainfo.xml"
-    local ubuntu
+    local ubuntu file page theme
+    for file in README.md LICENSE docs/features.md docs/distribution.md data/io.vdm.OctoShield.desktop; do
+        printf 'Fixture %s\n' "$file" >"$FIXTURE/$file"
+    done
     for ubuntu in 24.04 26.04; do
         make_package "$ubuntu" 1.0.0 amd64
     done
-    mkdir -p "$ASSETS/release-assets/gallery" "$ASSETS/release-assets/data"
-    cp "$FIXTURE/data/io.vdm.OctoShield.metainfo.xml" "$ASSETS/release-assets/data/"
-    jq -n --arg commit "$RELEASE_COMMIT" '{application_id:"io.vdm.OctoShield",version:"1.0.0",
-      source:{commit:$commit,worktree_dirty:false},gallery:[range(12)],branding:[1,2]}' >"$ASSETS/release-assets/manifest.json"
-    local page theme
-    for page in overview protections usb office monitoring recovery; do
+    printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh4kAAAAASUVORK5CYII=' |
+        base64 --decode >"$BATS_TEST_TMPDIR/pixel.png"
+    for page in overview protections usb office privacy diagnostics monitoring recovery; do
         for theme in light dark; do
-            printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh4kAAAAASUVORK5CYII=' |
-                base64 --decode >"$ASSETS/release-assets/gallery/OctoShield-$page-$theme.png"
+            cp "$BATS_TEST_TMPDIR/pixel.png" "$FIXTURE/build/screenshots/OctoShield-$page-$theme.png"
         done
     done
+    for theme in light dark; do
+        cp "$BATS_TEST_TMPDIR/pixel.png" "$FIXTURE/data/branding/OctoShield-$theme.png"
+    done
+    git -C "$FIXTURE" -c init.defaultBranch=main init -q
+    git -C "$FIXTURE" add .
+    git -C "$FIXTURE" -c user.name='Fixture Author' -c user.email='fixture@example.invalid' commit -qm fixture
+    RELEASE_COMMIT=$(git -C "$FIXTURE" rev-parse HEAD)
+    # Exercise the real generator/publisher contract, not a second hand-written
+    # manifest that could reproduce the publisher's outdated gallery assumption.
+    bash "$FIXTURE/scripts/release-assets.sh" "$ASSETS/release-assets" >/dev/null
     package_assets
     cat >"$BATS_TEST_TMPDIR/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -154,15 +168,22 @@ draft() {
     jq -n --arg commit "${1:-$RELEASE_COMMIT}" '{id:100,draft:true,tag_name:"v1.0.0",target_commitish:$commit,assets:[]}' >"$GH_STATE/release.json"
 }
 
-@test 'publishes two packages checksums archive twelve screenshots and metadata only after verification' {
+@test 'publishes actual generated assets including all sixteen current screenshots after verification' {
     release
     [ "$status" -eq 0 ]
-    jq -e '.draft == false and (.assets | length) == 19' "$GH_STATE/release.json"
+    jq -e '.draft == false and (.assets | length) == 23' "$GH_STATE/release.json"
+    local page theme
+    for page in privacy diagnostics; do
+        for theme in light dark; do
+            cmp "$FIXTURE/build/screenshots/OctoShield-$page-$theme.png" "$GH_STATE/uploads/OctoShield-$page-$theme.png"
+        done
+    done
     grep -Fx 'available=true' "$GITHUB_OUTPUT"
     grep -Fx 'published=true' "$GITHUB_OUTPUT"
     grep -Fx 'tag=v1.0.0' "$GITHUB_OUTPUT"
     grep -F 'sudo apt install ./octoshield_1.0.0_ubuntu24.04_amd64.deb' "$GH_STATE/notes.md"
     grep -F 'Restic/S3 backup management is not included' "$GH_STATE/notes.md"
+    grep -F '16 real native-interface screenshots' "$GH_STATE/notes.md"
     [[ $output != *fixture-token-canary* ]]
     run ! grep -F 'fixture-token-canary' "$GH_STATE/calls"
 }
@@ -238,8 +259,8 @@ draft() {
     : >"$GH_STATE/calls"
     release
     [ "$status" -eq 0 ]
-    [ "$(grep -c '^release upload' "$GH_STATE/calls")" -eq 17 ]
-    jq -e '.draft == false and (.assets | length) == 19' "$GH_STATE/release.json"
+    [ "$(grep -c '^release upload' "$GH_STATE/calls")" -eq 21 ]
+    jq -e '.draft == false and (.assets | length) == 23' "$GH_STATE/release.json"
 }
 
 @test 'unexpected draft assets are preserved and block publication for manual review' {
@@ -306,6 +327,41 @@ draft() {
     package_assets
     release
     [ "$status" -ne 0 ]
+    [[ $output == *'provenance does not match the clean release commit'* ]]
+    [ ! -f "$GH_STATE/release.json" ]
+}
+
+@test 'canonical gallery rejects missing duplicate unsafe and malformed records before publication' {
+    local manifest filter
+    manifest=$(cat "$ASSETS/release-assets/manifest.json")
+    for filter in '.gallery |= .[:-1]' '.gallery[0] = .gallery[1]' \
+        '.gallery[0].path = "../outside.png"' '.gallery[0].width = 0' '.gallery[0].width = 1.5'; do
+        jq "$filter" <<<"$manifest" >"$ASSETS/release-assets/manifest.json"
+        package_assets
+        release
+        [ "$status" -ne 0 ]
+        [[ $output == *'gallery does not match the expected application screenshots'* ]]
+        [ ! -f "$GH_STATE/release.json" ]
+    done
+}
+
+@test 'gallery dimensions must match the actual PNG even with valid regenerated checksums' {
+    jq '.gallery[0].width = 2' "$ASSETS/release-assets/manifest.json" >"$ASSETS/new.json"
+    mv "$ASSETS/new.json" "$ASSETS/release-assets/manifest.json"
+    package_assets
+    release
+    [ "$status" -ne 0 ]
+    [[ $output == *'Screenshot dimensions do not match the asset manifest'* ]]
+    [ ! -f "$GH_STATE/release.json" ]
+}
+
+@test 'new privacy and diagnostics captures are required for publication' {
+    rm "$ASSETS/release-assets/gallery/OctoShield-privacy-light.png" \
+        "$ASSETS/release-assets/gallery/OctoShield-diagnostics-dark.png"
+    package_assets
+    release
+    [ "$status" -ne 0 ]
+    [[ $output == *'Missing regular input file'* ]]
     [ ! -f "$GH_STATE/release.json" ]
 }
 
@@ -351,7 +407,7 @@ draft() {
 @test 'missing API digests require downloaded byte verification before publishing' {
     MOCK_NULL_DIGEST=1 release
     [ "$status" -eq 0 ]
-    [ "$(grep -c '^release download' "$GH_STATE/calls")" -eq 19 ]
+    [ "$(grep -c '^release download' "$GH_STATE/calls")" -eq 23 ]
 }
 
 @test 'same-size corrupt bytes fail download verification when API digest is absent' {
@@ -366,7 +422,7 @@ draft() {
     [ "$status" -eq 0 ]
     [[ $output == *'attempt 1/5'* && $output == *'attempt 2/5'* ]]
     [ "$(grep -c '^release create' "$GH_STATE/calls")" -eq 1 ]
-    jq -e '.draft == false and (.assets | length) == 19' "$GH_STATE/release.json"
+    jq -e '.draft == false and (.assets | length) == 23' "$GH_STATE/release.json"
 }
 
 @test 'new draft permanent absence stops after five checks and leaves draft untouched' {
