@@ -183,6 +183,15 @@ jobs:
         with:
           name: octoshield-release-assets
           path: assets
+      - name: Validate release artifacts without publishing credentials
+        shell: bash
+        run: |
+          source scripts/publish-release.sh
+          PUBLISH_TEMP=$(mktemp -d)
+          trap 'rm -rf -- "$PUBLISH_TEMP"' EXIT
+          PUBLISH_FILES=()
+          publish::validate "$PWD" "v$(bash scripts/version.sh)" "$(git rev-parse HEAD)" packages assets
+          printf 'Validated %s release files without publishing.\n' "${#PUBLISH_FILES[@]}"
       - name: Build inspectable repository without publishing credentials
         run: bash scripts/apt-repository.sh --input packages --assets assets/release-assets --output apt-test
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
