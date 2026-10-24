@@ -142,11 +142,25 @@ ufw status verbose
 
 This restores the saved rules and **enables** them; it does not restore a previous disabled runtime state. Review the restored inbound exceptions and IPv6 setting. Container-published ports still require separate checks.
 
-For an office exception, use `octoshield office`. Before returning to an untrusted network, review `sudo ufw status numbered` and remove only the office exception with `sudo ufw delete NUMBER`, using its current displayed number. Re-running the conference firewall action removes all custom UFW exceptions after confirmation.
+Use **Access & exceptions** or `octoshield access` to review and revoke the selected permission. Guided changes apply and verify immediately; editing the lower-level saved profile still requires Apply. Direct `ufw` edits are treated as external changes and require reconciliation before OctoShield overwrites them. Re-running the Conference firewall action replaces the exception set after confirmation.
+
+A failed guided access change attempts to restore the previous policy. If restoration also fails, the result stays failed and the transaction records what happened; inspect native rules and use **Protections → Restore** to restore the captured baseline after reviewing its impact. Do not infer successful closure from a failed command. Expired permissions are never renewed automatically.
 
 ## Network profiles
 
-For one trusted office connection, use `octoshield office` to re-enable autoconnect. To choose a different Wi-Fi MAC policy, inspect profiles and edit the exact UUID with NetworkManager's connection editor; reconnect after applying it.
+Use **Connection privacy** or `octoshield connections` to select a connection by name. Set autoconnect, discovery or the Wi-Fi MAC choice for that connection. The change is retained as an override in its effective network profile; the legacy office-network command uses the same path. Reconnect explicitly after reviewing the interruption. Saved settings and current runtime verification are separate; a successful save does not prove that an old active connection already uses the new settings.
+
+## Docker and diagnostic findings
+
+Open **Details & fixes** or `octoshield diagnostics`. The report names observed bindings, relevant configuration sources and inspection limits. Forwarding is required for common Docker bridge networks; disabling it or Docker's firewall management globally can break working containers. A localhost port mapping is different from a wildcard mapping, and neither inspection alone proves all possible network paths are isolated.
+
+The supported Compose repair runs as your normal user, with the Docker permissions you already have. It verifies the live container and source model, writes a dedicated `.octoshield/SERVICE.local.yaml` override, and recreates only that service. The plan shows the real paths, service, bindings and exact deployment command. No original Compose source is rewritten, and no unrelated service is started deliberately. A changed source, unfamiliar network mode, missing Docker access or unsupported version stops the automatic operation with an explanation. Nondefault resource policies, static or custom network endpoints, unexpected aliases and restart-policy drift require a manual source-guided change.
+
+The private `.octoshield/SERVICE.reviewed.json` snapshot retains the exact resolved deployment model and pins the running image for this execution and recovery. The permanent `.local.yaml` file overrides ports only, so future deployments can upgrade images normally. The snapshot is restricted to its owner and can contain environment values; do not publish it with diagnostic reports. Service recreation retains mounted volumes but replaces unmounted changes in the container's writable layer. Back up any application data held there before approving recreation.
+
+Keep the generated override in future deployment commands. Running only the original Compose files can reopen broader ports. If recreation or verification fails, inspect the reported running state and override before retrying; the tool does not silently restore broad publication to make the command succeed. To deliberately restore earlier access, review the original configuration and recreate only the affected service using its original file set. This can expose its ports again. Verify local and outbound access as well as access from a second device after either change.
+
+Disk-encryption details distinguish detected root backing encryption from separate home, swap or unsupported storage. An unknown result is not evidence of an unencrypted disk. These screens never format, encrypt or migrate storage.
 
 Full profile recovery is sensitive: saved directories can contain passwords and certificates, and some profiles originate in Netplan or another backend. Compare the saved `/etc/NetworkManager/system-connections` and `/run/NetworkManager/system-connections` directories with the current state, restore only the affected profile files with their original ownership/modes, then run:
 

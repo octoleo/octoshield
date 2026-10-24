@@ -8,6 +8,9 @@ api::valid_backup_id() {
 
 api::validate() {
     case "${1-}" in
+        access) access::validate "${@:2}" && return 0 ;;
+        connections) connections::validate "${@:2}" && return 0 ;;
+        diagnostics) diagnostics::validate "${@:2}" && return 0 ;;
         apply)
             [[ $# -eq 2 ]] || return 1
             case "$2" in firewall | network | services | sudo | updates | apparmor | usb | monitor) return 0 ;; esac
@@ -48,6 +51,9 @@ api::validate() {
 
 api::mutates() {
     case "$1 ${2-}" in
+        'access '*) access::mutates "${@:2}" ;;
+        'connections '*) connections::mutates "${@:2}" ;;
+        'diagnostics '*) return 1 ;;
         'profile '*) profiles::mutates "${@:2}" ;;
         'apply '* | 'office '* | 'usb allow' | 'usb block' | 'usb forget' | 'usb enroll' | 'usb approve' | 'usb revoke' | 'monitor disable') return 0 ;;
         *) return 1 ;;
@@ -78,6 +84,33 @@ api::flush() {
     while IFS= read -r -n 4096 line <&7 || [[ -n $line ]]; do
         api::event log "$line" || return 1
     done
+}
+
+# Inventories must arrive as one complete JSON document. Log truncation must
+# never hide permissions or corrupt strings. Only fixed read operations enter
+# this route, and the serialized envelope respects the native protocol limit.
+api::data() {
+    local document event bytes
+    bytes=$(stat -c %s -- "$API_DIRECTORY/output") || return 1
+    ((bytes <= 65536)) || {
+        api::event log 'This inspection exceeds the display limit. Narrow its scope and try again.'
+        return 1
+    }
+    document=$(jq -cse --arg kind "$1" 'select(length == 1) | .[0] | select(type == "object" and .kind == $kind)' "$API_DIRECTORY/output") || {
+        api::event log 'The inspection did not return a complete structured result.'
+        return 1
+    }
+    event=$(jq -cn --arg text "$document" '{type:"data",text:$text}') || return 1
+    bytes=$(printf '%s' "$event" | wc -c) || return 1
+    # Leave room for the broker's request identifier in its outer envelope.
+    ((bytes <= 65400)) || {
+        api::event log 'This inspection exceeds the display limit. Narrow its scope and try again.'
+        return 1
+    }
+    {
+        flock -x 8 || return 1
+        printf '%s\n' "$event" >&3
+    } 8>"$API_DIRECTORY/events.lock"
 }
 
 api::confirm() {
@@ -135,8 +168,27 @@ api::inspect() (
     cli::status
 )
 
+# Private inventories share the observer's bounded process supervision. They
+# hold a read lock only inside this disposable worker, never while the user is
+# reviewing a screen. A blocked probe cannot retain a lock indefinitely.
+api::details() {
+    local result=0
+    core::timeout --kill-after=3s 45s /bin/bash -p "$OCTOSHIELD_ROOT/src/status-daemon" --details "$@" || result=$?
+    case "$result" in
+        0) return 0 ;;
+        75) core::die 'A protection change is in progress. Refresh these details when it finishes.' ;;
+        124 | 137) core::die 'This inspection exceeded its time limit and was stopped. Existing protections were not changed.' ;;
+        *) core::die 'These details could not be inspected. Review the preceding message and retry.' ;;
+    esac
+    return "$result"
+}
+
 api::dispatch() {
     case "$1" in
+        access | connections)
+            if [[ $2 == list ]]; then api::details "$@"; else "${1}::dispatch" "${@:2}"; fi
+            ;;
+        diagnostics) api::details "$@" ;;
         apply) "${CLI_CONTROLS[$2]}" ;;
         profile) profiles::dispatch "${@:2}" ;;
         usb)
@@ -217,9 +269,15 @@ api::interrupted() {
 # Callbacks below are invoked indirectly by the shared control modules.
 # shellcheck disable=SC2317,SC2329
 api::serve() (
-    local callback=${1-} result=0 base=/run API_DIRECTORY API_CONFIRM_ID=0 API_CHANGE_STARTED=''
+    local callback=${1-} result=0 base=/run structured='' API_DIRECTORY API_CONFIRM_ID=0 API_CHANGE_STARTED=''
     case "$callback" in api::operation | user_api::dispatch) ;; *) return 2 ;; esac
     shift
+    case "$callback:${1-}:${2-}" in
+        api::operation:access:list) structured=access ;;
+        api::operation:connections:list) structured=connections ;;
+        api::operation:diagnostics:show) structured=diagnostics ;;
+        user_api::dispatch:containers:plan) structured=container-plan ;;
+    esac
     if [[ $callback == api::operation ]] && api::mutates "$@"; then API_CHANGE_STARTED=false; fi
     exec 3>&1 4<&0
     if ((EUID != 0)); then base=${XDG_RUNTIME_DIR:-/tmp}; fi
@@ -244,7 +302,11 @@ api::serve() (
         }
     fi
     "$callback" "$@" >>"$API_DIRECTORY/output" 2>&1 </dev/null || result=$?
-    api::flush || result=1
+    if [[ -n $structured && $result == 0 ]]; then
+        api::data "$structured" || result=1
+    else
+        api::flush || result=1
+    fi
     if ((result == 0)); then
         api::event 'done' true || return 1
     else api::event 'done' false || return 1; fi

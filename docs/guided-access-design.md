@@ -12,6 +12,12 @@ OctoShield should explain an observed condition, identify its scope and configur
 - Offer bounded local-only Docker configuration guidance and reviewed repairs for supported configurations; never execute arbitrary Compose configuration with administrator privileges.
 - Keep device paths, connection names, container identity and configuration locations out of the public status cache.
 
+## Shared command surface
+
+The GUI helper and explicit terminal subcommands share `access list/allow/update/revoke`, `connections list/set/reconnect`, and `diagnostics show`. Calling `octoshield access`, `octoshield connections` or `octoshield diagnostics` without arguments opens a guided terminal selection. Menus wait without retaining a mutation lock. The office menu delegates to these workflows; legacy command forms remain supported through the managed backend.
+
+Docker `containers plan/localize` runs through the normal-user adapter. A supported Compose repair requires a reviewed token, matching live/source configuration and eligible project files. It generates a dedicated localhost override and recreates only the selected service. A private owner-only resolved-model snapshot makes the reviewed execution reproducible; it may contain environment values and is not included in logs. Nondefault resource policies and custom endpoint settings require manual review. Recreation retains mounted volumes but replaces the container writable layer. The generated override must be included in future deployment commands; it is not an invisible change to the original source.
+
 ## Validation
 
 Backend tests mock native changes and cover grouped access, cancellation, partial failures, expiry, revocation, profile consistency, network discovery, privacy overrides, encryption topology and Docker binding classification. Native tests cover effective profile selection, friendly inventories, direct finding actions and meaningful status labels. Run lint, backend tests, native builds/tests, display smoke tests and sanitizers.

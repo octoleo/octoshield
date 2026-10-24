@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "protocol.h"
 
+#include <json-glib/json-glib.h>
 #include <string.h>
 
 static void parse_valid(void)
@@ -193,6 +194,44 @@ static void parse_length(void)
     g_assert_error(error, OCTOSHIELD_PROTOCOL_ERROR, OCTOSHIELD_PROTOCOL_ERROR_TOO_LARGE);
     g_clear_error(&error);
     g_string_free(record, TRUE);
+}
+
+static void parse_data(void)
+{
+    /* Structured JSON must retain its original bytes. Display sanitization is
+     * applied after extracting labels, never to paths or other identifiers. */
+    g_autofree gchar *padding = g_strnfill(8192, 'x');
+    g_autofree gchar *document = g_strdup_printf(
+        "{\"kind\":\"access\",\"name\":\"<b>name</b>\342\200\256\",\"escaped\":\"\\r\\t\\u001b\",\"padding\":\"%s\"}", padding);
+    g_autoptr(JsonObject) object = json_object_new();
+    json_object_set_string_member(object, "type", "data");
+    json_object_set_string_member(object, "text", document);
+    g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(node, object);
+    g_autofree gchar *record = json_to_string(node, FALSE);
+    OctoshieldEvent event = {0};
+    GError *error = NULL;
+    g_assert_true(octoshield_event_parse(record, -1, &event, &error));
+    g_assert_no_error(error);
+    g_assert_cmpint(event.type, ==, OCTOSHIELD_EVENT_DATA);
+    g_assert_cmpuint(strlen(event.text), >, 4096);
+    g_assert_cmpstr(event.text, ==, document);
+    g_assert_cmpuint(event.id, ==, 0);
+    g_assert_false(event.change_started_known);
+    octoshield_event_clear(&event);
+
+    const gchar *invalid[] = {
+        "{\"type\":\"data\"}", "{\"type\":\"data\",\"text\":null}",
+        "{\"type\":\"data\",\"text\":{}}", "{\"type\":\"data\",\"text\":[]}",
+        "{\"type\":\"data\",\"text\":true}", "{\"type\":\"data\",\"text\":123}",
+        "{\"type\":\"data\",\"text\":\"hidden\\u0000tail\"}"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(invalid); i++) {
+        g_assert_false(octoshield_event_parse(invalid[i], -1, &event, &error));
+        g_assert_error(error, OCTOSHIELD_PROTOCOL_ERROR, OCTOSHIELD_PROTOCOL_ERROR_INVALID_EVENT);
+        g_assert_null(event.text);
+        g_clear_error(&error);
+    }
 }
 
 static void assert_action(gboolean privileged, const gchar *const *args)
@@ -395,6 +434,93 @@ static void action_usb_bound(void)
     reject_action(FALSE, 6, args);
 }
 
+static void action_guided_access(void)
+{
+    static const gchar *const valid[][10] = {
+        {"access", "list", NULL}, {"access", "list", "home", NULL},
+        {"access", "allow", "home", "80,443", "tcp", "192.168.1.0/24", "wlan0", "60", NULL},
+        {"access", "update", "home", "g1-2-3", "80,443", "tcp", "2001:db8::/64", "eth0", "10080", NULL},
+        {"access", "update", "office", "r1-2-3", "22", "tcp", "any", "any", "0", NULL},
+        {"access", "revoke", "home", "g1-2-3", NULL},
+        {"connections", "list", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "autoconnect", "true", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "discovery", "false", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "mac", "stable", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "mac", "permanent", NULL},
+        {"connections", "reconnect", "11111111-2222-3333-4444-555555555555", NULL},
+        {"diagnostics", "show", "disk_encryption", NULL},
+        {"diagnostics", "show", "containers", NULL},
+        {"diagnostics", "show", "forwarding", NULL},
+        {"diagnostics", "show", "network", NULL}
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(valid); i++) {
+        assert_action(TRUE, valid[i]);
+        reject_action(FALSE, g_strv_length((gchar **)valid[i]), valid[i]);
+    }
+    const gchar *token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const gchar *plan[] = {"containers", "plan", token, NULL};
+    const gchar *localize[] = {"containers", "localize", token, token, NULL};
+    assert_action(FALSE, plan);
+    assert_action(FALSE, localize);
+    reject_action(TRUE, 3, plan);
+    reject_action(TRUE, 4, localize);
+}
+
+static void action_guided_reject(void)
+{
+    static const gchar *const invalid[][11] = {
+        {"access", "allow", "unmanaged", "80", "tcp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "80,80", "tcp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "80,", "tcp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "80;id", "tcp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "65536", "tcp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "80", "icmp", "any", "any", "0", NULL},
+        {"access", "allow", "home", "80", "tcp", "1.2.3.999/24", "any", "0", NULL},
+        {"access", "allow", "home", "80", "tcp", "any", "$(id)", "0", NULL},
+        {"access", "allow", "home", "80", "tcp", "any", "any", "10081", NULL},
+        {"access", "update", "home", "g1-2-3", "80", "tcp", "any", "any", "0", "extra", NULL},
+        {"access", "revoke", "home", "../rules", NULL},
+        {"access", "revoke", "home", "g1-2-123456", NULL},
+        {"connections", "reconnect", "$(nmcli)", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "mac", "true", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "discovery", "yes", NULL},
+        {"connections", "set", "11111111-2222-3333-4444-555555555555", "command", "true", NULL},
+        {"diagnostics", "show", "../../etc/shadow", NULL},
+        {"diagnostics", "apply", "network", NULL}
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(invalid); i++)
+        reject_action(TRUE, g_strv_length((gchar **)invalid[i]), invalid[i]);
+
+    GString *ports = g_string_new(NULL);
+    for (guint i = 10000; i < 10032; i++) {
+        if (ports->len != 0) g_string_append_c(ports, ',');
+        g_string_append_printf(ports, "%u", i);
+    }
+    g_assert_cmpuint(ports->len, ==, 191);
+    const gchar *args[] = {"access", "update", "home", "g1-2-3", ports->str, "tcp", "any", "any", "0", NULL};
+    assert_action(TRUE, args);
+    g_string_append_c(ports, ',');
+    args[4] = ports->str;
+    reject_action(TRUE, 9, args);
+    g_string_truncate(ports, 0);
+    for (guint i = 1; i <= 33; i++) {
+        if (ports->len != 0) g_string_append_c(ports, ',');
+        g_string_append_printf(ports, "%u", i);
+    }
+    g_assert_cmpuint(ports->len, <, 191);
+    args[4] = ports->str;
+    reject_action(TRUE, 9, args);
+    g_string_free(ports, TRUE);
+
+    const gchar *token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const gchar *bad_container[] = {"containers", "localize", token, "bad", NULL};
+    reject_action(FALSE, 4, bad_container);
+    bad_container[1] = "plan"; bad_container[2] = "--help";
+    reject_action(FALSE, 3, bad_container);
+    bad_container[2] = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    reject_action(FALSE, 3, bad_container);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -402,11 +528,14 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/protocol/invalid", parse_invalid);
     g_test_add_func("/ui/protocol/sanitize", parse_sanitize);
     g_test_add_func("/ui/protocol/length", parse_length);
+    g_test_add_func("/ui/protocol/data", parse_data);
     g_test_add_func("/ui/action/privileged", action_privileged);
     g_test_add_func("/ui/action/user", action_user);
     g_test_add_func("/ui/action/reject", action_reject);
     g_test_add_func("/ui/action/profiles-and-updates", action_profiles);
     g_test_add_func("/ui/action/profiles-reject", action_profiles_reject);
     g_test_add_func("/ui/action/usb-bound", action_usb_bound);
+    g_test_add_func("/ui/action/guided-access", action_guided_access);
+    g_test_add_func("/ui/action/guided-reject", action_guided_reject);
     return g_test_run();
 }

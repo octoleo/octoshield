@@ -4,6 +4,7 @@
 
 user_api::validate() {
     case "${1-}" in
+        containers) containers::validate "${@:2}" && return 0 ;;
         desktop)
             [[ $# -eq 2 ]] || return 1
             case "$2" in apply | restore | status) return 0 ;; esac
@@ -21,6 +22,7 @@ user_api::validate() {
 
 user_api::dispatch() {
     case "$1 ${2-}" in
+        'containers '*) containers::dispatch "${@:2}" ;;
         'desktop apply') desktop::apply ;;
         'desktop restore') desktop::restore ;;
         'desktop status') desktop::status ;;

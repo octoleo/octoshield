@@ -164,13 +164,13 @@ gboolean octoshield_event_parse(const gchar *line, gssize length,
 
     const gchar *type = json_object_get_string_member(object, "type");
     OctoshieldEvent parsed = {0};
-    if (g_str_equal(type, "log") || g_str_equal(type, "confirm")) {
+    if (g_str_equal(type, "log") || g_str_equal(type, "confirm") || g_str_equal(type, "data")) {
         if (!member_type(object, "text", G_TYPE_STRING)) {
             g_object_unref(parser);
             return invalid_event(error, "A log or confirmation needs string text.");
         }
-        parsed.type = g_str_equal(type, "log") ? OCTOSHIELD_EVENT_LOG :
-                                               OCTOSHIELD_EVENT_CONFIRM;
+        parsed.type = g_str_equal(type, "data") ? OCTOSHIELD_EVENT_DATA :
+                      g_str_equal(type, "log") ? OCTOSHIELD_EVENT_LOG : OCTOSHIELD_EVENT_CONFIRM;
         if (parsed.type == OCTOSHIELD_EVENT_CONFIRM) {
             if (!member_type(object, "id", G_TYPE_INT64)) {
                 g_object_unref(parser);
@@ -183,8 +183,11 @@ gboolean octoshield_event_parse(const gchar *line, gssize length,
             }
             parsed.id = (guint64)id;
         }
-        parsed.text = octoshield_text_sanitize(
-            json_object_get_string_member(object, "text"), -1);
+        /* Structured text is JSON, not display text. Sanitize extracted labels
+         * when rendering; rewriting its bytes can invalidate identifiers. */
+        parsed.text = parsed.type == OCTOSHIELD_EVENT_DATA ?
+            g_strdup(json_object_get_string_member(object, "text")) :
+            octoshield_text_sanitize(json_object_get_string_member(object, "text"), -1);
     } else if (g_str_equal(type, "done")) {
         if (!member_type(object, "success", G_TYPE_BOOLEAN)) {
             g_object_unref(parser);
@@ -339,6 +342,44 @@ static gboolean profile_action(gsize argc, const gchar *const *args)
     return FALSE;
 }
 
+static gboolean access_action(gsize argc, const gchar *const *args)
+{
+    if (g_str_equal(args[1], "list"))
+        return argc == 2 || (argc == 3 && profile_id(args[2]));
+    if (argc < 3 || !profile_id(args[2])) return FALSE;
+    gboolean update = g_str_equal(args[1], "update");
+    if (g_str_equal(args[1], "revoke") || update) {
+        if (argc < 4 || !g_regex_match_simple("^[gr][0-9]{1,16}-[0-9]{1,10}-[0-9]{1,5}$", args[3], 0, 0))
+            return FALSE;
+        if (!update) return argc == 4;
+    } else if (!g_str_equal(args[1], "allow")) return FALSE;
+    guint offset = update ? 4 : 3;
+    if (argc != offset + 5 || strlen(args[offset]) > 191) return FALSE;
+    g_auto(GStrv) ports = g_strsplit(args[offset], ",", -1);
+    if (g_strv_length(ports) > 32) return FALSE;
+    for (guint i = 0; ports[i] != NULL; i++) {
+        if (!decimal(ports[i], 65535)) return FALSE;
+        for (guint j = 0; j < i; j++)
+            if (g_str_equal(ports[i], ports[j])) return FALSE;
+        /* Reuse the same strict protocol/address/interface/duration checks. */
+        const gchar *rule[] = {"profile", "rule-add", args[2], ports[i], args[offset + 1], args[offset + 2], args[offset + 3], args[offset + 4]};
+        if (!profile_action(8, rule)) return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean connections_action(gsize argc, const gchar *const *args)
+{
+    if (argc == 2 && g_str_equal(args[1], "list")) return TRUE;
+    if (argc < 3 || !g_uuid_string_is_valid(args[2])) return FALSE;
+    if (g_str_equal(args[1], "reconnect")) return argc == 3;
+    if (argc != 5 || !g_str_equal(args[1], "set")) return FALSE;
+    if (g_str_equal(args[3], "mac"))
+        return g_str_equal(args[4], "stable") || g_str_equal(args[4], "permanent");
+    return (g_str_equal(args[3], "autoconnect") || g_str_equal(args[3], "discovery")) &&
+           (g_str_equal(args[4], "true") || g_str_equal(args[4], "false"));
+}
+
 static gboolean privileged_action(gsize argc, const gchar *const *args)
 {
     static const gchar *const controls[] = {
@@ -360,6 +401,12 @@ static gboolean privileged_action(gsize argc, const gchar *const *args)
     }
     if (g_str_equal(args[0], "profile"))
         return profile_action(argc, args);
+    if (g_str_equal(args[0], "access")) return access_action(argc, args);
+    if (g_str_equal(args[0], "connections")) return connections_action(argc, args);
+    if (g_str_equal(args[0], "diagnostics")) {
+        static const gchar *const topics[] = {"disk_encryption", "containers", "forwarding", "network", NULL};
+        return argc == 3 && g_str_equal(args[1], "show") && one_of(args[2], topics);
+    }
     if (g_str_equal(args[0], "backup-show")) {
         return argc == 2 && backup_id(args[1]);
     }
@@ -415,6 +462,12 @@ static gboolean user_action(gsize argc, const gchar *const *args)
     }
     if (argc == 2 && g_str_equal(args[0], "updates") && g_str_equal(args[1], "check"))
         return TRUE;
+    if (g_str_equal(args[0], "containers")) {
+        if (argc < 3 || !g_regex_match_simple("^[a-f0-9]{64}$", args[2], 0, 0)) return FALSE;
+        if (g_str_equal(args[1], "plan")) return argc == 3;
+        return argc == 4 && g_str_equal(args[1], "localize") &&
+               g_regex_match_simple("^[a-f0-9]{64}$", args[3], 0, 0);
+    }
     return argc == 2 &&
            ((g_str_equal(args[0], "desktop") && one_of(args[1], desktop)) ||
             (g_str_equal(args[0], "monitor") && one_of(args[1], monitor)));
@@ -423,9 +476,9 @@ static gboolean user_action(gsize argc, const gchar *const *args)
 GStrv octoshield_action_argv(gboolean privileged, gsize argc,
                            const gchar *const *args, GError **error)
 {
-    gboolean valid = args != NULL && argc >= 1 && argc <= 8;
+    gboolean valid = args != NULL && argc >= 1 && argc <= 9;
     for (gsize index = 0; valid && index < argc; index++) {
-        valid = args[index] != NULL && strlen(args[index]) <= 128;
+        valid = args[index] != NULL && strlen(args[index]) <= 256;
     }
     if (valid) {
         valid = privileged ? privileged_action(argc, args) : user_action(argc, args);

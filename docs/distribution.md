@@ -6,17 +6,17 @@ The supported delivery is a downloadable `.deb` containing the native GNOME appl
 
 ## Install the package
 
-Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.2.2 on Ubuntu 24.04 from a new empty directory:
+Download a package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest) matching **both** the laptop's Ubuntu release and architecture. Automated builds provide amd64 packages for Ubuntu 24.04 and 26.04. For example, download and install version 1.3.0 on Ubuntu 24.04 from a new empty directory:
 
 ```bash
 (
 set -e
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.2.2/octoshield_1.2.2_ubuntu24.04_amd64.deb
+    -O https://github.com/octoleo/octoshield/releases/download/v1.3.0/octoshield_1.3.0_ubuntu24.04_amd64.deb
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
-    -O https://github.com/octoleo/octoshield/releases/download/v1.2.2/SHA256SUMS-ubuntu24.04
+    -O https://github.com/octoleo/octoshield/releases/download/v1.3.0/SHA256SUMS-ubuntu24.04
 sha256sum -c SHA256SUMS-ubuntu24.04
-sudo apt install ./octoshield_1.2.2_ubuntu24.04_amd64.deb
+sudo apt install ./octoshield_1.3.0_ubuntu24.04_amd64.deb
 )
 ```
 
@@ -88,7 +88,7 @@ See [features](features.md), the [control-by-control README](../README.md#indivi
 
 ## Upgrade and clean removal
 
-Version 1.2.2 retains the package name `octoshield`, so downloading its matching `.deb` and opening it with a supported desktop package installer upgrades an existing 1.0.0, 1.1.0, 1.2.0 or 1.2.1 installation in place. The package manager asks for administrator permission. If double-clicking opens an archive viewer or no installer, use `sudo apt install ./octoshield_1.2.2_ubuntu24.04_amd64.deb` with your actual matching filename. Do not uninstall the older version first. Package upgrades preserve native policy, profile state, user preferences and private snapshots, and do not automatically select a new security profile.
+Version 1.3.0 retains the package name `octoshield`, so downloading its matching `.deb` and opening it with a supported desktop package installer upgrades an existing 1.0.0, 1.1.0, 1.2.0, 1.2.1 or 1.2.2 installation in place. The package manager asks for administrator permission. If double-clicking opens an archive viewer or no installer, use `sudo apt install ./octoshield_1.3.0_ubuntu24.04_amd64.deb` with your actual matching filename. Do not uninstall the older version first. Package upgrades preserve native policy, profile state, user preferences and private snapshots, and do not automatically select a new security profile.
 
 The application and `octoshield updates check` provide an explicit, normal-user release check against `https://api.github.com/repos/octoleo/octoshield/releases/latest`. The request uses HTTPS, time and size limits, canonical stable versions, and exact official package URL matching for Ubuntu 24.04/26.04 amd64. It sends no GitHub token, does not run at startup, and never downloads or executes an installer as root. A failed check is reported as unavailable, not as proof the application is current. Opening the offered release or package link uses your normal desktop browser; install the downloaded package through the system package manager. Older remote versions are not recommended as upgrades. No store keys or credentials are needed for this check.
 

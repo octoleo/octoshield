@@ -97,6 +97,42 @@ static void test_rejections(void)
     g_free(long_line);
 }
 
+static void test_guided_requests(void)
+{
+    const gchar *valid[] = {
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"list\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"allow\",\"home\",\"80,443\",\"tcp\",\"192.168.1.0/24\",\"wlan0\",\"60\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"update\",\"home\",\"g1-2-3\",\"80,443\",\"tcp\",\"2001:db8::/64\",\"eth0\",\"10080\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"revoke\",\"home\",\"g1-2-3\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"connections\",\"set\",\"11111111-2222-3333-4444-555555555555\",\"autoconnect\",\"true\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"connections\",\"reconnect\",\"11111111-2222-3333-4444-555555555555\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"diagnostics\",\"show\",\"containers\"]}"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(valid); i++) {
+        Message parsed = message(valid[i]);
+        g_assert_cmpint(parsed.type, ==, MESSAGE_REQUEST);
+        if (i == 2) {
+            /* Nine command words survive the broker without truncation. */
+            g_assert_cmpuint(g_strv_length(parsed.argv), ==, 11);
+            g_assert_cmpstr(parsed.argv[10], ==, "10080");
+            g_assert_null(parsed.argv[11]);
+        }
+        message_clear(&parsed);
+    }
+    const gchar *invalid[] = {
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"update\",\"home\",\"g1-2-3\",\"80,443\",\"tcp\",\"any\",\"any\",\"0\",\"extra\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"access\",\"allow\",\"home\",\"80,80\",\"tcp\",\"any\",\"any\",\"0\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"containers\",\"plan\",\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"]}",
+        "{\"type\":\"request\",\"id\":1,\"args\":[\"containers\",\"localize\",\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"]}"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(invalid); i++) {
+        Message parsed = {0};
+        g_assert_false(parse_message(invalid[i], strlen(invalid[i]), &parsed));
+        g_assert_null(parsed.argv);
+        message_clear(&parsed);
+    }
+}
+
 static void test_request_sequence(void)
 {
     Broker broker;
@@ -249,6 +285,46 @@ static void test_completion_change_state(void)
         }
         broker_clear(&broker);
     }
+}
+
+static void test_structured_stream(void)
+{
+    Broker broker;
+    broker_init(&broker);
+    broker.request = 19;
+    g_autofree gchar *padding = g_strnfill(8192, 'x');
+    g_autofree gchar *document = g_strdup_printf(
+        "{\"kind\":\"diagnostics\",\"name\":\"<b>name</b>\342\200\256\",\"escaped\":\"\\r\\t\\u001b\",\"padding\":\"%s\"}", padding);
+    g_autoptr(JsonObject) data = json_object_new();
+    json_object_set_string_member(data, "type", "data");
+    json_object_set_string_member(data, "text", document);
+    g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(node, data);
+    g_autofree gchar *record = json_to_string(node, FALSE);
+    g_autofree gchar *line = g_strconcat(record, "\n", NULL);
+    g_assert_cmpuint(strlen(line), >, 8192);
+    g_assert_true(consume_lines(&broker, broker.child_line, line, 4093, FALSE));
+    g_assert_cmpuint(broker.pending->len, ==, 0);
+    g_assert_true(consume_lines(&broker, broker.child_line, line + 4093, strlen(line) - 4093, FALSE));
+    g_assert_cmpuint(broker.child_line->len, ==, 0);
+    g_assert_false(broker.done_seen);
+    g_assert_cmpuint(broker.prompt, ==, 0);
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_assert_true(json_parser_load_from_data(parser, broker.pending->str, -1, NULL));
+    JsonObject *forwarded = json_node_get_object(json_parser_get_root(parser));
+    g_assert_cmpstr(json_object_get_string_member(forwarded, "type"), ==, "data");
+    g_assert_cmpint(json_object_get_int_member(forwarded, "request"), ==, 19);
+    g_assert_cmpstr(json_object_get_string_member(forwarded, "text"), ==, document);
+    g_assert_false(json_object_has_member(forwarded, "success"));
+    const gchar *confirm = "{\"type\":\"confirm\",\"id\":1,\"text\":\"Review complete?\"}";
+    g_assert_true(forward_event(&broker, confirm, strlen(confirm)));
+    g_assert_cmpuint(broker.prompt, ==, 1);
+    broker.prompt = 0;
+    const gchar *done = "{\"type\":\"done\",\"success\":true}";
+    g_assert_true(forward_event(&broker, done, strlen(done)));
+    g_assert_true(broker.done_seen);
+    g_assert_false(forward_event(&broker, record, strlen(record)));
+    broker_clear(&broker);
 }
 
 static GVariant *properties(guint32 uid, gboolean active, gboolean remote, gboolean locked, const gchar *type)
@@ -427,6 +503,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/session/requests", test_requests);
     g_test_add_func("/session/bound-usb-requests", test_bound_usb_requests);
+    g_test_add_func("/session/guided-requests", test_guided_requests);
     g_test_add_func("/session/rejections", test_rejections);
     g_test_add_func("/session/request-sequence", test_request_sequence);
     g_test_add_func("/session/answer-binding", test_answer_binding);
@@ -434,6 +511,7 @@ int main(int argc, char **argv)
     g_test_add_func("/session/completion-change-state", test_completion_change_state);
     g_test_add_func("/session/exact-answer-delivery", test_exact_answer_delivery);
     g_test_add_func("/session/bounded-stream", test_bounded_stream);
+    g_test_add_func("/session/structured-stream", test_structured_stream);
     g_test_add_func("/session/authority-properties", test_authority_properties);
     g_test_add_func("/session/parent-death", test_parent_death);
     g_test_add_func("/session/executable-identity", test_executable_identity);

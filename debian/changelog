@@ -1,3 +1,18 @@
+octoshield (1.3.0) unstable; urgency=medium
+
+  * Guide service access with detected local networks, grouped web ports,
+    immediate verified permissions, editing, revocation and failure recovery.
+  * Manage named connection privacy settings and explicit reconnects through
+    shared profile overrides with separate saved and active verification.
+  * Report scoped storage encryption and Docker/forwarding evidence with
+    private configuration sources and actionable native detail screens.
+  * Offer reviewed local Docker port bindings for supported Compose services
+    without running project configuration through the administrator helper.
+  * Bound private inspections and structured transport, preserve profile
+    consistency, and expand backend, native and package regression coverage.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Sat, 24 Oct 2026 11:15:57 +0000
+
 octoshield (1.2.2) unstable; urgency=medium
 
   * Let interactive changes wait for bounded status collection, give waiting

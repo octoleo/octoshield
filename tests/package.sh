@@ -348,6 +348,10 @@ done
 for path in \
     usr/lib/octoshield/src/lib/core.sh \
     usr/lib/octoshield/src/lib/api.sh \
+    usr/lib/octoshield/src/lib/access.sh \
+    usr/lib/octoshield/src/lib/connections.sh \
+    usr/lib/octoshield/src/lib/diagnostics.sh \
+    usr/lib/octoshield/src/lib/containers.sh \
     usr/lib/octoshield/src/lib/updates.sh \
     usr/lib/octoshield/src/lib/profiles.sh \
     usr/lib/octoshield/src/lib/profile_controls.sh \

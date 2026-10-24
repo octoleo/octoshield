@@ -59,6 +59,7 @@ setup() {
 }
 
 @test 'passive container inspection never activates a stopped Docker service' {
+    source "$BATS_TEST_DIRNAME/../src/lib/status.sh"
     status::unit() { printf 'inactive\n'; }
     status::run() {
         printf 'must not connect to Docker\n' >"$BATS_TEST_TMPDIR/activated"
@@ -221,14 +222,18 @@ fixture() {
     jq -e '.state == "partial"' <<<"$output"
 }
 
-@test 'disk encryption never claims full disk coverage from root mapper alone' {
+@test 'verified root encryption is positive without claiming whole disk coverage' {
     source "$BATS_TEST_DIRNAME/../src/lib/status.sh"
     status::run() {
-        case "$1" in findmnt) printf '/dev/mapper/root\n' ;; lsblk) printf 'lvm\ncrypt\npart\ndisk\n' ;; *) return 1 ;; esac
+        case "$1" in
+            findmnt) printf '/dev/mapper/root\n' ;;
+            lsblk) printf '%s\n' '{"blockdevices":[{"name":"root","type":"lvm","children":[{"name":"luks","type":"crypt","children":[{"name":"disk","type":"disk"}]}]}]}' ;;
+            *) return 1 ;;
+        esac
     }
     run status::disk_encryption
     [ "$status" -eq 0 ]
-    jq -e '.state == "partial" and (.summary | contains("Other disks"))' <<<"$output"
+    jq -e '.state == "active" and (.summary | contains("not a whole-disk certification")) and .source == null' <<<"$output"
 }
 
 @test 'missing Thunderbolt DMA evidence never reports full protection' {

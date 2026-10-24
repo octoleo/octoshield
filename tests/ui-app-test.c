@@ -151,7 +151,7 @@ static void test_window(void)
 {
     g_assert_true(gtk_widget_get_visible(GTK_WIDGET(test_app.window)));
     GtkSelectionModel *pages = gtk_stack_get_pages(test_app.pages);
-    g_assert_cmpuint(g_list_model_get_n_items(G_LIST_MODEL(pages)), ==, 6);
+    g_assert_cmpuint(g_list_model_get_n_items(G_LIST_MODEL(pages)), ==, 8);
     g_object_unref(pages);
     g_assert_cmpuint(test_app.operation_widgets->len, >, 25);
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-overview.png");
@@ -375,7 +375,7 @@ static void test_page_screenshots(void)
     g_assert_null(test_app.operation);
     g_autofree gchar *initial_log = log_text();
     g_assert_nonnull(strstr(initial_log, "No protection has been applied"));
-    static const char *const pages[] = {"overview", "protections", "usb", "office", "monitoring", "recovery"};
+    static const char *const pages[] = {"overview", "protections", "usb", "office", "privacy", "diagnostics", "monitoring", "recovery"};
     static const AdwColorScheme schemes[] = {ADW_COLOR_SCHEME_FORCE_LIGHT, ADW_COLOR_SCHEME_FORCE_DARK};
     static const char *const labels[] = {"light", "dark"};
     if (g_getenv("OCTOSHIELD_TEST_SCREENSHOTS") != NULL)
@@ -694,6 +694,139 @@ static void test_session_reuses_authenticated_transport(void)
     update_actions(&test_app);
 }
 
+static void test_guided_access_and_connections(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    const char *data = "{\"kind\":\"connections\",\"connections\":["
+        "{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Workshop Wi-Fi\",\"type\":\"wifi\",\"interface\":\"wlp2s0\",\"active\":true,\"lan_candidate\":true,\"subnets\":[\"192.168.20.0/24\"],\"autoconnect\":\"no\",\"mdns\":\"0\",\"llmnr\":\"0\",\"mac\":\"stable\",\"runtime\":{\"state\":\"pending\",\"summary\":\"Reconnect to apply the saved privacy settings.\"},\"source_files\":[\"/etc/NetworkManager/system-connections/workshop.nmconnection\"]},"
+        "{\"uuid\":\"22222222-2222-2222-2222-222222222222\",\"name\":\"Docker bridge\",\"type\":\"bridge\",\"interface\":\"docker0\",\"active\":true,\"lan_candidate\":false,\"subnets\":[\"172.17.0.0/16\"]}]}";
+    g_assert_true(json_parser_load_from_data(parser, data, -1, NULL));
+    show_connections(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    g_assert_true(test_app.connections_loaded);
+    g_assert_cmpuint(test_app.lan_options->len, ==, 1);
+    g_assert_cmpstr(string_member(selected_connection(&test_app), "name", ""), ==, "Workshop Wi-Fi");
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_autoconnect), ==, 1);
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_discovery), ==, 1);
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_mac), ==, 0);
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.privacy_source), "workshop.nmconnection"));
+    gtk_drop_down_set_selected(test_app.access_preset, 0);
+    gtk_drop_down_set_selected(test_app.access_scope, 0);
+    gtk_drop_down_set_selected(test_app.access_duration, 1);
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) args = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(args);
+    g_assert_cmpstr(args[1], ==, "allow");
+    g_assert_cmpstr(args[3], ==, "80,443");
+    g_assert_cmpstr(args[4], ==, "tcp");
+    g_assert_cmpstr(args[5], ==, "192.168.20.0/24");
+    g_assert_cmpstr(args[6], ==, "wlp2s0");
+    g_assert_cmpstr(args[7], ==, "60");
+    g_assert_false(gtk_widget_get_visible(test_app.access_custom));
+    gtk_drop_down_set_selected(test_app.access_network, GTK_INVALID_LIST_POSITION);
+    g_auto(GStrv) missing = access_arguments(&test_app, &error);
+    g_assert_null(missing); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    gtk_drop_down_set_selected(test_app.access_network, 0);
+    test_app.connections_loaded = FALSE;
+    g_auto(GStrv) stale = access_arguments(&test_app, &error);
+    g_assert_null(stale); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    test_app.connections_loaded = TRUE;
+    gtk_stack_set_visible_child_name(test_app.pages, "office");
+    save_widget_png(GTK_WIDGET(test_app.window), "build/ui-guided-access.png");
+    gtk_stack_set_visible_child_name(test_app.pages, "privacy");
+    save_widget_png(GTK_WIDGET(test_app.window), "build/ui-connection-privacy.png");
+}
+
+static void test_access_rows_and_edit(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    const char *data = "{\"kind\":\"access\",\"profile\":\"home\",\"managed\":true,\"summary\":\"Verified host firewall permissions.\",\"rules\":[{\"id\":\"g123-456-789\",\"label\":\"Web server\",\"ports\":\"80,443\",\"protocol\":\"tcp\",\"source\":\"192.168.20.0/24\",\"interface\":\"wlp2s0\",\"expires_at\":0,\"state\":\"active\"}]}";
+    g_assert_true(json_parser_load_from_data(parser, data, -1, NULL));
+    show_access(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    GtkWidget *row = gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules));
+    g_assert_true(ADW_IS_ACTION_ROW(row));
+    g_assert_cmpstr(adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)), ==, "Web server");
+    g_assert_nonnull(strstr(adw_action_row_get_subtitle(ADW_ACTION_ROW(row)), "Active · 80,443/tcp"));
+    g_assert_true(widget_has_label_text(row, "Edit")); g_assert_true(widget_has_label_text(row, "Revoke"));
+    AccessRule *binding = g_object_get_data(G_OBJECT(row), "access-rule");
+    access_edit_clicked(NULL, binding);
+    g_assert_cmpstr(test_app.access_edit_id, ==, "g123-456-789");
+    g_assert_true(gtk_widget_get_visible(test_app.access_custom));
+    g_assert_true(gtk_widget_get_visible(test_app.access_address));
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) args = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_cmpstr(args[1], ==, "update");
+    g_assert_cmpstr(args[3], ==, "g123-456-789"); g_assert_cmpstr(args[4], ==, "80,443");
+    access_cancel_edit(NULL, &test_app);
+    g_assert_null(test_app.access_edit_id);
+    g_assert_true(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)) == row);
+}
+
+static void test_independent_encryption_and_details(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_assert_true(json_parser_load_from_data(parser, "{\"profiles\":{\"available\":false},\"exposures\":{\"disk_encryption\":{\"state\":\"active\",\"summary\":\"Encryption backs the root filesystem.\"}}}", -1, NULL));
+    JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+    StatusRow *disk = NULL;
+    for (guint i = 0; i < test_app.status_rows->len; i++) {
+        StatusRow *row = g_ptr_array_index(test_app.status_rows, i);
+        if (g_str_equal(row->key, "disk_encryption")) disk = row;
+    }
+    g_assert_nonnull(disk); update_status_row(disk, root);
+    g_assert_cmpstr(gtk_label_get_text(disk->badge), ==, "Encryption detected");
+    g_assert_true(widget_has_label_text(GTK_WIDGET(disk->row), "Review"));
+    const char *details = "{\"kind\":\"diagnostics\",\"topic\":\"disk_encryption\",\"title\":\"Storage encryption\",\"summary\":\"Root encryption verified; separate volumes listed below.\",\"findings\":[{\"title\":\"System filesystem\",\"state\":\"active\",\"detail\":\"Encrypted mapper backs this mount.\",\"source\":\"/dev/mapper/system-root\",\"action\":\"No change is required for this filesystem.\"}]}";
+    g_assert_true(json_parser_load_from_data(parser, details, -1, NULL));
+    show_diagnostics(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    g_assert_cmpstr(gtk_label_get_text(test_app.diagnostics_title), ==, "Storage encryption");
+    g_assert_true(widget_has_label_text(GTK_WIDGET(test_app.diagnostics_findings), "/dev/mapper/system-root"));
+    g_assert_true(widget_has_label_text(GTK_WIDGET(test_app.diagnostics_findings), "No change is required for this filesystem."));
+    gtk_stack_set_visible_child_name(test_app.pages, "diagnostics");
+    save_widget_png(GTK_WIDGET(test_app.window), "build/ui-storage-details.png");
+}
+
+static void test_access_profile_freshness(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_autofree gchar *snapshot = g_strdup_printf("{\"checked_at\":%" G_GINT64_FORMAT ",\"profiles\":{\"active\":\"home\",\"assignments\":{\"firewall\":\"office\"}},\"controls\":{},\"exposures\":{}}", g_get_real_time() / G_USEC_PER_SEC);
+    g_assert_true(json_parser_load_from_data(parser, snapshot, -1, NULL));
+    render_status(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    g_assert_cmpstr(selected_profile(&test_app, test_app.access_profile), ==, "office");
+    render_status(&test_app, NULL);
+    g_assert_cmpstr(selected_profile(&test_app, test_app.access_profile), ==, "office");
+    g_assert_cmpstr(test_app.firewall_profile, ==, "office");
+    test_app.access_edit_id = g_strdup("g123-456-789");
+    test_app.access_edit_profile = g_strdup("office");
+    for (guint i = 0; i < test_app.profile_ids->len; i++)
+        if (g_str_equal(g_ptr_array_index(test_app.profile_ids, i), "home")) gtk_drop_down_set_selected(test_app.access_profile, i);
+    g_assert_null(test_app.access_edit_id); g_assert_null(test_app.access_edit_profile);
+    g_assert_null(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)));
+}
+
+static void test_private_data_rejection_and_queue(void)
+{
+    Operation operation = {.app = &test_app, .title = "Refresh access permissions"};
+    test_app.operation = &operation;
+    handle_data_log(&test_app, "{\"kind\":\"access\"}");
+    g_assert_false(operation.data_seen);
+    operation.title = "Refresh connections";
+    handle_data_log(&test_app, "{\"kind\":\"connections\",\"connections\":\"not-an-array\"}");
+    g_assert_false(operation.data_seen);
+    operation.title = "Review container local access";
+    handle_data_log(&test_app, "{\"kind\":\"container-plan\",\"id\":\"invalid\",\"token\":\"invalid\"}");
+    g_assert_false(operation.data_seen);
+    test_app.operation = NULL;
+    GtkWidget *dialog = adw_message_dialog_new(test_app.window, "Pending review", "Fixture only");
+    test_app.preview = ADW_MESSAGE_DIALOG(dialog);
+    test_app.private_refresh = 2U;
+    update_actions(&test_app);
+    g_assert_cmpuint(test_app.private_refresh_idle, ==, 0);
+    test_app.preview = NULL;
+    update_actions(&test_app);
+    g_assert_cmpuint(test_app.private_refresh_idle, !=, 0);
+    g_source_remove(test_app.private_refresh_idle); test_app.private_refresh_idle = 0; test_app.private_refresh = 0;
+    gtk_window_destroy(GTK_WINDOW(dialog));
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && g_str_equal(argv[1], "--fixture"))
@@ -724,6 +857,11 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/status/catalog-preserves-selection", test_profile_catalog_selection);
     g_test_add_func("/ui/status/device-and-update-models", test_data_models);
     g_test_add_func("/ui/status/large-profile-and-device-records", test_large_data_records);
+    g_test_add_func("/ui/access/guided-web-and-physical-networks", test_guided_access_and_connections);
+    g_test_add_func("/ui/access/inline-rules-and-atomic-edit", test_access_rows_and_edit);
+    g_test_add_func("/ui/access/stale-status-retains-effective-profile", test_access_profile_freshness);
+    g_test_add_func("/ui/diagnostics/private-data-rejection-and-queue", test_private_data_rejection_and_queue);
+    g_test_add_func("/ui/diagnostics/encryption-independent-of-profile", test_independent_encryption_and_details);
     g_test_add_func("/ui/usb/prompt-deduplication-and-cancel", test_usb_prompt_deduplication_and_cancel);
     g_test_add_func("/ui/usb/approval-bound-before-authentication", test_usb_approval_is_bound_before_authentication);
     g_test_add_func("/ui/usb/profile-and-remembered-decisions", test_usb_profile_and_remembered_decisions);

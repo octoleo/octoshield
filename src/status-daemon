@@ -17,7 +17,7 @@ unset BASH_ENV ENV CDPATH DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
 STATUS_SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || exit 1
 readonly STATUS_SELF
 readonly OCTOSHIELD_ROOT=${STATUS_SELF%/src/status-daemon}
-for status_module in core controls usb monitor office profiles profile_firewall_verify profile_controls status; do
+for status_module in core controls usb monitor office profiles profile_firewall_verify profile_controls status access connections diagnostics; do
     # shellcheck source=/dev/null
     source "$OCTOSHIELD_ROOT/src/lib/$status_module.sh"
 done
@@ -75,6 +75,18 @@ status_daemon::once() (
 )
 
 case "${1:-}" in
+    --details)
+        shift
+        case "${1-}:${2-}" in
+            access:list) access::validate "${@:2}" || exit 2 ;;
+            connections:list) connections::validate "${@:2}" || exit 2 ;;
+            diagnostics:show) diagnostics::validate "${@:2}" || exit 2 ;;
+            *) exit 2 ;;
+        esac
+        trap 'status_daemon::interrupted' TERM
+        core::read_begin || exit "$?"
+        "${1}::dispatch" "${@:2}"
+        ;;
     --usb-once)
         [[ $# -eq 1 ]] || exit 2
         trap 'status_daemon::interrupted' TERM
