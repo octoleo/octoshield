@@ -4,14 +4,14 @@
 
 declare -gAr CLI_CONTROLS=(
     [firewall]=controls::apply_firewall [network]=controls::apply_network
-    [services]=controls::apply_services [sudo]=controls::apply_sudo
+    [services]=controls::apply_services
     [updates]=controls::apply_updates [apparmor]=controls::apply_apparmor
     [usb]=usb::apply [monitor]=monitor::apply
 )
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.3.1 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.3.2 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -48,7 +48,7 @@ Usage: octoshield [COMMAND]
   containers plan ID        Inspect a localhost binding plan as JSON
   containers localize ID TOKEN Apply a reviewed plan as your normal user
   updates check             Check official releases and show upgrade instructions
-  apply CONTROL             firewall|network|services|sudo|updates|apparmor|usb|monitor
+  apply CONTROL             firewall|network|services|updates|apparmor|usb|monitor
   desktop apply|restore     Configure or restore this user's GNOME settings
   usb list                  List USB devices and authorization state
   usb allow ID [--permanent] Allow once, or remember for the current USB profile
@@ -66,6 +66,7 @@ Usage: octoshield [COMMAND]
   password                  Change your password using the system passwd tool
   backups                   List private system configuration snapshots
   backup-show ID            Read a private transaction's action history
+  repair                    Review and repair known retired OctoShield settings
   recovery                  Show recovery instructions
   --help | --version
 
@@ -152,7 +153,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.3.1 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.3.2 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -223,7 +224,6 @@ cli::setup() {
                 services 'Disable selected listening and Bluetooth services' \
                 desktop 'Lock GNOME promptly and disable media automount' \
                 desktop-restore 'Restore your saved GNOME settings' \
-                sudo 'Require fresh sudo authentication' \
                 updates 'Enable automatic security updates' \
                 apparmor 'Activate installed AppArmor confinement profiles' \
                 monitor 'Enable system security-event monitoring' \
@@ -234,11 +234,12 @@ cli::setup() {
                 monitor-off 'Disable the system event collector' \
                 devices 'Review/authorize a blocked USB device' \
                 backups 'List saved transactions and read action history' \
+                repair 'Review and repair known retired OctoShield settings' \
                 office 'Allow selected office access without a global reset' \
                 password 'Change your user password' \
                 recovery 'Read recovery and backup instructions' 3>&1 1>&2 2>&3) || return 0
         else
-            printf '\nChoices: status profiles access connections diagnostics containers updates-check firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
+            printf '\nChoices: status profiles access connections diagnostics containers updates-check firewall usb network services desktop desktop-restore updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups repair office password recovery quit\n> '
             IFS= read -r choice || return 0
         fi
         result=0
@@ -259,6 +260,7 @@ cli::setup() {
             monitor-logs) cli::system monitor logs || result=$? ;;
             monitor-off) cli::system monitor disable || result=$? ;;
             backups) cli::backup_menu || result=$? ;;
+            repair) cli::system repair || result=$? ;;
             devices) cli::devices || result=$? ;;
             office) cli::office_system || result=$? ;;
             password) cli::password || result=$? ;;
@@ -500,7 +502,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.3.1\n'
+            printf 'OctoShield 1.3.2\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then
@@ -534,9 +536,9 @@ cli::main() {
                 containers::dispatch "$@"
             fi
             ;;
-        inspect)
+        inspect | repair)
             (($# == 0)) || return 2
-            cli::system inspect
+            cli::system "$command"
             ;;
         updates)
             [[ $# -eq 1 && $1 == check ]] || return 2

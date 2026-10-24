@@ -10,7 +10,7 @@ install::files() {
     printf '%s\n' \
         src/octoshield src/lib/core.sh src/lib/controls.sh src/lib/usb.sh \
         src/lib/desktop.sh src/lib/monitor.sh src/lib/install.sh src/lib/cli.sh \
-        src/lib/office.sh src/lib/api.sh src/lib/user_api.sh \
+        src/lib/office.sh src/lib/api.sh src/lib/user_api.sh src/lib/repair.sh \
         src/lib/profiles.sh src/lib/profile_controls.sh src/lib/profile_cli.sh src/lib/status.sh src/lib/updates.sh \
         src/lib/profile_firewall_verify.sh src/lib/access.sh src/lib/connections.sh src/lib/diagnostics.sh src/lib/containers.sh \
         src/status-daemon systemd/octoshield-status.service \

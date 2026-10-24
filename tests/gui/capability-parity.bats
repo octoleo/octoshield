@@ -44,7 +44,7 @@ setup() {
     controls::apply_firewall() { test::route apply firewall; }
     controls::apply_network() { test::route apply network; }
     controls::apply_services() { test::route apply services; }
-    controls::apply_sudo() { test::route apply sudo; }
+    repair::run() { test::route repair; }
     controls::apply_updates() { test::route apply updates; }
     controls::apply_apparmor() { test::route apply apparmor; }
     usb::apply() { test::route apply usb; }
@@ -122,11 +122,18 @@ test::reject_privileged() {
     [ "$status" -ne 0 ]
 }
 
-@test "all eight security controls share the GUI helper and CLI backend routes" {
+@test "all supported security controls share the GUI helper and CLI backend routes" {
     local control
-    for control in firewall network services sudo updates apparmor usb monitor; do
+    for control in firewall network services updates apparmor usb monitor; do
         test::privileged_parity apply "$control"
     done
+}
+
+@test "system repair shares one fixed privileged route and retired sudo activation is rejected" {
+    test::privileged_parity repair
+    test::reject_privileged repair extra
+    test::reject_privileged repair /etc/sudoers
+    test::reject_privileged apply sudo
 }
 
 @test "USB inspection temporary approval permanent approval and blocking have parity" {

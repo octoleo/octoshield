@@ -17,7 +17,7 @@ unset BASH_ENV ENV CDPATH DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
 STATUS_SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}") || exit 1
 readonly STATUS_SELF
 readonly OCTOSHIELD_ROOT=${STATUS_SELF%/src/status-daemon}
-for status_module in core controls usb monitor office profiles profile_firewall_verify profile_controls status access connections diagnostics; do
+for status_module in core controls usb monitor office profiles profile_firewall_verify profile_controls status access connections diagnostics repair; do
     # shellcheck source=/dev/null
     source "$OCTOSHIELD_ROOT/src/lib/$status_module.sh"
 done

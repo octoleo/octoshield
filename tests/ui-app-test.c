@@ -50,8 +50,23 @@ static int fixture(const char *name)
             if (!json_parser_load_from_data(parser, line, -1, NULL)) return 10;
             JsonObject *request = json_node_get_object(json_parser_get_root(parser));
             gint64 id = json_object_get_int_member(request, "id");
+            JsonArray *args = json_object_get_array_member(request, "args");
+            if (args == NULL || json_array_get_length(args) != 1) return 11;
+            const char *action = json_array_get_string_element(args, 0);
             count++;
+            if (!g_str_equal(action, count == 1 ? "status" : "repair")) return 12;
             printf("{\"type\":\"log\",\"request\":%" G_GINT64_FORMAT ",\"text\":\"same session operation %u\"}\n", id, count);
+            if (g_str_equal(action, "repair")) {
+                printf("{\"type\":\"log\",\"request\":%" G_GINT64_FORMAT ",\"text\":\"Fixture repair preview: remove the retired /etc/sudoers.d/99-octoshield drop-in.\"}\n", id);
+                printf("{\"type\":\"confirm\",\"request\":%" G_GINT64_FORMAT ",\"id\":1,\"text\":\"Apply this exact repair?\"}\n", id);
+                fflush(stdout);
+                if (fgets(line, sizeof(line), stdin) == NULL || !json_parser_load_from_data(parser, line, -1, NULL)) return 13;
+                JsonObject *answer = json_node_get_object(json_parser_get_root(parser));
+                if (g_strcmp0(json_object_get_string_member(answer, "type"), "answer") != 0 ||
+                    json_object_get_int_member(answer, "request") != id ||
+                    json_object_get_int_member(answer, "id") != 1 ||
+                    !json_object_get_boolean_member(answer, "allow")) return 14;
+            }
             printf("{\"type\":\"done\",\"request\":%" G_GINT64_FORMAT ",\"success\":true}\n", id);
             printf("{\"type\":\"stderr\",\"request\":%" G_GINT64_FORMAT ",\"text\":\"late diagnostic after done\"}\n", id);
             printf("{\"type\":\"finished\",\"request\":%" G_GINT64_FORMAT ",\"exit_code\":0}\n", id);
@@ -227,6 +242,58 @@ static void test_profile_catalog_selection(void)
     g_assert_true(json_parser_load_from_data(parser, "[{\"id\":\"../escape\",\"name\":\"Invalid\"}]", -1, NULL));
     update_catalog(&test_app, json_node_get_array(json_parser_get_root(parser)));
     g_assert_cmpuint(test_app.profile_ids->len, ==, 5);
+}
+
+static void test_repair_status_and_removed_control(void)
+{
+    for (gsize i = 0; i < G_N_ELEMENTS(actions); i++) g_assert_cmpstr(actions[i].id, !=, "sudo");
+    const Action *action = find_action("repair");
+    g_assert_nonnull(action);
+    g_assert_true(action->privileged);
+    g_assert_true(action->changes);
+    StatusRow *repair_row = NULL;
+    for (guint i = 0; i < test_app.status_rows->len; i++) {
+        StatusRow *row = g_ptr_array_index(test_app.status_rows, i);
+        g_assert_false(g_str_equal(row->section, "controls") && g_str_equal(row->key, "sudo"));
+        if (g_str_equal(row->section, "recovery") && g_str_equal(row->key, "repairs")) repair_row = row;
+    }
+    g_assert_nonnull(repair_row);
+    g_assert_true(widget_has_label_text(gtk_stack_get_child_by_name(test_app.pages, "recovery"), "Repair system"));
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_autofree gchar *snapshot = g_strdup_printf("{\"schema\":1,\"checked_at\":%" G_GINT64_FORMAT ",\"controls\":{\"firewall\":{\"state\":\"active\",\"summary\":\"Firewall remains inspected\"}}}", g_get_real_time() / G_USEC_PER_SEC);
+    g_assert_true(json_parser_load_from_data(parser, snapshot, -1, NULL));
+    JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+    render_status(&test_app, root);
+    g_assert_true(test_app.cache_valid);
+    g_assert_cmpstr(gtk_label_get_text(repair_row->badge), ==, "Needs review");
+    g_assert_nonnull(strstr(adw_action_row_get_subtitle(repair_row->row), "Select Repair system"));
+    JsonObject *recovery = json_object_new();
+    JsonObject *repairs = json_object_new();
+    json_object_set_object_member(root, "recovery", recovery);
+    json_object_set_object_member(recovery, "repairs", repairs);
+    const struct { const char *state; const char *badge; } cases[] = {
+        {"active", "Up to date"}, {"partial", "Repair available"}, {"unknown", "Needs review"}
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(cases); i++) {
+        json_object_set_string_member(repairs, "state", cases[i].state);
+        json_object_set_string_member(repairs, "summary", "Inspect <retired> settings & recovery evidence.");
+        render_status(&test_app, root);
+        g_assert_cmpstr(gtk_label_get_text(repair_row->badge), ==, cases[i].badge);
+        g_assert_cmpstr(adw_action_row_get_subtitle(repair_row->row), ==, "Inspect <retired> settings & recovery evidence.");
+        g_assert_false(adw_preferences_row_get_use_markup(ADW_PREFERENCES_ROW(repair_row->row)));
+    }
+    json_object_set_string_member(repairs, "state", "active");
+    json_object_set_int_member(repairs, "summary", 10);
+    render_status(&test_app, root);
+    g_assert_cmpstr(gtk_label_get_text(repair_row->badge), ==, "Needs review");
+    g_assert_nonnull(strstr(adw_action_row_get_subtitle(repair_row->row), "Select Repair system"));
+    json_object_set_string_member(repairs, "state", "complete");
+    json_object_set_string_member(repairs, "summary", "Invalid state must not claim success.");
+    render_status(&test_app, root);
+    g_assert_cmpstr(gtk_label_get_text(repair_row->badge), ==, "Needs review");
+    render_status(&test_app, NULL);
+    g_assert_cmpstr(gtk_label_get_text(repair_row->badge), ==, "Needs review");
+    g_assert_null(test_app.operation);
 }
 
 static void test_data_models(void)
@@ -710,7 +777,22 @@ static void test_session_reuses_authenticated_transport(void)
     drain_operation(FALSE);
     g_assert_true(session->ready);
     g_assert_false(g_output_stream_is_closed(session->input));
-    start_action(&test_app, "Session operation two", NULL, TRUE, FALSE, 1, args);
+    Binding repair = {.app = &test_app, .action = find_action("repair")};
+    fixed_action_clicked(NULL, &repair);
+    deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (test_app.confirmation == NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_nonnull(test_app.confirmation);
+    g_assert_true(test_app.session == session);
+    g_assert_null(test_app.preview);
+    GtkWidget *scroll = adw_message_dialog_get_extra_child(test_app.confirmation);
+    GtkWidget *view = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scroll));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
+    GtkTextIter review_start, review_end;
+    gtk_text_buffer_get_bounds(buffer, &review_start, &review_end);
+    g_autofree gchar *review = gtk_text_buffer_get_text(buffer, &review_start, &review_end, FALSE);
+    g_assert_nonnull(strstr(review, "remove the retired /etc/sudoers.d/99-octoshield drop-in"));
+    g_assert_nonnull(strstr(review, "Apply this exact repair?"));
+    adw_message_dialog_response(test_app.confirmation, "accept");
     drain_operation(FALSE);
     g_autofree gchar *text = log_text();
     g_assert_nonnull(strstr(text, "same session operation 2"));
@@ -949,6 +1031,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/window/about-identity", test_about_identity);
     g_test_add_func("/ui/window/screenshots-real-pages-light-and-dark", test_page_screenshots);
     g_test_add_func("/ui/status/observed-partial-and-overrides", test_observed_status_and_overrides);
+    g_test_add_func("/ui/status/repair-and-retired-control", test_repair_status_and_removed_control);
     g_test_add_func("/ui/status/catalog-preserves-selection", test_profile_catalog_selection);
     g_test_add_func("/ui/status/device-and-update-models", test_data_models);
     g_test_add_func("/ui/status/profile-choice-freshness", test_profile_choice_freshness);

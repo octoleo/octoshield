@@ -1,3 +1,15 @@
+octoshield (1.3.2) unstable; urgency=medium
+
+  * Remove the retired system-wide zero-timeout sudo authentication control.
+  * Add reviewed Repair system recovery in the desktop and terminal interfaces.
+  * Recover original sudo policy through repeated activation snapshots, preserve
+    administrator edits, and verify or roll back repairs within one transaction.
+  * Report pending legacy configuration and keep repair safe to run repeatedly.
+  * Gate releases on real sudo/PAM authentication and recovery tests on both
+    Ubuntu versions, including package upgrades from the published 1.3.1 release.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Sat, 24 Oct 2026 21:52:06 +0000
+
 octoshield (1.3.1) unstable; urgency=medium
 
   * Save and verify individual NetworkManager settings despite unrelated changes.

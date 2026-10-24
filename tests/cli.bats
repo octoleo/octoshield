@@ -110,6 +110,18 @@ setup() {
     [[ $output != *SYSTEM* ]]
 }
 
+@test 'system repair has one fixed privilege request and retired sudo activation is unavailable' {
+    run cli::main repair
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <repair>' ]
+    run cli::main repair /etc/sudoers
+    [ "$status" -eq 2 ]
+    [[ $output != *SYSTEM* ]]
+    run cli::main apply sudo
+    [ "$status" -eq 2 ]
+    [[ $output != *SYSTEM* ]]
+}
+
 @test 'USB approval accepts numeric ID and explicit permanent flag' {
     run cli::main usb allow 17 --permanent
     [ "$status" -eq 0 ]
