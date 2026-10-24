@@ -118,16 +118,37 @@ profile_controls::snapshot() {
         *) return 1 ;;
     esac
 }
+profile_controls::_network_changes() {
+    local previous=$1 current=$2 line changes
+    changes=$(jq -nr --argjson previous "$previous" --argjson current "$current" '
+        ($previous.connections|map({key:.uuid,value:.})|from_entries) as $old |
+        ($current.connections|map({key:.uuid,value:.})|from_entries) as $new |
+        (($old+$new)|keys[]) as $uuid |
+        if $old[$uuid]==null then "Connection \($uuid): added"
+        elif $new[$uuid]==null then "Connection \($uuid): removed"
+        else ["type","autoconnect","llmnr","mdns","mac"][] as $key |
+            select($old[$uuid][$key]!=$new[$uuid][$key]) |
+            "Connection \($uuid): \($key) \($old[$uuid][$key]|tojson) -> \($new[$uuid][$key]|tojson)" end') || return 1
+    while IFS= read -r line; do [[ -z $line ]] || core::log "$line" || return 1; done <<<"$changes"
+    if [[ $(jq -c .config <<<"$previous") != "$(jq -c .config <<<"$current")" ]]; then
+        core::log 'NetworkManager global OctoShield configuration changed (content, presence or permissions). Inspect /etc/NetworkManager/conf.d/90-octoshield.conf before accepting.' || return 1
+    fi
+}
 profile_controls::conflict() {
-    local control=$1 saved current expected file
+    local control=$1 saved current expected file snapshot
     file="$(profile_controls::_directory)/$control.json"
     [[ -e $file || -L $file ]] || return 0
     saved=$(profile_controls::_read "$control") || return 1
     expected=$(jq -r .expected <<<"$saved") || return 1
-    current=$(profile_controls::snapshot "$control") || return 1
-    current=$(profile_controls::_hash <<<"$current") || return 1
+    snapshot=$(profile_controls::snapshot "$control") || return 1
+    current=$(profile_controls::_hash <<<"$snapshot") || return 1
     [[ $current == "$expected" ]] || {
         if [[ $control == firewall ]] && profile_controls::_runtime_narrowed "$saved"; then return 0; fi
+        if [[ $control == network ]]; then
+            profile_controls::_network_changes "$(jq -c '.observed//.before' <<<"$saved")" "$snapshot" || return 1
+            core::die 'Saved network settings differ from the recorded state. Use Connection privacy > Review external changes, or octoshield connections reconcile. No native settings were overwritten.'
+            return 1
+        fi
         core::die "$control changed outside OctoShield, or a previous operation was interrupted. Review the current policy and saved baseline before continuing; no external changes were overwritten."
         return 1
     }
@@ -379,12 +400,26 @@ profile_controls::apply() {
     profile_controls::remember_desired "$control" "$profile"
 }
 profile_controls::_restore_native() {
-    local control=$1 saved before directory temporary unit enabled active uuid autoconnect llmnr mdns mac type content mode
+    local control=$1 saved before directory temporary unit enabled active uuid autoconnect llmnr mdns mac type content mode current restore_expected
     directory=$(profile_controls::_directory) || return 1
     [[ -e $directory/$control.json ]] || return 0
     profile_controls::conflict "$control" || return 1
     saved=$(profile_controls::_read "$control") || return 1
     before=$(jq -c .before <<<"$saved") || return 1
+    if [[ $control == network ]]; then
+        current=$(profile_controls::_network_snapshot) || return 1
+        restore_expected=$(jq -c --argjson baseline "$before" '
+            .config=$baseline.config |
+            .connections|=map(. as $connection | ([$baseline.connections[]|select(.uuid==$connection.uuid)][0]//$connection))' <<<"$current") || return 1
+        profile_controls::_network_changes "$current" "$restore_expected" || return 1
+        core::log 'Restore the displayed saved settings. Connections absent from the baseline are retained; deleted connections are not recreated. Active connections are not reconnected.'
+        core::confirm 'Restore these saved NetworkManager settings?' || return 1
+        [[ $(profile_controls::_network_snapshot) == "$current" ]] || {
+            core::die 'Network settings changed during restore review. Refresh and review again.'
+            return 1
+        }
+    fi
+    PROFILE_RESTORE_STARTED=true
     case "$control" in
         firewall)
             [[ -d $directory/firewall-baseline/ufw && -f $directory/firewall-baseline/default-ufw ]] || return 1
@@ -417,8 +452,12 @@ profile_controls::_restore_native() {
                 [[ -n $uuid ]] || continue
                 nmcli connection modify uuid "$uuid" connection.autoconnect "$autoconnect" connection.llmnr "$llmnr" connection.mdns "$mdns" || return 1
                 case "$type" in wifi | 802-11-wireless) nmcli connection modify uuid "$uuid" 802-11-wireless.cloned-mac-address "$mac" || return 1 ;; esac
-            done < <(jq -r '.connections[]|[.uuid,.type,.autoconnect,.llmnr,.mdns,.mac]|@tsv' <<<"$before")
+            done < <(jq -r --argjson baseline "$before" '.connections[]|select(.uuid as $uuid|any($baseline.connections[];.uuid==$uuid))|[.uuid,.type,.autoconnect,.llmnr,.mdns,.mac]|@tsv' <<<"$restore_expected")
             nmcli general reload conf || return 1
+            [[ $(profile_controls::_network_snapshot) == "$restore_expected" ]] || {
+                core::die 'Restored network settings did not verify. The recovery baseline has been retained.'
+                return 1
+            }
             ;;
         services | monitor)
             # Restore all activation dependencies before starting any primary.
@@ -435,8 +474,10 @@ profile_controls::_restore_native() {
 }
 profile_controls::restore() {
     local control=$1
+    local PROFILE_RESTORE_STARTED=false
     if profile_controls::_restore_native "$control"; then return 0; fi
-    profile_controls::_record_actual "$control" || :
+    # A rejected preflight must never accept external state as our own work.
+    if [[ $PROFILE_RESTORE_STARTED == true ]]; then profile_controls::_record_actual "$control" || :; fi
     return 1
 }
 profile_controls::verify() {

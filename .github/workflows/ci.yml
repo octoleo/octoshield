@@ -22,6 +22,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  networkmanager:
+    name: Real NetworkManager integration · Ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:${{ matrix.ubuntu }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    timeout-minutes: 10
+    steps:
+      - name: Install native integration dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends git ca-certificates network-manager dbus-daemon iproute2 jq util-linux
+          if [ '${{ matrix.ubuntu }}' = 26.04 ]; then apt-get install --yes gnu-coreutils; fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Exercise production connection saves and recovery with real NetworkManager
+        run: bash tests/networkmanager-integration.sh
+
   check:
     name: Ubuntu ${{ matrix.ubuntu }}
     runs-on: ubuntu-24.04
@@ -207,7 +230,7 @@ jobs:
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish)
-    needs: [check, upgrade, apt-repository]
+    needs: [check, upgrade, apt-repository, networkmanager]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:

@@ -8,7 +8,7 @@ CONNECTIONS_DEADLINE=0
 
 connections::validate() {
     case "${1-}" in
-        list) [[ $# -eq 1 ]] ;;
+        list | reconcile) [[ $# -eq 1 ]] ;;
         reconnect) [[ $# -eq 2 ]] && office::valid_uuid "$2" ;;
         set)
             [[ $# -eq 4 ]] && office::valid_uuid "$2" || return 1
@@ -287,9 +287,65 @@ connections::verify_runtime() {
         status::result active 'Saved privacy policy, active connections and resolver discovery settings match.'
     else status::result active 'Saved privacy policy matches. No active Wi-Fi or Ethernet connection currently needs verification.'; fi
 }
+# Update only the field this operation owns. In particular, an unrelated native
+# edit must remain a conflict for a later whole-profile apply or restore.
+connections::_record_setting() {
+    local uuid=$1 key=$2 before=$3 after=$4 saved expected updated
+    saved=$(profile_controls::_read network) || return 1
+    expected=$(jq -c '.observed//.before' <<<"$saved") || return 1
+    [[ $(profile_controls::_hash <<<"$expected") == "$(jq -r .expected <<<"$saved")" ]] || return 1
+    updated=$(jq -c --arg uuid "$uuid" --arg key "$key" --argjson before "$before" --argjson after "$after" '
+        ($before.connections|map(select(.uuid==$uuid))|first) as $original |
+        ($after.connections|map(select(.uuid==$uuid))|first) as $actual |
+        if $original==null or $actual==null then error("Selected connection disappeared") else
+        if all(.before.connections[]; .uuid!=$uuid) then .before.connections+=[$original]|.before.connections|=sort_by(.uuid) else . end |
+        .observed=(.observed//.before) |
+        if all(.observed.connections[]; .uuid!=$uuid) then .observed.connections+=[$original] else . end |
+        .observed.connections|= (map(if .uuid==$uuid then
+            if $key=="autoconnect" then .autoconnect=$actual.autoconnect
+            elif $key=="discovery" then .llmnr=$actual.llmnr|.mdns=$actual.mdns
+            else .mac=$actual.mac end else . end)|sort_by(.uuid)) end' <<<"$saved") || return 1
+    expected=$(jq -c .observed <<<"$updated" | profile_controls::_hash) || return 1
+    updated=$(jq -c --arg expected "$expected" '.expected=$expected' <<<"$updated") || return 1
+    profile_controls::_write network "$updated"
+}
+
+connections::reconcile() {
+    local saved current reviewed updated profile
+    core::require_root || return 1
+    controls::local_console || return 1
+    local CONNECTIONS_DEADLINE=$((SECONDS + 30))
+    saved=$(profile_controls::_read network) || {
+        core::die 'No saved network baseline is available. Save a connection setting or apply a network profile first.'
+        return 1
+    }
+    current=$(profile_controls::_network_snapshot) || return 1
+    reviewed=$(jq -c '.observed//.before' <<<"$saved") || return 1
+    if [[ $(profile_controls::_hash <<<"$current") == "$(jq -r .expected <<<"$saved")" ]]; then
+        core::log 'Saved NetworkManager settings already match the last recorded state.'
+        return 0
+    fi
+    profile_controls::_network_changes "$reviewed" "$current" || return 1
+    core::log 'Accepting records these current saved settings for future conflict checks. It does not apply a profile, reconnect, or replace the original recovery baseline. Restoring that baseline later can undo these external changes.'
+    core::confirm 'Accept the displayed current network settings as reviewed?' || return 1
+    CONNECTIONS_DEADLINE=$((SECONDS + 30))
+    [[ $(profile_controls::_read network) == "$saved" && $(profile_controls::_network_snapshot) == "$current" ]] || {
+        core::die 'Network settings changed during review. Review external changes again.'
+        return 1
+    }
+    core::backup "$(profile_controls::_directory)/network.json" || return 1
+    updated=$(jq -c --argjson observed "$current" --arg expected "$(profile_controls::_hash <<<"$current")" '.observed=$observed|.expected=$expected' <<<"$saved") || return 1
+    profile_controls::_write network "$updated" || return 1
+    profile=$(profiles::active network) || return 1
+    if [[ $profile != unmanaged ]]; then profiles::_result network pending 'External saved settings accepted after review; inspect profile differences before applying.' || return 1; fi
+    core::record 'CONNECTION reconcile reviewed native settings' || return 1
+    core::log 'Current saved network settings accepted. Original recovery baseline retained; no connection was changed.'
+}
+
 connections::set() {
-    local uuid=$1 key=$2 value=$3 active record profile document updated expected before after native failed=0
+    local uuid=$1 key=$2 value=$3 active record profile document updated expected before after native fingerprint failed=0
     connections::validate set "$@" || return 2
+    API_CHANGE_STARTED=false
     core::require_root || return 1
     controls::local_console || return 1
     local CONNECTIONS_DEADLINE=$((SECONDS + 30))
@@ -304,17 +360,24 @@ connections::set() {
     fi
     profile=$(profiles::active network) || return 1
     document=$(profiles::_read) || return 1
-    profile_controls::conflict network || return 1
+    fingerprint=$(connections::_review_fingerprint "$uuid") || return 1
     before=$(profile_controls::_network_snapshot) || return 1
     core::log "Connection: $(jq -r .name <<<"$record"). Change $key to $value for this connection only."
-    core::log 'Saved discovery/address changes require a separate reconnect. No active connection will be disconnected by saving.'
+    core::log "Current saved choices: $(jq -c '{autoconnect,llmnr,mdns,mac}' <<<"$record")."
+    if [[ $key == autoconnect ]]; then
+        core::log 'This saves the automatic-connection preference. It does not require a reconnect or connect a disconnected network now.'
+    else
+        core::log 'Saved discovery/address changes require a separate reconnect. No active connection will be disconnected by saving.'
+    fi
     core::confirm 'Save this connection setting and retain its recovery baseline?' || return 1
     CONNECTIONS_DEADLINE=$((SECONDS + 30))
-    profile_controls::conflict network || return 1
-    [[ $(profile_controls::_network_snapshot) == "$before" && $(profiles::_read) == "$document" ]] || {
+    [[ $(connections::_review_fingerprint "$uuid") == "$fingerprint" && $(profiles::_read) == "$document" ]] || {
         core::die 'Connection or profile settings changed during review. Refresh and try again.'
         return 1
     }
+    # Read by the privileged API completion envelope.
+    # shellcheck disable=SC2034
+    API_CHANGE_STARTED=true
     profile_controls::_capture network || return 1
     core::backup "$PROFILE_ETC/NetworkManager/system-connections" || return 1
     core::backup "$PROFILE_RUN/NetworkManager/system-connections" || return 1
@@ -340,14 +403,14 @@ connections::set() {
             ;;
         mac) nmcli connection modify uuid "$uuid" 802-11-wireless.cloned-mac-address "$value" || failed=1 ;;
     esac
-    # Record partial native effects for recovery without declaring them applied.
-    profile_controls::_record_actual network || failed=1
+    # Record only this setting's partial effects; never absorb unrelated drift.
     after=$(profile_controls::_network_snapshot) || failed=1
+    if [[ -n ${after:-} ]]; then connections::_record_setting "$uuid" "$key" "$before" "$after" || failed=1; fi
     expected=$(jq -c --arg uuid "$uuid" --arg key "$key" --arg value "$value" '.connections|=map(if .uuid==$uuid then
         if $key=="autoconnect" then .autoconnect=(if $value=="true" then "yes" else "no" end)
         elif $key=="discovery" then .llmnr=(if $value=="true" then "2" else "0" end)|.mdns=.llmnr
         else .mac=$value end else . end)' <<<"$before") || failed=1
-    [[ ${after:-} == "${expected:-missing}" ]] || failed=1
+    [[ $(jq -c --arg uuid "$uuid" '.connections[]|select(.uuid==$uuid)' <<<"${after:-{}}") == "$(jq -c --arg uuid "$uuid" '.connections[]|select(.uuid==$uuid)' <<<"${expected:-{}}")" ]] || failed=1
     if ((failed)); then
         if [[ $profile != unmanaged ]]; then profiles::_result network failed 'Connection change did not verify; review its saved and active settings.' || :; fi
         core::die 'The connection change did not verify. No reconnect was attempted; inspect its settings and saved recovery baseline.'
@@ -363,7 +426,9 @@ connections::set() {
         fi
     fi
     core::record "CONNECTION $uuid $key $value" || return 1
-    core::log 'Connection setting saved and verified. Refresh its active state or reconnect when convenient.'
+    if [[ $key == autoconnect ]]; then
+        core::log "Automatic connection saved and verified: $native. No reconnect is required."
+    else core::log 'Connection setting saved and verified. Reconnect when convenient to activate discovery/address changes.'; fi
 }
 connections::reconnect() {
     local uuid=$1 active record before after interface
@@ -404,6 +469,7 @@ connections::dispatch() {
     connections::validate "$@" || return 2
     case "$1" in
         list) connections::list ;;
+        reconcile) connections::reconcile ;;
         set) connections::set "${@:2}" ;;
         reconnect) connections::reconnect "$2" ;;
     esac

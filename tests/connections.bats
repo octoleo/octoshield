@@ -253,3 +253,87 @@ setup() {
     [ "$status" -eq 0 ]
     jq -e '.incomplete and (.connections|length)>0 and (.connections|length)<128 and (tojson|tojson|utf8bytelength)<42000' <<<"$output"
 }
+
+@test 'unrelated native changes do not block a selected setting or become accepted implicitly' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq '.[1].mdns="2"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    connections::set "$UUID" autoconnect true >/dev/null
+    jq -e '.[0].autoconnect=="yes" and .[1].mdns=="2"' "$NET"
+    run profile_controls::conflict network
+    [ "$status" -ne 0 ]
+    [[ $output == *'connections reconcile'* ]]
+    run ! grep -q '^reconnect ' "$CALLS"
+}
+
+@test 'a selected externally edited field is reviewed and saved without global reconciliation' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq '.[0].autoconnect="yes"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq -e '.[0].autoconnect=="no"' "$NET"
+    profile_controls::conflict network
+}
+
+@test 'failed restore preflight preserves the conflict and baseline on every attempt' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq '.[1].mdns="2"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    baseline=$(profile_controls::_read network)
+    for _attempt in 1 2; do
+        run profile_controls::restore network
+        [ "$status" -ne 0 ]
+        [ "$(profile_controls::_read network)" = "$baseline" ]
+        run profile_controls::conflict network
+        [ "$status" -ne 0 ]
+    done
+}
+
+@test 'public restore recovers standalone connection edits without an active profile' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    profiles::restore network
+    jq -e '.[0].autoconnect=="yes"' "$NET"
+    [ ! -e "$CORE_STATE/profiles/controls/network.json" ]
+}
+
+@test 'reconciliation requires consent retains baseline and writes no native settings' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    original=$(profile_controls::_read network | jq -c .before)
+    jq '.[1].mdns="2"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    baseline=$(profile_controls::_read network)
+    APPROVE=no
+    run connections::reconcile
+    [ "$status" -ne 0 ]
+    [ "$(profile_controls::_read network)" = "$baseline" ]
+    APPROVE=yes
+    : >"$CALLS"
+    connections::reconcile
+    [ "$(profile_controls::_read network | jq -c .before)" = "$original" ]
+    run ! grep -q '^nmcli ' "$CALLS"
+    profile_controls::conflict network
+}
+
+@test 'reconciliation refuses changes made during review' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq '.[1].mdns="2"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    baseline=$(profile_controls::_read network)
+    core::confirm() { jq '.[1].llmnr="2"' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"; }
+    run connections::reconcile
+    [ "$status" -ne 0 ]
+    [ "$(profile_controls::_read network)" = "$baseline" ]
+}
+
+@test 'restoration retains newly added connections and does not recreate deleted ones' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    jq --arg second "$SECOND" 'map(select(.uuid!=$second)) + [{uuid:"33333333-3333-3333-3333-333333333333",type:"802-3-ethernet",autoconnect:"yes",llmnr:"2",mdns:"2",mac:""}]' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    connections::reconcile
+    profiles::restore network
+    jq -e 'length==2 and .[0].autoconnect=="yes" and .[1].mdns=="2"' "$NET"
+}
+
+@test 'new selected connection acquires a baseline without accepting other external changes' {
+    connections::set "$UUID" autoconnect false >/dev/null
+    third=33333333-3333-3333-3333-333333333333
+    jq --arg third "$third" '. + [{uuid:$third,name:"New cable",type:"802-3-ethernet",interface:"",autoconnect:"yes",llmnr:"0",mdns:"0",mac:""}]' "$NET" >"$NET.tmp" && mv "$NET.tmp" "$NET"
+    connections::set "$third" autoconnect false >/dev/null
+    profile_controls::conflict network
+    profiles::restore network
+    jq -e 'all(.[];.autoconnect=="yes")' "$NET"
+}

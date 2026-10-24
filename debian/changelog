@@ -1,3 +1,13 @@
+octoshield (1.3.1) unstable; urgency=medium
+
+  * Save and verify individual NetworkManager settings despite unrelated changes.
+  * Add reviewed external-network reconciliation and recover standalone edits.
+  * Preserve conflict tracking when restoration is rejected before changes.
+  * Refresh actual connection state after failures and clarify autoconnect saves.
+  * Gate publication on real isolated NetworkManager integration on both Ubuntu versions.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Sat, 24 Oct 2026 16:51:28 +0000
+
 octoshield (1.3.0) unstable; urgency=medium
 
   * Guide service access with detected local networks, grouped web ports,
