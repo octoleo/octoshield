@@ -370,7 +370,7 @@ static gboolean access_action(gsize argc, const gchar *const *args)
 
 static gboolean connections_action(gsize argc, const gchar *const *args)
 {
-    if (argc == 2 && g_str_equal(args[1], "list")) return TRUE;
+    if (argc == 2 && (g_str_equal(args[1], "list") || g_str_equal(args[1], "reconcile"))) return TRUE;
     if (argc < 3 || !g_uuid_string_is_valid(args[2])) return FALSE;
     if (g_str_equal(args[1], "reconnect")) return argc == 3;
     if (argc != 5 || !g_str_equal(args[1], "set")) return FALSE;

@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.3.0 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.3.1 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -41,6 +41,7 @@ Usage: octoshield [COMMAND]
   connections set UUID KEY VALUE
                             Change autoconnect, discovery or MAC choice
   connections reconnect UUID Reconnect after reviewing the interruption
+  connections reconcile     Review and accept external saved network changes
   diagnostics               Explain encryption, Docker, forwarding or privacy
   diagnostics show TOPIC    Return private diagnostic details as JSON
   containers                Review localhost port bindings for a Compose service
@@ -151,7 +152,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.3.0 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.3.1 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -430,7 +431,7 @@ cli::connections_menu() {
     selected=$(cli::select_item 'Connection' "$choices") || return 0
     uuid=$(jq -er .uuid <<<"$selected") || return 1
     jq -r '["Automatic connection: "+.autoconnect,"Discovery: mDNS "+.mdns+", LLMNR "+.llmnr,"MAC choice: "+.mac,.runtime.summary][]|gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]";" ")' <<<"$selected" || return 1
-    printf '\n1) Automatic connection\n2) Local discovery\n3) Wi-Fi MAC choice\n4) Reconnect now\nChoice (empty returns): '
+    printf '\n1) Automatic connection\n2) Local discovery\n3) Wi-Fi MAC choice\n4) Reconnect now\n5) Review external network changes\nChoice (empty returns): '
     IFS= read -r action || return 1
     case "$action" in
         '') return 0 ;;
@@ -448,6 +449,7 @@ cli::connections_menu() {
             cli::system connections set "$uuid" mac "$value"
             ;;
         4) cli::system connections reconnect "$uuid" ;;
+        5) cli::system connections reconcile ;;
         *) return 2 ;;
     esac
 }
@@ -498,7 +500,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.3.0\n'
+            printf 'OctoShield 1.3.1\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then

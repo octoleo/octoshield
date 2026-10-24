@@ -38,7 +38,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.3.0"
+#define OCTOSHIELD_VERSION "1.3.1"
 #endif
 
 typedef struct App App;
@@ -753,7 +753,7 @@ static void operation_maybe_finish(Operation *operation)
     gboolean changed_access = g_str_equal(operation->title, "Allow network access") ||
         g_str_equal(operation->title, "Update network access") || g_str_equal(operation->title, "Revoke network access");
     gboolean changed_connection = g_str_equal(operation->title, "Save connection privacy") ||
-        g_str_equal(operation->title, "Reconnect selected network");
+        g_str_equal(operation->title, "Reconnect selected network") || g_str_equal(operation->title, "Review external network changes");
     gboolean changed_container = g_str_equal(operation->title, "Restrict container to this computer");
     if (!success) {
         app->private_refresh = 0;
@@ -813,7 +813,7 @@ static void operation_maybe_finish(Operation *operation)
         access_cancel_edit(NULL, app);
         app->private_refresh |= 1U;
     }
-    if (changed_connection && success) app->private_refresh |= 2U;
+    if (changed_connection) app->private_refresh |= 2U;
     if (changed_container && success) {
         gtk_label_set_text(app->diagnostics_summary, "This service's reviewed published host ports are now bound to localhost. Custom routing and firewall paths remain outside that verification. Keep the generated override in future deployments; the source files, recovery snapshot and command remain below.");
         if (app->container_apply != NULL) gtk_widget_set_sensitive(app->container_apply, FALSE);
@@ -825,7 +825,7 @@ static void operation_maybe_finish(Operation *operation)
     }
     if (changed_connection && !success) {
         app->connections_loaded = FALSE;
-        gtk_label_set_text(app->privacy_summary, "The change did not complete. Read the operation details and refresh before making another change.");
+        gtk_label_set_text(app->privacy_summary, "The change did not complete. Refreshing actual saved and active settings; the operation details explain the failure.");
     }
     if (app->private_refresh != 0 && app->private_refresh_idle == 0 && !app->shutting_down)
         app->private_refresh_idle = g_idle_add(refresh_private, app);
@@ -2963,7 +2963,17 @@ static void privacy_save_clicked(GtkButton *button, gpointer data)
     if (!app->connections_loaded || connection == NULL || index > 1) { show_error(app, "Choose a connection and setting", "Refresh connections, select a saved network by name and choose the intended value before saving."); return; }
     const char *value = g_str_equal(key, "mac") ? (index == 0 ? "stable" : "permanent") : (index == 0 ? "true" : "false");
     const char *args[] = {"connections", "set", string_member(connection, "uuid", ""), key, value};
-    start_action(app, "Save connection privacy", "Review this connection's change. Saved settings and active connection state are checked separately; reconnect only when you are ready for a brief interruption.", TRUE, TRUE, G_N_ELEMENTS(args), args);
+    start_action(app, "Save connection privacy", g_str_equal(key, "autoconnect") ?
+        "Save the selected network's automatic-connection preference. No reconnect is required; this does not connect a disconnected network now." :
+        "Review this connection's saved privacy setting. Reconnect separately when ready to activate discovery or address changes.", TRUE, TRUE, G_N_ELEMENTS(args), args);
+}
+
+static void privacy_reconcile_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    App *app = data;
+    const char *args[] = {"connections", "reconcile"};
+    start_action(app, "Review external network changes", "Compare current saved NetworkManager settings with OctoShield's record. Accepting changes updates tracking only and retains the original recovery baseline.", TRUE, TRUE, G_N_ELEMENTS(args), args);
 }
 
 static void privacy_reconnect_clicked(GtkButton *button, gpointer data)
@@ -3007,6 +3017,7 @@ static void build_privacy(App *app)
         group_add(group, row);
     }
     group_add(group, control_row("Apply saved settings to this connection", "Network access may pause briefly. Review the reconnect before continuing.", managed_button(app, "Reconnect…", G_CALLBACK(privacy_reconnect_clicked))));
+    group_add(group, control_row("Review external changes", "Resolve differences blocking a whole-profile apply or restore. Review the actual settings before accepting them.", managed_button(app, "Review…", G_CALLBACK(privacy_reconcile_clicked))));
     app->privacy_source = GTK_LABEL(text_label("Configuration sources appear after inspection.", "dim-label"));
     gtk_label_set_selectable(app->privacy_source, TRUE); gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->privacy_source));
     g_signal_connect(app->privacy_connection, "notify::selected", G_CALLBACK(privacy_selected), app);

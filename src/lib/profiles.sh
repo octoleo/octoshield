@@ -203,7 +203,9 @@ profiles::restore() {
     for item in "${controls[@]}"; do
         document=$(profiles::_read) || return 1
         result=$(jq -r --arg c "$item" '.results[$c].status//"unmanaged"' <<<"$document") || return 1
-        [[ $(profiles::active "$item") != unmanaged || $result == failed || $result == applying ]] || continue
+        # Focused connection edits also capture a baseline without adopting a
+        # profile. Do not silently skip that recoverable native change.
+        [[ $(profiles::active "$item") != unmanaged || $result == failed || $result == applying || -e $CORE_STATE/profiles/controls/$item.json ]] || continue
         if profiles::_hook restore "$item"; then
             profiles::_result "$item" unmanaged 'Restored the saved pre-profile baseline.' unmanaged || return 1
         else
