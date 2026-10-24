@@ -53,21 +53,28 @@ profile_controls::_firewall_snapshot() {
     ipv6=$(ip6tables-save | awk '/^:(INPUT|FORWARD|OUTPUT) / || /^:ufw/ || /^-A ufw/ || /^-A (INPUT|FORWARD|OUTPUT) / {gsub(/\[[0-9]+:[0-9]+\]/,"[counter]");print}') || return 1
     jq -cn --arg config "$config" --arg status "$status" --arg ipv4 "$ipv4" --arg ipv6 "$ipv6" '{config:$config,status:$status,ipv4:$ipv4,ipv6:$ipv6}'
 }
+profile_controls::_network_read() {
+    if declare -F connections::_run >/dev/null; then
+        connections::_run nmcli "$@"
+    else nmcli "$@"; fi
+}
 profile_controls::_network_snapshot() {
     local listing uuid type autoconnect llmnr mdns mac object config content mode result='[]'
-    listing=$(nmcli --terse --fields UUID,TYPE connection show) || return 1
+    local CONNECTIONS_DEADLINE=${CONNECTIONS_DEADLINE:-0}
+    ((CONNECTIONS_DEADLINE > 0)) || CONNECTIONS_DEADLINE=$((SECONDS + 30))
+    listing=$(profile_controls::_network_read --terse --fields UUID,TYPE connection show) || return 1
     while IFS=: read -r uuid type; do
         [[ -n $uuid ]] || continue
         [[ $uuid =~ ^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$ ]] || return 1
         case "$type" in wifi | 802-11-wireless | ethernet | 802-3-ethernet) ;; *) continue ;; esac
-        autoconnect=$(nmcli -g connection.autoconnect connection show uuid "$uuid") || return 1
-        llmnr=$(nmcli -g connection.llmnr connection show uuid "$uuid") || return 1
-        mdns=$(nmcli -g connection.mdns connection show uuid "$uuid") || return 1
+        autoconnect=$(profile_controls::_network_read -g connection.autoconnect connection show uuid "$uuid") || return 1
+        llmnr=$(profile_controls::_network_read -g connection.llmnr connection show uuid "$uuid") || return 1
+        mdns=$(profile_controls::_network_read -g connection.mdns connection show uuid "$uuid") || return 1
         llmnr=${llmnr%% *}
         mdns=${mdns%% *}
         [[ $autoconnect == yes || $autoconnect == no ]] && [[ $llmnr =~ ^-?[0-9]$ && $mdns =~ ^-?[0-9]$ ]] || return 1
         mac=
-        case "$type" in wifi | 802-11-wireless) mac=$(nmcli -g 802-11-wireless.cloned-mac-address connection show uuid "$uuid") || return 1 ;; esac
+        case "$type" in wifi | 802-11-wireless) mac=$(profile_controls::_network_read -g 802-11-wireless.cloned-mac-address connection show uuid "$uuid") || return 1 ;; esac
         [[ $mac =~ ^[a-zA-Z0-9:-]*$ ]] || return 1
         object=$(jq -cn --arg uuid "$uuid" --arg type "$type" --arg autoconnect "$autoconnect" --arg llmnr "$llmnr" --arg mdns "$mdns" --arg mac "$mac" '{uuid:$uuid,type:$type,autoconnect:$autoconnect,llmnr:$llmnr,mdns:$mdns,mac:$mac}') || return 1
         result=$(jq -c --argjson item "$object" '.+[$item]|sort_by(.uuid)' <<<"$result") || return 1
@@ -241,7 +248,7 @@ profile_controls::_firewall_apply() {
     fi
 }
 profile_controls::_network_apply() {
-    local profile=$1 config before snapshot uuid type original_autoconnect autoconnect discovery
+    local profile=$1 config before snapshot uuid type original_autoconnect autoconnect discovery override mac
     config=$(profiles::get "$profile" network) || return 1
     before=$(profile_controls::_read network) || return 1
     snapshot=$(profile_controls::_network_snapshot) || return 1
@@ -261,12 +268,23 @@ connection.mdns=0
 CONFIG
     while IFS=$'\t' read -r uuid type; do
         [[ -n $uuid ]] || continue
+        override=$(jq -c --arg uuid "$uuid" '.connections[$uuid]//{}' <<<"$config") || return 1
+        # jq's // treats false as absent; explicit false must override true.
+        discovery=$(jq -r --argjson config "$config" 'if (if has("discovery") then .discovery else $config.discovery end) then "2" else "0" end' <<<"$override") || return 1
         nmcli connection modify uuid "$uuid" connection.llmnr "$discovery" connection.mdns "$discovery" || return 1
         case "$type" in
             wifi | 802-11-wireless)
                 original_autoconnect=$(jq -r --arg uuid "$uuid" '[.before.connections[]|select(.uuid==$uuid)|.autoconnect][0]//"no"' <<<"$before") || return 1
                 [[ $autoconnect == true ]] || original_autoconnect=no
-                nmcli connection modify uuid "$uuid" connection.autoconnect "$original_autoconnect" 802-11-wireless.cloned-mac-address stable || return 1
+                original_autoconnect=$(jq -r --arg original "$original_autoconnect" 'if has("autoconnect") then (if .autoconnect then "yes" else "no" end) else $original end' <<<"$override") || return 1
+                mac=$(jq -r '.mac//"stable"' <<<"$override") || return 1
+                nmcli connection modify uuid "$uuid" connection.autoconnect "$original_autoconnect" 802-11-wireless.cloned-mac-address "$mac" || return 1
+                ;;
+            *)
+                if jq -e 'has("autoconnect")' <<<"$override" >/dev/null; then
+                    original_autoconnect=$(jq -r 'if .autoconnect then "yes" else "no" end' <<<"$override") || return 1
+                    nmcli connection modify uuid "$uuid" connection.autoconnect "$original_autoconnect" || return 1
+                fi
                 ;;
         esac
     done < <(jq -r '.connections[]|[.uuid,.type]|@tsv' <<<"$snapshot")
@@ -453,8 +471,12 @@ profile_controls::verify() {
             state=inactive
             summary="Monitoring is disabled as configured in $profile."
         elif [[ $control == network ]]; then
-            state=partial
-            summary='Saved network policy matches. Reconnect to apply discovery and MAC settings; current connection enforcement is not verified.'
+            if declare -F connections::verify_runtime >/dev/null; then
+                connections::verify_runtime "$current"
+                return
+            fi
+            state=unknown
+            summary='Saved network policy matches. Active connection inspection is unavailable.'
         else
             state=active
             summary="Verified native policy matches $profile."
@@ -478,10 +500,12 @@ profile_controls::_satisfies() {
             ;;
         network)
             jq -e --argjson config "$config" --argjson baseline "$baseline" '
-              all(.connections[]; . as $connection|
-                .llmnr==(if $config.discovery then "2" else "0" end) and .mdns==(if $config.discovery then "2" else "0" end)
+              all(.connections[]; . as $connection|($config.connections[.uuid]//{}) as $override|
+                (if $override|has("discovery") then $override.discovery else $config.discovery end) as $discovery|
+                .llmnr==(if $discovery then "2" else "0" end) and .mdns==(if $discovery then "2" else "0" end)
                 and (if .type=="wifi" or .type=="802-11-wireless" then
-                  .mac=="stable" and .autoconnect==(if $config.autoconnect then ([$baseline.before.connections[]|select(.uuid==$connection.uuid)|.autoconnect][0]//"no") else "no" end)
+                  .mac==($override.mac//"stable") and .autoconnect==(if $override|has("autoconnect") then (if $override.autoconnect then "yes" else "no" end) elif $config.autoconnect then ([$baseline.before.connections[]|select(.uuid==$connection.uuid)|.autoconnect][0]//"no") else "no" end)
+                elif $override|has("autoconnect") then .autoconnect==(if $override.autoconnect then "yes" else "no" end)
                 else true end))' <<<"$current" >/dev/null
             ;;
         services)

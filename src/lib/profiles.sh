@@ -63,7 +63,16 @@ profiles::_validate_document() {
       def slug: type=="string" and test("^[a-z][a-z0-9-]{0,31}$");
       def control: .=="firewall" or .=="usb" or .=="network" or .=="services" or .=="monitor";
       def booleans($keys): type=="object" and (keys|sort)==($keys|sort) and all(.[];type=="boolean");
-      def rule: type=="object" and (keys|sort)==(["id","port","protocol","source","interface","expires_at"]|sort)
+      def connection_override: type=="object" and length>=1 and (keys-["autoconnect","discovery","mac"]|length==0)
+        and (if has("autoconnect") then (.autoconnect|type=="boolean") else true end)
+        and (if has("discovery") then (.discovery|type=="boolean") else true end)
+        and (if has("mac") then (.mac|IN("stable","permanent")) else true end);
+      def network: type=="object" and (keys-["autoconnect","discovery","connections"]|length==0)
+        and (.autoconnect|type=="boolean") and (.discovery|type=="boolean")
+        and (if has("connections") then (.connections|type=="object" and length<=128 and all(to_entries[];
+          (.key|test("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")) and (.value|connection_override))) else true end);
+      def rule: type=="object" and ((keys-["group"])|sort)==(["id","port","protocol","source","interface","expires_at"]|sort)
+        and ((has("group")|not) or (.group|type=="string" and test("^g[0-9]{1,16}-[0-9]{1,10}-[0-9]{1,5}$")))
         and (.id|type=="string" and test("^r[0-9]{1,16}-[0-9]{1,10}-[0-9]{1,5}$"))
         and (.port|type=="number" and floor==. and .>=1 and .<=65535)
         and (.protocol=="tcp" or .protocol=="udp")
@@ -75,8 +84,9 @@ profiles::_validate_document() {
       and all(.profiles|to_entries[];(.key|slug) and .key!="unmanaged" and (.value|
         type=="object" and (keys|sort)==(["name","firewall","usb","network","services","monitor"]|sort)
         and (.name|type=="string" and length>=1 and length<=64 and (test("[\u0000-\u001f\u007f]")|not))
-        and (.firewall|type=="object" and keys==["rules"] and (.rules|type=="array" and length<=256 and all(.[];rule) and (map(.id)|unique|length)==length))
-        and (.usb|type=="object" and length==0) and (.network|booleans(["autoconnect","discovery"]))
+        and (.firewall|type=="object" and keys==["rules"] and (.rules|type=="array" and length<=256 and all(.[];rule) and (map(.id)|unique|length)==length
+          and (group_by(.group//.id)|all(.[];length<=32 and (map([.protocol,.source,.interface,.expires_at])|unique|length)==1 and (map(.port)|unique|length)==length))))
+        and (.usb|type=="object" and length==0) and (.network|network)
         and (.services|type=="object" and (keys|sort)==(["printing","bluetooth","ssh","discovery","samba","remote_desktop"]|sort) and all(.[];IN("enabled","disabled","baseline"))) and (.monitor|booleans(["enabled"]))))
       and (. as $root | all(.active[]; .=="unmanaged" or $root.profiles[.]!=null))
       and (.global=="unmanaged" or .profiles[.global]!=null)

@@ -242,26 +242,71 @@ status::secure_boot() {
     else status::result unknown 'Secure Boot returned an unrecognized state.'; fi
 }
 
-status::disk_encryption() {
-    local source tree
-    source=$(status::run findmnt --noheadings --output SOURCE /) || {
-        status::result unknown 'The root filesystem storage source could not be inspected.'
+status::storage_probe() {
+    local target=$1 source
+    source=$(status::run findmnt --noheadings --output SOURCE --target "$target") || {
+        status::result unknown 'The filesystem storage source could not be inspected.'
         return
     }
     # Btrfs subvolumes add [subvolume]; discard it without evaluating any text.
     source=${source%%\[*}
+    status::storage_source_probe "$source"
+}
+
+status::storage_source_probe() {
+    local source=$1 tree coverage state=unknown detail
     [[ $source == /dev/* && $source != *$'\n'* ]] || {
-        status::result unknown 'The root filesystem uses a storage topology whose encryption cannot be verified here.'
+        status::result unknown 'This filesystem uses a storage topology whose encryption cannot be verified by the block-device check.'
         return
     }
-    tree=$(status::run lsblk --inverse --noheadings --raw --output TYPE "$source") || {
-        status::result unknown 'The root filesystem backing devices could not be inspected.'
+    tree=$(status::run lsblk --inverse --json --output NAME,TYPE "$source") || {
+        status::result unknown 'The filesystem backing devices could not be inspected.'
         return
     }
-    if grep -qx '[[:space:]]*crypt[[:space:]]*' <<<"$tree"; then
-        status::result partial 'An encrypted block device backs the root filesystem. Other disks, home, swap, and unencrypted boot data are not verified.'
+    if ((${#tree} > 262144)); then
+        status::result unknown 'The backing-device topology exceeded the inspection limit.'
+        return
+    fi
+    if ! coverage=$(jq -er '
+        def covered($encrypted):
+            ($encrypted or .type == "crypt") as $next |
+            if ((.children // []) | length) == 0 then $next
+            else all(.children[]; covered($next)) end;
+        if (.blockdevices | type) != "array" or (.blockdevices | length) == 0 then error("missing topology")
+        elif all(.blockdevices[]; covered(false)) then "encrypted"
+        elif any(.. | objects; .type? == "crypt") then "mixed"
+        else "unverified" end' <<<"$tree" 2>/dev/null); then
+        status::result unknown 'The backing-device inspection returned an incomplete or unrecognized topology.'
+        return
+    fi
+    case "$coverage" in
+        encrypted)
+            state=active
+            detail='Encryption was detected on every inspected backing-device path. Filesystem-native encryption and devices outside this topology are separate checks.'
+            ;;
+        mixed)
+            state=partial
+            detail='Encryption was detected, but at least one backing-device path has no verified encryption layer. Review this mixed storage topology.'
+            ;;
+        *) detail='No encrypted block-device ancestor was verified. Filesystem-native encryption and unsupported storage layouts remain unverified; this is not proof that the data is unencrypted.' ;;
+    esac
+    jq -c --arg state "$state" --arg summary "$detail" --arg source "$source" \
+        '{state:$state,summary:$summary,source:$source,backing:([..|objects|select(has("name") and has("type"))|{name,type}][:32])}' <<<"$tree"
+}
+
+status::disk_encryption() {
+    local observed state
+    observed=$(status::storage_probe /) || {
+        status::result unknown 'The root filesystem encryption check could not complete.'
+        return
+    }
+    state=$(jq -r '.state // "unknown"' <<<"$observed") || return 1
+    if [[ $state == active ]]; then
+        status::result active 'Encryption detected for the inspected root filesystem backing storage. View details for home, swap and other coverage; this is not a whole-disk certification.'
+    elif [[ $state == partial ]]; then
+        status::result partial 'Root storage has mixed encryption coverage. View the backing-device details before making storage changes.'
     else
-        status::result unknown 'No encrypted block-device ancestor was verified for the root filesystem. Filesystem-level encryption and other storage need separate review.'
+        status::result unknown 'Root filesystem encryption could not be verified. View storage details; an unavailable check does not mean the disk is unencrypted.'
     fi
 }
 
@@ -292,30 +337,84 @@ status::thunderbolt() {
     fi
 }
 
-status::containers() {
-    local ports
+status::_docker_ready() {
     # Connecting to a socket-activated Docker daemon can start containers. A
     # passive inspection must not activate a stopped container service.
     if [[ $(status::unit docker.service) != active ]]; then
-        status::result unknown 'The system Docker service is not running. Other container runtimes and rootless containers are not verified.'
-        return
+        return 1
     fi
     if [[ ! -S /run/docker.sock && ! -S /var/run/docker.sock ]]; then
-        status::result unknown 'No local system Docker socket was found. Rootless containers and other runtimes are not verified.'
-        return
+        return 1
     fi
     if ! command -v docker >/dev/null 2>&1; then
-        status::result unknown 'Docker is present, but its published ports cannot be inspected without the Docker client.'
-        return
+        return 1
     fi
-    ports=$(status::run env DOCKER_CONFIG=/var/empty docker --host=unix:///run/docker.sock ps --format '{{.Ports}}') || {
-        status::result unknown 'Published Docker ports could not be inspected.'
-        return
-    }
-    if [[ $ports == *'->'* ]]; then
-        status::result partial 'Running Docker containers publish host ports. Their forwarding path can bypass UFW; review container exposure separately.'
+}
+
+status::docker_snapshot() {
+    local ids report version networks network_report template
+    local -a containers=() network_ids=()
+    status::_docker_ready || return 1
+    ids=$(status::run env DOCKER_CONFIG=/var/empty docker --host=unix:///run/docker.sock ps --quiet --no-trunc --filter status=running) || return 1
+    if [[ -n $ids ]]; then
+        mapfile -t containers <<<"$ids"
+        ((${#containers[@]} <= 64)) || return 1
+        for ids in "${containers[@]}"; do [[ $ids =~ ^[a-f0-9]{64}$ ]] || return 1; done
+        # Only requested fields leave Docker. Environment, credentials, mounts,
+        # command lines and unrelated application labels are never collected.
+        template='{"id":{{json .Id}},"name":{{json .Name}},"ports":{{json .NetworkSettings.Ports}},"mode":{{json .HostConfig.NetworkMode}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"files":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"networks":{{json .NetworkSettings.Networks}}}'
+        report=$(status::run env DOCKER_CONFIG=/var/empty docker --host=unix:///run/docker.sock inspect --type container --format "$template" "${containers[@]}") || return 1
+        ((${#report} <= 262144)) || return 1
+        jq -se '
+            def bindings: .==null or (type=="array" and all(.[];
+                (.HostIp|type=="string") and (.HostPort|type=="string" and test("^[0-9]{1,5}$"))));
+            length <= 64 and all(.[];
+            (.id | type == "string" and test("^[a-f0-9]{64}$")) and
+            (.name | type == "string") and (.mode | type == "string") and
+            all(.project,.service,.files; .==null or type=="string") and
+            ((.ports//{}) | type=="object" and all(.[];bindings)))' <<<"$report" >/dev/null || return 1
+        report=$(jq -sc '[.[] | {id,name,ports:(.ports//{}),mode,project:(.project//""),service:(.service//""),files:(.files//""),networks:([(.networks//{})[] | .NetworkID] | unique)}]' <<<"$report") || return 1
+    else report='[]'; fi
+    version=$(status::run env DOCKER_CONFIG=/var/empty docker --host=unix:///run/docker.sock version --format '{{.Server.Version}}') || version=unknown
+    ((${#version} <= 128)) || version=unknown
+    networks=$(jq -r '[.[].networks[] | select(type=="string" and test("^[a-f0-9]{64}$"))] | unique | .[]' <<<"$report") || return 1
+    network_report='[]'
+    if [[ -n $networks ]]; then
+        mapfile -t network_ids <<<"$networks"
+        ((${#network_ids[@]} <= 128)) || return 1
+        template='{"id":{{json .Id}},"driver":{{json .Driver}},"options":{{json .Options}}}'
+        if network_report=$(status::run env DOCKER_CONFIG=/var/empty docker --host=unix:///run/docker.sock network inspect --format "$template" "${network_ids[@]}"); then
+            ((${#network_report} <= 262144)) || return 1
+            network_report=$(jq -sc '[.[] | {id,driver,options:((.options//{}) | with_entries(select(.key | startswith("com.docker.network.bridge."))))}]' <<<"$network_report") || network_report='[]'
+        else network_report='[]'; fi
+    fi
+    jq -cs --arg version "$version" '{version:$version,containers:.[0],networks:.[1]}' <<<"$report"$'\n'"$network_report"
+}
+
+status::docker_summary() {
+    jq -c '
+        def loopback: . == "::1" or test("^127\\.([0-9]{1,3}\\.){2}[0-9]{1,3}$");
+        [.containers[].ports[]?[]? | .HostIp] as $bindings |
+        [.containers[] | select(.mode == "host")] as $host |
+        if any($bindings[]; (loopback | not)) then
+            {state:"partial",summary:"Docker publishes ports beyond localhost. Review the containers, binding addresses and configuration sources before choosing local-only or LAN access. External reachability is not proven by this check."}
+        elif ($host | length) > 0 then
+            {state:"unknown",summary:"Docker host-network containers use the host network directly. Review their application listeners; published-port inspection does not cover them."}
+        elif ($bindings | length) > 0 and (((.version | split(".")[0] | tonumber?) // 0) < 28) then
+            {state:"unknown",summary:"Docker published ports bind to localhost, but the engine version is old or unverified. Versions before 28 can expose localhost publishing to nearby hosts; open details before relying on local-only access."}
+        elif ($bindings | length) > 0 and ((.networks|length)==0 or any(.networks[]; .driver != "bridge" or ((.options["com.docker.network.bridge.gateway_mode_ipv4"]//"nat") != "nat") or ((.options["com.docker.network.bridge.gateway_mode_ipv6"]//"nat") != "nat") or ((.options["com.docker.network.bridge.trusted_host_interfaces"]//"") != ""))) then
+            {state:"unknown",summary:"Docker published ports bind to localhost, but the network configuration needs a routing review. Open details; localhost bindings alone do not certify every container access path."}
+        elif ($bindings | length) > 0 then
+            {state:"active",summary:"Inspected Docker published ports bind only to localhost. Version and network-routing limitations are shown in details; other runtimes and virtual machines are not inspected."}
+        else {state:"active",summary:"No host ports are published by the inspected running Docker containers. Other runtimes, virtual machines and direct container routing are separate checks."} end'
+}
+
+status::containers() {
+    local observed
+    if observed=$(status::docker_snapshot); then
+        status::docker_summary <<<"$observed"
     else
-        status::result unknown 'No published ports were reported by the system Docker daemon. Host networking, other runtimes, and rootless containers remain unverified.'
+        status::result unknown 'The local system Docker daemon could not be inspected without starting services. Open details for the check requirements; other runtimes and virtual machines are not inspected.'
     fi
 }
 
@@ -330,7 +429,7 @@ status::forwarding() {
     if [[ $ipv4 == 0 && $ipv6 == 0 ]]; then
         status::result active 'Kernel IPv4 and IPv6 routing are disabled. Bridged virtual machines still need separate review.'
     elif [[ $ipv4 =~ ^[01]$ && $ipv6 =~ ^[01]$ ]]; then
-        status::result partial 'Kernel network forwarding is enabled. Virtual machines, containers, and bridged networks need separate firewall review.'
+        status::result unknown 'Network forwarding is enabled, as commonly required by Docker and virtual machines. This setting alone is not an exposure finding; view the interfaces and filtering details.'
     else status::result unknown 'Kernel forwarding settings were not recognized.'; fi
 }
 

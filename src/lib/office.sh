@@ -30,23 +30,17 @@ office::valid_service() {
 }
 
 office::firewall() {
+    local profile
     core::require_root || return 1
     [[ $# -eq 2 ]] && office::valid_port "$1" && office::valid_subnet "$2" || return 1
-    core::confirm "Allow TCP $1 only from $2?" || return 1
-    core::backup /etc/ufw || return 1
-    ufw allow from "$2" to any port "$1" proto tcp || return 1
-    core::record "OFFICE firewall tcp/$1 from $2"
+    profile=$(access::default_profile) || return 1
+    access::dispatch allow "$profile" "$1" tcp "$2" any 0
 }
 
 office::network() {
     core::require_root || return 1
     [[ $# -eq 1 ]] && office::valid_uuid "$1" || return 1
-    # Resolve only a saved UUID; never allow an option or a connection-name alias.
-    nmcli -f connection.id,connection.uuid,connection.type connection show uuid "$1" || return 1
-    core::confirm "Enable autoconnect for $1?" || return 1
-    core::backup /etc/NetworkManager/system-connections || return 1
-    nmcli connection modify uuid "$1" connection.autoconnect yes || return 1
-    core::record "OFFICE autoconnect $1"
+    connections::set "$1" autoconnect true
 }
 
 office::service() {

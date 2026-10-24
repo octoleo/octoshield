@@ -9,6 +9,9 @@ setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/usb.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/office.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/profiles.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/access.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/connections.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/diagnostics.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/cli.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/api.sh"
     CORE_STATE="$BATS_TEST_TMPDIR/state"
@@ -25,6 +28,7 @@ setup() {
     # Never create helper state in the host's /run directory.
     mktemp() { command mktemp -d "$BATS_TEST_TMPDIR/gui.XXXXXXXX"; }
     cli::status() { printf 'status inspected\n'; }
+    api::details() { "${1}::dispatch" "${@:2}"; }
     monitor::status() { printf 'monitor status inspected\n'; }
     monitor::logs() { printf 'monitor logs inspected\n'; }
     monitor::disable() {
@@ -50,6 +54,46 @@ setup() {
     [ "$status" -eq 2 ]
     [ ! -s "$TEST_CALLS" ]
     jq -e -s 'length == 2 and .[-1] == {type:"done",success:false}' <<<"$output"
+}
+
+@test 'private inventory remains one complete structured event beyond display log size' {
+    access::dispatch() { jq -cn '{kind:"access",profile:"home",summary:("quoted \" detail " * 700),rules:[]}'; }
+    run api::main access list
+    [ "$status" -eq 0 ]
+    [ ! -s "$TEST_CALLS" ]
+    jq -e -s 'length == 2 and .[0].type == "data" and (.[0].text|fromjson|.summary|length)>4096 and .[-1].success' <<<"$output"
+}
+
+@test 'private inventory rejects multiple documents and wrong kinds without successful completion' {
+    access::dispatch() { printf '%s\n' '{"kind":"access"}' '{"kind":"access"}'; }
+    run api::main access list
+    [ "$status" -ne 0 ]
+    jq -e -s 'all(.[];.type!="data") and .[-1].success==false' <<<"$output"
+    access::dispatch() { printf '%s\n' '{"kind":"diagnostics"}'; }
+    run api::main access list
+    [ "$status" -ne 0 ]
+    jq -e -s 'all(.[];.type!="data") and .[-1].success==false' <<<"$output"
+}
+
+@test 'oversize private inventory fails instead of silently truncating permission data' {
+    access::dispatch() { jq -cn '{kind:"access",summary:("x" * 70000)}'; }
+    run api::main access list
+    [ "$status" -ne 0 ]
+    jq -e -s 'all(.[];.type!="data") and .[-1].success==false' <<<"$output"
+}
+
+@test 'new access and connection arguments are rejected before opening a transaction' {
+    run api::main access allow home '80;id' tcp any any 60
+    [ "$status" -eq 2 ]
+    run api::main access update home g1-1-1 80,443 tcp any any 10081
+    [ "$status" -eq 2 ]
+    run api::main connections set 12345678-abcd-1234-5678-123456789abc shell true
+    [ "$status" -eq 2 ]
+    run api::main diagnostics show /etc/shadow
+    [ "$status" -eq 2 ]
+    run api::main containers localize bad bad
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
 }
 
 @test 'missing GNU supervision refuses a mutation before its transaction starts' {
@@ -244,18 +288,29 @@ setup() {
 }
 
 @test 'office firewall uses same bounded shared method and confirmation' {
+    access::default_profile() { printf 'office\n'; }
+    access::dispatch() {
+        core::confirm 'Apply reviewed permission?' || return 1
+        printf 'access %s\n' "$*" >>"$TEST_CALLS"
+    }
     run api::main office firewall 443 192.168.5.0/24 <<<'1 yes'
     [ "$status" -eq 0 ]
-    grep -Fx 'ufw allow from 192.168.5.0/24 to any port 443 proto tcp' "$TEST_CALLS"
-    grep -Fx 'backup /etc/ufw' "$TEST_CALLS"
+    grep -Fx 'access allow office 443 tcp 192.168.5.0/24 any 0' "$TEST_CALLS"
+    run grep -q '^ufw ' "$TEST_CALLS"
+    [ "$status" -eq 1 ]
 }
 
-@test 'office network resolves exact UUID before enabling autoconnect' {
+@test 'office network uses managed connection override instead of creating drift' {
     local uuid=12345678-abcd-1234-5678-123456789abc
+    connections::set() {
+        core::confirm 'Apply saved connection override?' || return 1
+        printf 'connections set %s\n' "$*" >>"$TEST_CALLS"
+    }
     run api::main office network "$uuid" <<<'1 yes'
     [ "$status" -eq 0 ]
-    grep -Fx "nmcli -f connection.id,connection.uuid,connection.type connection show uuid $uuid" "$TEST_CALLS"
-    grep -Fx "nmcli connection modify uuid $uuid connection.autoconnect yes" "$TEST_CALLS"
+    grep -Fx "connections set $uuid autoconnect true" "$TEST_CALLS"
+    run grep -q '^nmcli ' "$TEST_CALLS"
+    [ "$status" -eq 1 ]
 }
 
 @test 'office CUPS restoration retains socket and path handling' {

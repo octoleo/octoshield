@@ -18,6 +18,7 @@ typedef enum {
 
 typedef enum {
     OCTOSHIELD_EVENT_LOG,
+    OCTOSHIELD_EVENT_DATA,
     OCTOSHIELD_EVENT_CONFIRM,
     OCTOSHIELD_EVENT_DONE
 } OctoshieldEventType;
@@ -36,8 +37,9 @@ GQuark octoshield_protocol_error_quark(void);
 /* Parse one bounded JSONL record (optional final LF or CRLF). A negative length
  * of -1 means NUL-terminated input. Initialize event with {0}; clear each
  * successful result before reusing it. On failure event is left unchanged.
- * Text is owned by the event, sanitized for plain-text display, and must NEVER
- * be passed to a markup interpreter. Unknown fields are ignored for protocol
+ * Text is owned by the event. LOG/CONFIRM text is sanitized for plain display;
+ * DATA preserves JSON bytes and callers must parse it and sanitize each display
+ * field. Neither form may be passed to a markup interpreter. Unknown fields are ignored for protocol
  * extensibility; required fields and their JSON types are checked strictly.
  * Completion may include boolean change_started; absence leaves its state
  * unknown, while false means no protection transaction was started.

@@ -34,12 +34,14 @@ Depends:
  ca-certificates,
  coreutils (<< 9.5) | gnu-coreutils,
  curl,
+ iproute2,
  jq,
  libglib2.0-bin,
  libnotify-bin,
  librsvg2-common,
  pkexec,
  systemd,
+ util-linux,
  whiptail
 Recommends:
  gnome-control-center,

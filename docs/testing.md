@@ -74,6 +74,17 @@ CI is configured for Ubuntu 24.04 and 26.04 amd64 containers, plus a native wind
 
 ## Hardware acceptance checklist
 
+Guided-access regression coverage must additionally exercise:
+
+- The effective firewall profile is selected, including a per-control override. The web preset creates TCP 80 and 443 with identical scope/deadline; cancellation changes nothing, revoke closes both, and unrelated permissions remain intact.
+- LAN selection lists physical connections and real subnets without offering Docker/VPN bridges as trusted LAN defaults. Test IPv4 and IPv6 separately from an authorized second device, including blocked ingress outside the selected scope.
+- The named connection editor retains its override through profile reapplication. Saved changes show pending/unverified runtime state until appropriate evidence is available; reconnect is explicit and reports failures.
+- Encrypted root storage, separate unencrypted/unknown home or swap, unsupported filesystems and inspection timeouts produce accurate scoped labels and details. Profile-state failures do not overwrite independent encryption evidence.
+- Docker localhost, wildcard, specific-address and host-mode cases report different evidence. A supported Compose repair changes only the reviewed service, retains local and outbound connectivity, and refuses stale plans or unsupported routing modes. Omitting the generated override on a subsequent deployment must not be described as retaining its protection.
+- Private source paths and connection/container identities never enter the public status cache. Malformed/oversized structured helper results fail visibly without rendering a truncated permission list as complete.
+
+These checks require live hosts where stated. Mocked unit tests and Xvfb GUI tests do not substitute for second-device network reachability or hardware verification.
+
 Use a disposable Ubuntu Desktop installation or VM with a recoverable console first. USB behavior also requires representative physical hardware. Take a snapshot/backup, confirm recovery credentials, retain a trusted keyboard, and use only a network you own or are authorized to test.
 
 1. **Package/application:** install the matching `.deb` with APT, find the OctoShield icon, open its native window as the GNOME user, and verify `/usr/bin/octoshield`. Confirm installation applies no protections and the system administrator dialog unlocks the application. Refresh devices and perform multiple reviewed actions without repeated authentication; close/reopen and verify a new unlock. Lock the desktop and the application separately, and verify both revoke authorization while native protection stays active. Test cancellation, wrong passwords, and a standard desktop user authenticating with an eligible administrator identity. Confirm the GTK process and user settings remain unprivileged. Compare equivalent GUI/CLI operations.

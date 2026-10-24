@@ -7,6 +7,10 @@ setup() {
     source "$BATS_TEST_DIRNAME/../src/lib/core.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/office.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/profiles.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/access.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/connections.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/diagnostics.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/containers.sh"
     source "$BATS_TEST_DIRNAME/../src/lib/cli.sh"
     core::require_local() { :; }
     core::supported_os() { :; }
@@ -152,14 +156,103 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-@test 'office CUPS restoration unmasks activation units before enabling service' {
-    core::confirm() { :; }
-    core::backup() { :; }
-    core::record() { :; }
-    systemctl() {
-        if [[ $1 == show ]]; then printf 'masked\n'; else printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/systemctl"; fi
-    }
-    cli::office_system <<<'3
+@test 'office service menu dispatches one transaction after selection' {
+    run cli::office_system <<<'3
 cups.service'
-    [ "$(cat "$BATS_TEST_TMPDIR/systemctl")" = $'unmask cups.service\nunmask cups.socket\nunmask cups.path\nenable --now cups.service' ]
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <office> <service> <cups.service>' ]]
+}
+
+@test 'guided access commands validate and preserve grouped permission arguments' {
+    run cli::main access allow home 80,443 tcp 192.0.2.0/24 enp3s0 60
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <access> <allow> <home> <80,443> <tcp> <192.0.2.0/24> <enp3s0> <60>' ]
+    run cli::main access update home g123-4-5 443 tcp 2001:db8::/64 enp3s0 30
+    [ "$status" -eq 0 ]
+    run cli::main access allow home '80;id' tcp any any 60
+    [ "$status" -eq 2 ]
+    [[ $output != *SYSTEM* ]]
+    run cli::main access revoke home '../rule'
+    [ "$status" -eq 2 ]
+}
+
+@test 'connection and diagnostic commands share the bounded system route' {
+    local uuid=12345678-abcd-1234-5678-123456789abc
+    run cli::main connections set "$uuid" discovery false
+    [ "$status" -eq 0 ]
+    [ "$output" = "SYSTEM <connections> <set> <$uuid> <discovery> <false>" ]
+    run cli::main connections set "$uuid" password secret
+    [ "$status" -eq 2 ]
+    run cli::main diagnostics show disk_encryption
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <diagnostics> <show> <disk_encryption>' ]
+    run cli::main diagnostics show /etc/shadow
+    [ "$status" -eq 2 ]
+}
+
+@test 'web access menu selects effective profile and detected LAN without copied IDs' {
+    cli::system() {
+        case "$1 $2" in
+            'access list') printf '%s\n' '{"kind":"access","profile":"office","summary":"Current permissions","rules":[]}' ;;
+            'connections list') printf '%s\n' '{"connections":[{"name":"Office cable","active":true,"lan_candidate":true,"interface":"enp3s0","subnets":["192.0.2.0/24"]},{"name":"Docker","active":true,"lan_candidate":false,"interface":"docker0","subnets":["172.17.0.0/16"]}]}' ;;
+            *)
+                printf 'SYSTEM'
+                printf ' <%s>' "$@"
+                printf '\n'
+                ;;
+        esac
+    }
+    run cli::access_menu <<<'1
+1
+1
+1
+30'
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <access> <allow> <office> <80,443> <tcp> <192.0.2.0/24> <enp3s0> <30>' ]]
+    [[ $output != *'Docker · docker0'* ]]
+}
+
+@test 'permission selection revokes grouped rule without identifier entry' {
+    cli::system() {
+        if [[ $1 == access && $2 == list ]]; then
+            printf '%s\n' '{"profile":"home","summary":"Verified","rules":[{"id":"g123-4-5","label":"Web","state":"active","source":"192.0.2.0/24","interface":"enp3s0"}]}'
+        else
+            printf 'SYSTEM'
+            printf ' <%s>' "$@"
+            printf '\n'
+        fi
+    }
+    run cli::access_menu <<<'3
+1'
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <access> <revoke> <home> <g123-4-5>' ]]
+}
+
+@test 'cancelling access menu never dispatches a mutation' {
+    cli::system() {
+        [[ $1 == access && $2 == list ]] || {
+            printf 'unexpected mutation'
+            return 99
+        }
+        printf '%s\n' '{"profile":"home","summary":"Verified","rules":[]}'
+    }
+    run cli::access_menu <<<''
+    [ "$status" -eq 0 ]
+    [[ $output != *'unexpected mutation'* ]]
+}
+
+@test 'container commands never use the privileged dispatcher' {
+    local id
+    printf -v id '%064d' 1
+    containers::dispatch() {
+        printf 'USER'
+        printf ' <%s>' "$@"
+        printf '\n'
+    }
+    run cli::main containers plan "$id"
+    [ "$status" -eq 0 ]
+    [ "$output" = "USER <plan> <$id>" ]
+    run cli::main containers localize "$id" bad-token
+    [ "$status" -eq 2 ]
+    [[ $output != *SYSTEM* && $output != *USER* ]]
 }

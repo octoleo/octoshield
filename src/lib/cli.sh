@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.2.2 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.3.0 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -29,6 +29,23 @@ Usage: octoshield [COMMAND]
   profile rule-add NAME PORT PROTO SOURCE INTERFACE MINUTES
                             Save an incoming exception (any source/interface allowed)
   profile rule-remove NAME ID Remove a saved firewall exception
+  access                    Guided service access, edit and revoke permissions
+  access list [PROFILE]     Inspect grouped firewall permissions as JSON
+  access allow PROFILE PORTS PROTO SOURCE INTERFACE MINUTES
+                            Review, apply and verify a permission immediately
+  access update PROFILE ID PORTS PROTO SOURCE INTERFACE MINUTES
+                            Review and replace one permission
+  access revoke PROFILE ID  Revoke a permission immediately
+  connections               Select a named connection and adjust privacy
+  connections list          Inspect saved and active connection details as JSON
+  connections set UUID KEY VALUE
+                            Change autoconnect, discovery or MAC choice
+  connections reconnect UUID Reconnect after reviewing the interruption
+  diagnostics               Explain encryption, Docker, forwarding or privacy
+  diagnostics show TOPIC    Return private diagnostic details as JSON
+  containers                Review localhost port bindings for a Compose service
+  containers plan ID        Inspect a localhost binding plan as JSON
+  containers localize ID TOKEN Apply a reviewed plan as your normal user
   updates check             Check official releases and show upgrade instructions
   apply CONTROL             firewall|network|services|sudo|updates|apparmor|usb|monitor
   desktop apply|restore     Configure or restore this user's GNOME settings
@@ -70,6 +87,11 @@ cli::installed_command() {
 
 cli::system() {
     core::require_local || return 1
+    # Compatibility route: menus choose actions before acquiring their locks.
+    if [[ $1 == office-system ]]; then
+        cli::office_system
+        return
+    fi
     if ((EUID != 0)); then
         local launcher
         launcher=$(cli::installed_command) || return 1
@@ -129,7 +151,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.2.2 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.3.0 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -189,6 +211,10 @@ cli::setup() {
                 'Select a protection or adjustment. Each system change is reviewed before applying.' 24 88 15 \
                 status 'Inspect current security and listening ports' \
                 profiles 'Switch and configure Conference, Office, Home or custom profiles' \
+                access 'Allow web/SSH access, edit or revoke permissions' \
+                connections 'Manage named network connections and privacy' \
+                diagnostics 'Explain findings and show their configuration sources' \
+                containers 'Bind Docker Compose service ports to localhost' \
                 updates-check 'Check for a new OctoShield release' \
                 firewall 'Block unsolicited inbound Wi-Fi/Ethernet traffic' \
                 usb 'Enroll trusted USB devices and block unknown devices' \
@@ -211,7 +237,7 @@ cli::setup() {
                 password 'Change your user password' \
                 recovery 'Read recovery and backup instructions' 3>&1 1>&2 2>&3) || return 0
         else
-            printf '\nChoices: status profiles updates-check firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
+            printf '\nChoices: status profiles access connections diagnostics containers updates-check firewall usb network services desktop desktop-restore sudo updates apparmor\nmonitor monitor-status monitor-logs monitor-off notifications notifications-off devices backups office password recovery quit\n> '
             IFS= read -r choice || return 0
         fi
         result=0
@@ -219,6 +245,10 @@ cli::setup() {
             quit | '') return 0 ;;
             status) cli::status || result=$? ;;
             profiles) profile_cli::menu || result=$? ;;
+            access) cli::access_menu || result=$? ;;
+            connections) cli::connections_menu || result=$? ;;
+            diagnostics) cli::diagnostics_menu || result=$? ;;
+            containers) cli::containers_menu || result=$? ;;
             updates-check) updates::show || result=$? ;;
             desktop) desktop::apply || result=$? ;;
             desktop-restore) desktop::restore || result=$? ;;
@@ -229,7 +259,7 @@ cli::setup() {
             monitor-off) cli::system monitor disable || result=$? ;;
             backups) cli::backup_menu || result=$? ;;
             devices) cli::devices || result=$? ;;
-            office) cli::system office-system || result=$? ;;
+            office) cli::office_system || result=$? ;;
             password) cli::password || result=$? ;;
             recovery) cli::recovery || result=$? ;;
             *)
@@ -285,30 +315,169 @@ cli::password() {
 }
 
 cli::office_system() {
-    local choice port subnet uuid
-    printf '\n1) Allow one TCP port from an office IPv4 subnet\n2) Enable autoconnect for a trusted saved network\n3) Restore selected disabled service\nChoice: '
+    local choice
+    printf '\n1) Manage firewall access\n2) Manage connection privacy\n3) Restore selected disabled service\nChoice: '
     IFS= read -r choice || return 1
     case "$choice" in
-        1)
-            printf 'TCP port (1–65535): '
-            IFS= read -r port || return 1
-            printf 'Trusted IPv4 subnet in CIDR notation (example 192.168.1.0/24): '
-            IFS= read -r subnet || return 1
-            office::firewall "$port" "$subnet"
-            ;;
-        2)
-            nmcli -f NAME,UUID,TYPE,AUTOCONNECT connection show || return 1
-            printf 'Trusted connection UUID: '
-            IFS= read -r uuid || return 1
-            office::network "$uuid"
-            ;;
+        1) cli::access_menu ;;
+        2) cli::connections_menu ;;
         3)
             printf 'Service (ssh.service, avahi-daemon.service, bluetooth.service, cups.service): '
             IFS= read -r choice || return 1
-            office::service "$choice"
+            office::valid_service "$choice" || return 2
+            cli::system office service "$choice"
             ;;
         *) return 1 ;;
     esac
+}
+
+# Menus use short numeric choices. Device-provided labels are display text,
+# never shell input, and control/formatting characters are removed for terminals.
+cli::safe_text() {
+    jq -r 'gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]"; " ")'
+}
+cli::select_item() {
+    local prompt=$1 items=$2 count choice
+    count=$(jq -er 'select(type=="array")|length' <<<"$items") || return 1
+    ((count > 0 && count <= 512)) || {
+        core::log 'No selectable items were found.' >&2
+        return 1
+    }
+    jq -r 'to_entries[] | "\(.key+1)) " + (.value.label|gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]";" "))' <<<"$items" >&2 || return 1
+    printf '%s (empty cancels): ' "$prompt" >&2
+    IFS= read -r choice || return 1
+    [[ -n $choice ]] || return 1
+    if [[ ! $choice =~ ^[1-9][0-9]{0,2}$ ]] || ((10#$choice > count)); then
+        core::log 'Choose a number from the list.' >&2
+        return 1
+    fi
+    jq -c --argjson index "$((10#$choice - 1))" '.[$index]' <<<"$items"
+}
+
+cli::access_menu() {
+    local document profile action selected identifier='' ports protocol=tcp source interface minutes networks choices scope
+    core::require_local || return 1
+    document=$(cli::system access list) || return 1
+    profile=$(jq -er '.profile' <<<"$document") || return 1
+    printf '\nFirewall profile: %s\n' "$profile"
+    jq '.summary' <<<"$document" | cli::safe_text || return 1
+    jq -r '.rules[]|"  \(.label) — \(.state), from \(.source), interface \(.interface)"' <<<"$document"
+    printf '\n1) Allow a service\n2) Edit a permission\n3) Revoke a permission\nChoice (empty returns): '
+    IFS= read -r action || return 1
+    [[ -n $action ]] || return 0
+    case "$action" in
+        1) action=allow ;;
+        2 | 3)
+            choices=$(jq -c '[.rules[]|.label += (" — "+.state+", "+.source+", "+.interface)]' <<<"$document") || return 1
+            selected=$(cli::select_item 'Permission' "$choices") || return 0
+            identifier=$(jq -er .id <<<"$selected") || return 1
+            if [[ $action == 3 ]]; then
+                cli::system access revoke "$profile" "$identifier"
+                return
+            fi
+            action=update
+            ;;
+        *) return 2 ;;
+    esac
+    printf '\n1) Web server — HTTP + HTTPS (TCP 80,443)\n2) Incoming SSH (TCP 22)\n3) Custom ports\nService: '
+    IFS= read -r selected || return 1
+    case "$selected" in
+        1) ports=80,443 ;;
+        2) ports=22 ;;
+        3)
+            printf 'Ports separated by commas: '
+            IFS= read -r ports || return 1
+            printf 'Protocol (tcp or udp): '
+            IFS= read -r protocol || return 1
+            ;;
+        *) return 2 ;;
+    esac
+    printf '\nWho may connect?\n1) Devices on a selected local network\n2) A specific address or subnet\n3) Any source (all reachable networks)\nScope: '
+    IFS= read -r scope || return 1
+    case "$scope" in
+        1)
+            networks=$(cli::system connections list) || return 1
+            choices=$(jq -c '[.connections[]|select(.active and .lan_candidate) as $c|.subnets[]|{source:.,interface:$c.interface,label:($c.name+" · "+$c.interface+" · "+.)}]' <<<"$networks") || return 1
+            selected=$(cli::select_item 'Network and address family' "$choices") || return 0
+            source=$(jq -er .source <<<"$selected") interface=$(jq -er .interface <<<"$selected") || return 1
+            ;;
+        2)
+            printf 'Source IPv4/IPv6 address or CIDR: '
+            IFS= read -r source || return 1
+            printf 'Incoming interface (or any): '
+            IFS= read -r interface || return 1
+            ;;
+        3) source=any interface=any ;;
+        *) return 2 ;;
+    esac
+    printf 'Duration in minutes (Enter = 60, 0 = permanent): '
+    IFS= read -r minutes || return 1
+    minutes=${minutes:-60}
+    if [[ $action == update ]]; then
+        access::validate update "$profile" "$identifier" "$ports" "$protocol" "$source" "$interface" "$minutes" || return 2
+        cli::system access update "$profile" "$identifier" "$ports" "$protocol" "$source" "$interface" "$minutes"
+    else
+        access::validate allow "$profile" "$ports" "$protocol" "$source" "$interface" "$minutes" || return 2
+        cli::system access allow "$profile" "$ports" "$protocol" "$source" "$interface" "$minutes"
+    fi
+}
+
+cli::connections_menu() {
+    local document choices selected uuid action value
+    core::require_local || return 1
+    document=$(cli::system connections list) || return 1
+    choices=$(jq -c '[.connections[]|. + {label:(.name+" · "+.type+" · "+(if .active then .interface else "disconnected" end))}]' <<<"$document") || return 1
+    selected=$(cli::select_item 'Connection' "$choices") || return 0
+    uuid=$(jq -er .uuid <<<"$selected") || return 1
+    jq -r '["Automatic connection: "+.autoconnect,"Discovery: mDNS "+.mdns+", LLMNR "+.llmnr,"MAC choice: "+.mac,.runtime.summary][]|gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]";" ")' <<<"$selected" || return 1
+    printf '\n1) Automatic connection\n2) Local discovery\n3) Wi-Fi MAC choice\n4) Reconnect now\nChoice (empty returns): '
+    IFS= read -r action || return 1
+    case "$action" in
+        '') return 0 ;;
+        1 | 2)
+            printf '1) Enabled\n2) Disabled\nChoice: '
+            IFS= read -r value || return 1
+            case "$value" in 1) value=true ;; 2) value=false ;; *) return 2 ;; esac
+            if [[ $action == 1 ]]; then action=autoconnect; else action=discovery; fi
+            cli::system connections set "$uuid" "$action" "$value"
+            ;;
+        3)
+            printf '1) Stable private address\n2) Hardware address (registered networks)\nChoice: '
+            IFS= read -r value || return 1
+            case "$value" in 1) value=stable ;; 2) value=permanent ;; *) return 2 ;; esac
+            cli::system connections set "$uuid" mac "$value"
+            ;;
+        4) cli::system connections reconnect "$uuid" ;;
+        *) return 2 ;;
+    esac
+}
+
+cli::diagnostics_menu() {
+    local topic document
+    core::require_local || return 1
+    printf '\n1) Disk encryption\n2) Docker published ports\n3) Network forwarding\n4) Connection privacy\nTopic (empty returns): '
+    IFS= read -r topic || return 1
+    case "$topic" in '') return 0 ;; 1) topic=disk_encryption ;; 2) topic=containers ;; 3) topic=forwarding ;; 4) topic=network ;; *) return 2 ;; esac
+    document=$(cli::system diagnostics show "$topic") || return 1
+    jq -r '[.title,.summary, (.findings[]|"\n"+.title+" ["+.state+"]",.detail,(if .source!="" then "Source: "+.source else empty end),(if .action!="" then "Next step: "+.action else empty end))][]|gsub("[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]";" ")' <<<"$document"
+}
+
+cli::containers_menu() {
+    local document choices selected identifier plan token
+    core::require_local || return 1
+    ((EUID != 0)) || {
+        core::die 'Run container repairs as your normal desktop user, without sudo.'
+        return 1
+    }
+    document=$(cli::system diagnostics show containers) || return 1
+    choices=$(jq -c '[.findings[]|select(.fix=="localize")|select((.container_id//"")|test("^[a-f0-9]{64}$"))|{id:.container_id,label:.title}]|unique_by(.id)' <<<"$document") || return 1
+    selected=$(cli::select_item 'Service to review for localhost port bindings' "$choices") || return 0
+    identifier=$(jq -er .id <<<"$selected") || return 1
+    plan=$(containers::dispatch plan "$identifier") || return 1
+    # The shared localize operation repeats its concrete review and confirmation.
+    # No token or configuration path needs to be copied into a terminal command.
+    token=$(jq -er '.token' <<<"$plan") || return 1
+    containers::dispatch localize "$identifier" "$token"
 }
 
 cli::valid_subnet() {
@@ -329,7 +498,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.2.2\n'
+            printf 'OctoShield 1.3.0\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then
@@ -344,6 +513,23 @@ cli::main() {
             else
                 profiles::validate "$@" || return 2
                 cli::system profile "$@"
+            fi
+            ;;
+        access | connections | diagnostics)
+            if (($# == 0)); then
+                "cli::${command}_menu"
+            else
+                "${command}::validate" "$@" || return 2
+                cli::system "$command" "$@"
+            fi
+            ;;
+        containers)
+            core::require_local || return 1
+            if (($# == 0)); then
+                cli::containers_menu
+            else
+                containers::validate "$@" || return 2
+                containers::dispatch "$@"
             fi
             ;;
         inspect)
@@ -400,7 +586,7 @@ cli::main() {
             ;;
         office)
             if (($# == 0)); then
-                cli::system office-system
+                cli::office_system
             else
                 api::validate office "$@" || return 2
                 cli::system office "$@"
@@ -408,7 +594,7 @@ cli::main() {
             ;;
         office-system)
             (($# == 0 && EUID == 0)) || return 2
-            cli::system office-system
+            cli::office_system
             ;;
         backups | backup-show)
             api::validate "$command" "$@" || return 2

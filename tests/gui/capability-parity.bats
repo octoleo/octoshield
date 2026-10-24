@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Exercise the compiled GUI argv model and both Bash frontend dispatchers.
 # Every operational handler is a spy; these tests never elevate or change hosts.
-# shellcheck disable=SC1091,SC2317,SC2329
+# Bats supplies per-test status variables; attack strings must remain literal.
+# shellcheck disable=SC1091,SC2317,SC2329,SC2030,SC2031,SC2016
 
 setup_file() {
     local -a compiler_flags
@@ -22,6 +23,10 @@ setup() {
     source "$OCTOSHIELD_TEST_ROOT/src/lib/usb.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/office.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/profiles.sh"
+    source "$OCTOSHIELD_TEST_ROOT/src/lib/access.sh"
+    source "$OCTOSHIELD_TEST_ROOT/src/lib/connections.sh"
+    source "$OCTOSHIELD_TEST_ROOT/src/lib/diagnostics.sh"
+    source "$OCTOSHIELD_TEST_ROOT/src/lib/containers.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/cli.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/api.sh"
     source "$OCTOSHIELD_TEST_ROOT/src/lib/user_api.sh"
@@ -34,6 +39,7 @@ setup() {
     cli::recovery() { test::route recovery; }
     core::backups() { test::route backups; }
     api::backup_show() { test::route backup-show "$@"; }
+    api::details() { "${1}::dispatch" "${@:2}"; }
 
     controls::apply_firewall() { test::route apply firewall; }
     controls::apply_network() { test::route apply network; }
@@ -50,6 +56,10 @@ setup() {
     usb::profile_enroll() { test::route usb enroll "$@"; }
     usb::devices_json() { test::route usb devices; }
     profiles::dispatch() { test::route profile "$@"; }
+    access::dispatch() { test::route access "$@"; }
+    connections::dispatch() { test::route connections "$@"; }
+    diagnostics::dispatch() { test::route diagnostics "$@"; }
+    containers::dispatch() { test::route containers "$@"; }
     updates::check() { test::route updates check; }
     updates::show() { test::route updates check; }
     office::firewall() { test::route office firewall "$@"; }
@@ -103,6 +113,15 @@ test::user_parity() {
     [ "$output" = "$expected" ]
 }
 
+test::reject_privileged() {
+    run "$OCTOSHIELD_CAPABILITY_DRIVER" privileged "$@"
+    [ "$status" -ne 0 ]
+    run api::validate "$@"
+    [ "$status" -ne 0 ]
+    run cli::main "$@"
+    [ "$status" -ne 0 ]
+}
+
 @test "all eight security controls share the GUI helper and CLI backend routes" {
     local control
     for control in firewall network services sudo updates apparmor usb monitor; do
@@ -139,6 +158,87 @@ test::user_parity() {
 
 @test "release checks share the unprivileged GUI and CLI backend" {
     test::user_parity updates check
+}
+
+@test "guided access applies grouped ports edits and revokes through the same validated routes" {
+    test::privileged_parity access list
+    test::privileged_parity access list home
+    test::privileged_parity access allow home 80,443 tcp 192.168.1.0/24 wlan0 60
+    test::privileged_parity access update home g123-4-56 80,443 tcp 2001:db8::/64 eth0 10080
+    test::privileged_parity access update office r123-4-56 22 tcp any any 0
+    test::privileged_parity access revoke home g123-4-56
+    test::privileged_parity access revoke home r123-4-56
+}
+
+@test "connection controls and detail topics have compiled frontend helper CLI parity" {
+    local uuid=11111111-2222-3333-4444-555555555555 topic
+    test::privileged_parity connections list
+    test::privileged_parity connections set "$uuid" autoconnect true
+    test::privileged_parity connections set "$uuid" discovery false
+    test::privileged_parity connections set "$uuid" mac stable
+    test::privileged_parity connections set "$uuid" mac permanent
+    test::privileged_parity connections reconnect "$uuid"
+    for topic in disk_encryption containers forwarding network; do
+        test::privileged_parity diagnostics show "$topic"
+    done
+}
+
+@test "container plans and reviewed localization remain exclusively user actions" {
+    local token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    test::user_parity containers plan "$token"
+    test::user_parity containers localize "$token" "$token"
+    run "$OCTOSHIELD_CAPABILITY_DRIVER" privileged containers localize "$token" "$token"
+    [ "$status" -ne 0 ]
+    run api::validate containers localize "$token" "$token"
+    [ "$status" -ne 0 ]
+    run "$OCTOSHIELD_CAPABILITY_DRIVER" user access allow home 443 tcp any any 0
+    [ "$status" -ne 0 ]
+    run user_api::validate access allow home 443 tcp any any 0
+    [ "$status" -ne 0 ]
+}
+
+@test "guided access validation agrees on CSV boundaries and argument injection" {
+    local ports='' index value uuid=11111111-2222-3333-4444-555555555555
+    for ((index = 10000; index < 10032; index++)); do
+        [[ -z $ports ]] || ports+=,
+        ports+=$index
+    done
+    [ "${#ports}" -eq 191 ]
+    test::privileged_parity access update home g1-2-3 "$ports" tcp any any 0
+    test::reject_privileged access update home g1-2-3 "$ports," tcp any any 0
+    ports=''
+    for ((index = 1; index <= 33; index++)); do
+        [[ -z $ports ]] || ports+=,
+        ports+=$index
+    done
+    test::reject_privileged access allow home "$ports" tcp any any 0
+    for value in '80,80' '80,' ',443' '0' '01' '65536' '80;id' "\$(id)"; do
+        test::reject_privileged access allow home "$value" tcp any any 0
+    done
+    test::reject_privileged access update home g1-2-3 80 tcp any any 0 extra
+    test::reject_privileged access revoke home '../rules'
+    test::reject_privileged access revoke home g1-2-123456
+    test::reject_privileged access allow home 443 tcp 1.2.3.999/24 any 0
+    test::reject_privileged access allow home 443 tcp any 'wlan0;id' 0
+    test::reject_privileged access allow home 443 tcp any any 10081
+    test::reject_privileged connections set "$uuid" discovery yes
+    test::reject_privileged connections set "$uuid" mac true
+    test::reject_privileged connections reconnect "\$(nmcli)"
+    test::reject_privileged diagnostics show '../../etc/shadow'
+}
+
+@test "container identity and review tokens reject malformed user input in both adapters" {
+    local token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef value
+    for value in '' '--help' "\$(id)" "${token%?}" "${token^^}"; do
+        run "$OCTOSHIELD_CAPABILITY_DRIVER" user containers plan "$value"
+        [ "$status" -ne 0 ]
+        run user_api::validate containers plan "$value"
+        [ "$status" -ne 0 ]
+        run "$OCTOSHIELD_CAPABILITY_DRIVER" user containers localize "$token" "$value"
+        [ "$status" -ne 0 ]
+        run user_api::validate containers localize "$token" "$value"
+        [ "$status" -ne 0 ]
+    done
 }
 
 @test "office firewall network and every supported service have parity" {

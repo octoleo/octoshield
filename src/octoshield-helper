@@ -14,7 +14,7 @@ if ((EUID != 0)) || [[ ! ${PKEXEC_UID:-} =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 readonly OCTOSHIELD_ROOT=/usr/lib/octoshield
-for octoshield_module in core controls usb desktop monitor office profiles profile_firewall_verify profile_controls status cli api; do
+for octoshield_module in core controls usb desktop monitor office profiles profile_firewall_verify profile_controls status access connections diagnostics cli api; do
     # shellcheck source=/dev/null
     source "$OCTOSHIELD_ROOT/src/lib/$octoshield_module.sh"
 done

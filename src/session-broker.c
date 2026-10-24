@@ -416,8 +416,8 @@ static gboolean parse_message(const gchar *line, gsize length, Message *message)
         if (id <= 0 || id > G_MAXINT32 || !node || !JSON_NODE_HOLDS_ARRAY(node)) goto out;
         JsonArray *array = json_node_get_array(node);
         guint count = json_array_get_length(array);
-        if (count == 0 || count > 8) goto out;
-        const gchar *args[8];
+        if (count == 0 || count > 9) goto out;
+        const gchar *args[9];
         for (guint i = 0; i < count; i++) {
             JsonNode *argument = json_array_get_element(array, i);
             if (!JSON_NODE_HOLDS_VALUE(argument) || json_node_get_value_type(argument) != G_TYPE_STRING) goto out;
@@ -501,6 +501,7 @@ static gboolean forward_event(Broker *broker, const gchar *line, gsize length)
     OctoshieldEvent event = {0};
     if (broker->done_seen || !octoshield_event_parse(line, (gssize)length, &event, NULL)) return FALSE;
     const gchar *type = event.type == OCTOSHIELD_EVENT_LOG ? "log" :
+                        event.type == OCTOSHIELD_EVENT_DATA ? "data" :
                         event.type == OCTOSHIELD_EVENT_CONFIRM ? "confirm" : "done";
     JsonObject *object = event_object(type, broker->request);
     gboolean valid = TRUE;

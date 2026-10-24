@@ -479,7 +479,7 @@ LEGACY
     printf '\nCORE_STATE=%q\nCORE_PACKAGE_MAINTENANCE=%q\n' \
         "$CORE_STATE" "$CORE_PACKAGE_MAINTENANCE" >>"$OCTOSHIELD_ROOT/src/lib/core.sh"
     local module
-    for module in controls usb monitor office profiles profile_firewall_verify profile_controls; do
+    for module in controls usb monitor office profiles profile_firewall_verify profile_controls access connections diagnostics; do
         : >"$OCTOSHIELD_ROOT/src/lib/$module.sh"
     done
     cat >"$OCTOSHIELD_ROOT/src/lib/status.sh" <<'STATUS'
@@ -554,7 +554,7 @@ locking::stage_after_change_collector() {
     printf '\nCORE_STATE=%q\nCORE_PACKAGE_MAINTENANCE=%q\n' \
         "$CORE_STATE" "$CORE_PACKAGE_MAINTENANCE" >>"$OCTOSHIELD_ROOT/src/lib/core.sh"
     local module
-    for module in controls usb monitor office profiles profile_firewall_verify profile_controls; do
+    for module in controls usb monitor office profiles profile_firewall_verify profile_controls access connections diagnostics; do
         : >"$OCTOSHIELD_ROOT/src/lib/$module.sh"
     done
     # Keep the real worker, descriptor validation and timeout invocation. Only
