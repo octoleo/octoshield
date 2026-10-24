@@ -46,7 +46,7 @@ jobs:
         run: bash tests/networkmanager-integration.sh
 
   repair:
-    name: Real sudo repair and authentication · Ubuntu ${{ matrix.ubuntu }}
+    name: Real sudo repair and authentication · Ubuntu ${{ matrix.ubuntu }} · ${{ matrix.sudo }}
     runs-on: ubuntu-24.04
     container:
       image: ubuntu:${{ matrix.ubuntu }}
@@ -54,19 +54,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: ['24.04', '26.04']
+        include:
+          - ubuntu: '24.04'
+            sudo: sudo
+          - ubuntu: '26.04'
+            sudo: sudo
+          - ubuntu: '26.04'
+            sudo: sudo-rs
     timeout-minutes: 10
     steps:
       - name: Install native sudo and PAM integration dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends git ca-certificates sudo libpam-modules passwd jq util-linux
+          apt-get install --yes --no-install-recommends git ca-certificates ${{ matrix.sudo }} libpam-modules passwd jq util-linux
           if [ '${{ matrix.ubuntu }}' = 26.04 ]; then apt-get install --yes --no-install-recommends gnu-coreutils; fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Verify production repair with real passwords and sudo timestamp reuse
-        run: bash tests/repair-integration.sh
+        env:
+          SUDO_TEST_PACKAGE: ${{ matrix.sudo }}
+        run: |
+          sudo_binary=$(readlink -e "$(command -v sudo)")
+          visudo_binary=$(readlink -e "$(command -v visudo)")
+          test "$(dpkg-query --search "$sudo_binary" | cut -d: -f1)" = "$SUDO_TEST_PACKAGE"
+          test "$(dpkg-query --search "$visudo_binary" | cut -d: -f1)" = "$SUDO_TEST_PACKAGE"
+          printf 'Selected %s: sudo=%s visudo=%s\n' "$SUDO_TEST_PACKAGE" "$sudo_binary" "$visudo_binary"
+          bash tests/repair-integration.sh
 
   check:
     name: Ubuntu ${{ matrix.ubuntu }}

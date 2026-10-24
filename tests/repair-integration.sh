@@ -6,19 +6,30 @@ set -Eeuo pipefail
 
 repair_integration_isolated() {
     set -Eeuo pipefail
-    local root=$1 temporary=$2 original_namespace=$3 directory
+    local root=$1 temporary=$2 original_namespace=$3 directory native_sudo native_visudo
     [[ $EUID == 0 && $(readlink /proc/self/ns/mnt) != "$original_namespace" ]] || {
         echo 'Refusing sudo integration outside its private mount namespace.' >&2
         return 1
     }
     mount --make-rprivate /
+    # Ubuntu 26.04 selects sudo/visudo through /etc/alternatives. Resolve the
+    # installed executables before hiding /etc, then retain only those two
+    # selections inside the fixture. Do not force either native implementation.
+    native_sudo=$(readlink -e "$(type -P sudo)")
+    native_visudo=$(readlink -e "$(type -P visudo)")
+    [[ -x $native_sudo && -x $native_visudo ]]
     # Do not copy host passwords or account databases. Everything below these
     # existing mount points belongs to this process's disposable namespace.
     for directory in /etc /run /var/log /var/lib; do
         mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$directory"
         [[ $(findmnt --noheadings --output FSTYPE --target "$directory") == tmpfs ]]
     done
-    install -d -m 0755 /etc/sudoers.d /etc/pam.d /run/octoshield-repair-integration
+    install -d -m 0755 /etc/sudoers.d /etc/pam.d /etc/alternatives /run/octoshield-repair-integration
+    ln -s "$native_sudo" /etc/alternatives/sudo
+    ln -s "$native_visudo" /etc/alternatives/visudo
+    [[ $(readlink -e "$(type -P sudo)") == "$native_sudo" ]]
+    [[ $(readlink -e "$(type -P visudo)") == "$native_visudo" ]]
+    printf 'Native executables retained: sudo=%s visudo=%s\n' "$native_sudo" "$native_visudo"
     printf 'root:x:0:0:root:/root:/bin/bash\noctoshield-repair:x:61123:61123:Integration fixture:/run/octoshield-repair-integration:/bin/bash\n' >/etc/passwd
     printf 'root:x:0:\noctoshield-repair:x:61123:\n' >/etc/group
     printf 'root:!:20000:0:99999:7:::\noctoshield-repair:!:20000:0:99999:7:::\n' >/etc/shadow
@@ -86,7 +97,7 @@ PROBE
     # shellcheck source=/dev/null
     source "$root/src/lib/repair.sh"
     umask 077
-    # shellcheck disable=SC2317 # Called by the sourced production repair module.
+    # shellcheck disable=SC2317,SC2329 # Called by the sourced production repair module.
     core::confirm() { printf 'Integration consent: %s\n' "$*"; }
     trap 'core::end' EXIT
     repair_test_generated() {
