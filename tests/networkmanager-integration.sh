@@ -108,3 +108,19 @@ profiles::restore network
 nmcli connection reload
 [[ $(nmcli -g connection.mdns connection show uuid "$second") == -1* ]]
 printf 'PASS: reviewed reconciliation and standalone baseline restore use real NetworkManager profiles\n'
+
+# A saved Wi-Fi profile is real NetworkManager state even without a radio in CI.
+# Verify Wi-Fi-specific fields and persistence; do not claim radio association.
+nmcli connection add type wifi ifname octowifi0 con-name OctoShield-integration-wifi ssid OctoShield-integration connection.autoconnect no
+wifi=$(nmcli -g connection.uuid connection show OctoShield-integration-wifi)
+connections::set "$wifi" autoconnect true
+connections::set "$wifi" mac stable
+connections::set "$wifi" discovery false
+nmcli connection reload
+[[ $(nmcli -g connection.autoconnect connection show uuid "$wifi") == yes ]]
+[[ $(nmcli -g 802-11-wireless.cloned-mac-address connection show uuid "$wifi") == stable ]]
+[[ $(nmcli -g connection.mdns connection show uuid "$wifi") == 0* ]]
+profiles::restore network
+nmcli connection reload
+[[ $(nmcli -g connection.autoconnect connection show uuid "$wifi") == no ]]
+printf 'PASS: actual saved Wi-Fi autoconnect, MAC and discovery settings persist and restore; radio association is not tested\n'

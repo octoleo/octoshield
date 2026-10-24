@@ -343,7 +343,7 @@ connections::reconcile() {
 }
 
 connections::set() {
-    local uuid=$1 key=$2 value=$3 active record profile document updated expected before after native fingerprint failed=0
+    local uuid=$1 key=$2 value=$3 active record profile document updated expected before after native fingerprint actual_selected expected_selected failed=0
     connections::validate set "$@" || return 2
     API_CHANGE_STARTED=false
     core::require_root || return 1
@@ -410,7 +410,9 @@ connections::set() {
         if $key=="autoconnect" then .autoconnect=(if $value=="true" then "yes" else "no" end)
         elif $key=="discovery" then .llmnr=(if $value=="true" then "2" else "0" end)|.mdns=.llmnr
         else .mac=$value end else . end)' <<<"$before") || failed=1
-    [[ $(jq -c --arg uuid "$uuid" '.connections[]|select(.uuid==$uuid)' <<<"${after:-{}}") == "$(jq -c --arg uuid "$uuid" '.connections[]|select(.uuid==$uuid)' <<<"${expected:-{}}")" ]] || failed=1
+    if ! actual_selected=$(jq -ce --arg uuid "$uuid" '[.connections[]|select(.uuid==$uuid)]|if length==1 then .[0] else error("Selected connection unavailable") end' <<<"$after") ||
+        ! expected_selected=$(jq -ce --arg uuid "$uuid" '[.connections[]|select(.uuid==$uuid)]|if length==1 then .[0] else error("Selected connection unavailable") end' <<<"$expected") ||
+        [[ $actual_selected != "$expected_selected" ]]; then failed=1; fi
     if ((failed)); then
         if [[ $profile != unmanaged ]]; then profiles::_result network failed 'Connection change did not verify; review its saved and active settings.' || :; fi
         core::die 'The connection change did not verify. No reconnect was attempted; inspect its settings and saved recovery baseline.'
