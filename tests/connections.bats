@@ -75,6 +75,7 @@ setup() {
             'connection modify uuid '*)
                 printf 'nmcli %s\n' "$*" >>"$CALLS"
                 [[ $FAIL != modify ]] || return 1
+                [[ $FAIL != ignored ]] || return 0
                 uuid=$4
                 shift 4
                 while (($#)); do
@@ -198,6 +199,14 @@ setup() {
     [ "$status" -ne 0 ]
     jq -e '.results.network.status=="failed"' "$CORE_STATE/profiles/state.json"
     run ! grep -q '^reconnect ' "$CALLS"
+}
+
+@test 'a successful native exit without the requested setting is not reported as verified' {
+    FAIL=ignored
+    run connections::set "$UUID" autoconnect false
+    [ "$status" -ne 0 ]
+    [[ $output == *'did not verify'* ]]
+    jq -e '.[0].autoconnect=="yes"' "$NET"
 }
 
 @test 'a selected connection edit does not activate unrelated pending profile settings' {

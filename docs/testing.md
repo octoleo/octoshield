@@ -78,7 +78,7 @@ CI is configured for Ubuntu 24.04 and 26.04 amd64 containers, plus a native wind
 
 CI runs `bash tests/networkmanager-integration.sh` as root in disposable privileged Ubuntu 24.04 and 26.04 containers. The script requires a separate network, mount and PID namespace, private D-Bus, and temporary NetworkManager configuration/state. It refuses to run its native checks in the parent network namespace. It starts the real NetworkManager daemon, creates real saved Ethernet profiles on isolated dummy interfaces, invokes production connection-save/reconciliation/recovery functions, and checks persistence after `nmcli connection reload`. Only interactive consent is automated. This is separate from mocked failure-path unit tests and does not establish physical Wi-Fi, resolver, PolicyKit, desktop-session or suspend/resume behavior.
 
-The real integration job is required by release publication. Missing namespace privileges or native dependencies fail the job instead of reporting a skipped integration as success.
+The native checks also create actual saved Wi-Fi profiles and verify auto-connect, MAC and discovery settings across reload and baseline restoration. No physical radio association is claimed. The real integration job is required by release publication. Missing namespace privileges or native dependencies fail the job instead of reporting a skipped integration as success.
 
 Guided-access regression coverage must additionally exercise:
 

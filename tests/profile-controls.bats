@@ -148,12 +148,17 @@ setup() {
 }
 @test 'external firewall edits are preserved and block both switching and restore' {
     profile_controls::apply firewall conference
+    baseline=$(profile_controls::_read firewall)
     printf 'administrator change\n' >>"$PROFILE_ETC/ufw/user.rules"
     : >"$CALLS"
     run profile_controls::apply firewall office
     [ "$status" -ne 0 ]
     run profile_controls::restore firewall
     [ "$status" -ne 0 ]
+    [ "$(profile_controls::_read firewall)" = "$baseline" ]
+    run profile_controls::restore firewall
+    [ "$status" -ne 0 ]
+    [ "$(profile_controls::_read firewall)" = "$baseline" ]
     run grep -E '^ufw (default|--force|allow|reload)' "$CALLS"
     [ "$status" -eq 1 ]
     grep -q 'administrator change' "$PROFILE_ETC/ufw/user.rules"
