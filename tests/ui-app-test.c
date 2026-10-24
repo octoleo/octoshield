@@ -249,6 +249,38 @@ static void test_data_models(void)
     test_app.operation = NULL;
     test_app.usb_inventory = FALSE;
     render_status(&test_app, NULL);
+    update_actions(&test_app);
+}
+
+static void test_profile_choice_freshness(void)
+{
+    for (guint i = 0; i < test_app.profile_ids->len; i++)
+        if (g_str_equal(g_ptr_array_index(test_app.profile_ids, i), "home")) gtk_drop_down_set_selected(test_app.edit_profile, i);
+    GtkDropDown *automatic = g_hash_table_lookup(test_app.setting_choices, "network.autoconnect");
+    GtkDropDown *ssh = g_hash_table_lookup(test_app.setting_choices, "services.ssh");
+    Operation operation = {.app = &test_app, .title = "Inspect profile configuration"};
+    test_app.operation = &operation;
+    const char *known = "{\"id\":\"home\",\"network\":{\"autoconnect\":true},\"services\":{\"ssh\":\"enabled\"}}";
+    handle_data_log(&test_app, known);
+    g_assert_cmpuint(gtk_drop_down_get_selected(automatic), ==, 0);
+    g_assert_cmpuint(gtk_drop_down_get_selected(ssh), ==, 0);
+    handle_data_log(&test_app, "{\"id\":\"home\"}");
+    g_assert_cmpuint(gtk_drop_down_get_selected(automatic), ==, 2);
+    g_assert_cmpuint(gtk_drop_down_get_selected(ssh), ==, 3);
+    handle_data_log(&test_app, known);
+    test_app.operation = NULL;
+    for (guint i = 0; i < test_app.profile_ids->len; i++)
+        if (g_str_equal(g_ptr_array_index(test_app.profile_ids, i), "office")) gtk_drop_down_set_selected(test_app.edit_profile, i);
+    g_assert_cmpuint(gtk_drop_down_get_selected(automatic), ==, 2);
+    g_assert_cmpuint(gtk_drop_down_get_selected(ssh), ==, 3);
+    g_assert_null(strstr(gtk_label_get_text(test_app.profile_details), "Saved profile: home"));
+    ProfileBinding binding = {.app = &test_app, .command = PROFILE_SET, .profile = test_app.edit_profile, .key = "services.ssh", .choice = ssh};
+    profile_clicked(NULL, &binding);
+    g_assert_null(test_app.preview); g_assert_null(test_app.operation);
+    binding.key = "network.autoconnect"; binding.choice = automatic;
+    profile_clicked(NULL, &binding);
+    g_assert_null(test_app.preview); g_assert_null(test_app.operation);
+    update_actions(&test_app);
 }
 
 static void receive_data_chunks(Operation *operation, const char *json)
@@ -305,6 +337,7 @@ static void test_large_data_records(void)
     test_app.operation = NULL;
     test_app.usb_inventory = FALSE;
     render_status(&test_app, NULL);
+    update_actions(&test_app);
 }
 
 static void test_accounts_entry(void)
@@ -722,18 +755,65 @@ static void test_guided_access_and_connections(void)
     g_assert_cmpstr(args[6], ==, "wlp2s0");
     g_assert_cmpstr(args[7], ==, "60");
     g_assert_false(gtk_widget_get_visible(test_app.access_custom));
-    gtk_drop_down_set_selected(test_app.access_network, GTK_INVALID_LIST_POSITION);
+    g_assert_true(json_parser_load_from_data(parser, "{\"kind\":\"connections\",\"connections\":[]}", -1, NULL));
+    g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
+    g_assert_cmpuint(test_app.lan_options->len, ==, 0);
     g_auto(GStrv) missing = access_arguments(&test_app, &error);
     g_assert_null(missing); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
-    gtk_drop_down_set_selected(test_app.access_network, 0);
+    g_assert_true(json_parser_load_from_data(parser, data, -1, NULL));
+    g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
     test_app.connections_loaded = FALSE;
     g_auto(GStrv) stale = access_arguments(&test_app, &error);
     g_assert_null(stale); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
     test_app.connections_loaded = TRUE;
-    gtk_stack_set_visible_child_name(test_app.pages, "office");
+    update_actions(&test_app);
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    select_page(&test_app, "office");
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-guided-access.png");
-    gtk_stack_set_visible_child_name(test_app.pages, "privacy");
+    select_page(&test_app, "privacy");
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-connection-privacy.png");
+}
+
+static void test_ambiguous_network_and_privacy(void)
+{
+    g_autoptr(JsonParser) parser = json_parser_new();
+    const char *data = "{\"kind\":\"connections\",\"connections\":["
+        "{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Workshop Wi-Fi\",\"type\":\"wifi\",\"interface\":\"wlp2s0\",\"active\":true,\"lan_candidate\":true,\"subnets\":[\"192.168.20.0/24\"],\"autoconnect\":\"unknown\",\"mdns\":\"0\",\"llmnr\":\"2\",\"mac\":\"random\"},"
+        "{\"uuid\":\"33333333-3333-3333-3333-333333333333\",\"name\":\"Ethernet\",\"type\":\"ethernet\",\"interface\":\"enp1s0\",\"active\":true,\"lan_candidate\":true,\"subnets\":[\"192.168.30.0/24\"]}]}";
+    g_assert_true(json_parser_load_from_data(parser, data, -1, NULL));
+    g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
+    g_assert_cmpuint(test_app.lan_options->len, ==, 2);
+    /* Use a real placeholder: some GTK versions retain an existing choice
+     * when asked for GTK_INVALID_LIST_POSITION. */
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_network), ==, 2);
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) ambiguous = access_arguments(&test_app, &error);
+    g_assert_null(ambiguous); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    gtk_drop_down_set_selected(test_app.access_network, 1);
+    g_auto(GStrv) chosen = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(chosen);
+    g_assert_cmpstr(chosen[5], ==, "192.168.30.0/24");
+    g_assert_cmpstr(chosen[6], ==, "enp1s0");
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_autoconnect), ==, 2);
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_discovery), ==, 2);
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_mac), ==, 2);
+    GtkWidget *save = gtk_button_new();
+    g_object_ref_sink(save);
+    g_object_set_data(G_OBJECT(save), "privacy-key", "discovery");
+    privacy_save_clicked(GTK_BUTTON(save), &test_app);
+    g_assert_null(test_app.operation); g_assert_null(test_app.preview);
+    GListModel *windows = gtk_window_get_toplevels();
+    gboolean refused = FALSE;
+    for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
+        g_autoptr(GtkWindow) window = g_list_model_get_item(windows, i);
+        if (ADW_IS_MESSAGE_DIALOG(window) && g_strcmp0(adw_message_dialog_get_heading(ADW_MESSAGE_DIALOG(window)), "Choose a connection and setting") == 0) {
+            refused = TRUE;
+            gtk_window_destroy(window);
+            break;
+        }
+    }
+    g_assert_true(refused);
+    g_object_unref(save);
 }
 
 static void test_access_rows_and_edit(void)
@@ -759,6 +839,20 @@ static void test_access_rows_and_edit(void)
     access_cancel_edit(NULL, &test_app);
     g_assert_null(test_app.access_edit_id);
     g_assert_true(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)) == row);
+    JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+    json_object_set_string_member(root, "profile", "missing-custom-profile");
+    g_assert_false(show_access(&test_app, root));
+    g_assert_false(test_app.access_loaded);
+    g_assert_null(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.access_summary), "missing from the current profile list"));
+    g_auto(GStrv) unknown = access_arguments(&test_app, &error);
+    g_assert_null(unknown); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    json_object_set_string_member(root, "profile", "home");
+    g_assert_true(show_access(&test_app, root));
+    g_auto(GStrv) refreshed = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(refreshed);
+    g_assert_cmpstr(refreshed[1], ==, "allow");
+    g_assert_cmpstr(refreshed[2], ==, "home");
 }
 
 static void test_independent_encryption_and_details(void)
@@ -780,7 +874,8 @@ static void test_independent_encryption_and_details(void)
     g_assert_cmpstr(gtk_label_get_text(test_app.diagnostics_title), ==, "Storage encryption");
     g_assert_true(widget_has_label_text(GTK_WIDGET(test_app.diagnostics_findings), "/dev/mapper/system-root"));
     g_assert_true(widget_has_label_text(GTK_WIDGET(test_app.diagnostics_findings), "No change is required for this filesystem."));
-    gtk_stack_set_visible_child_name(test_app.pages, "diagnostics");
+    update_actions(&test_app);
+    select_page(&test_app, "diagnostics");
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-storage-details.png");
 }
 
@@ -856,8 +951,10 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/status/observed-partial-and-overrides", test_observed_status_and_overrides);
     g_test_add_func("/ui/status/catalog-preserves-selection", test_profile_catalog_selection);
     g_test_add_func("/ui/status/device-and-update-models", test_data_models);
+    g_test_add_func("/ui/status/profile-choice-freshness", test_profile_choice_freshness);
     g_test_add_func("/ui/status/large-profile-and-device-records", test_large_data_records);
     g_test_add_func("/ui/access/guided-web-and-physical-networks", test_guided_access_and_connections);
+    g_test_add_func("/ui/access/ambiguous-networks-and-unknown-privacy", test_ambiguous_network_and_privacy);
     g_test_add_func("/ui/access/inline-rules-and-atomic-edit", test_access_rows_and_edit);
     g_test_add_func("/ui/access/stale-status-retains-effective-profile", test_access_profile_freshness);
     g_test_add_func("/ui/diagnostics/private-data-rejection-and-queue", test_private_data_rejection_and_queue);

@@ -281,6 +281,7 @@ struct App {
     gchar *access_edit_id;
     gchar *access_edit_profile;
     gchar *firewall_profile;
+    gboolean access_profile_invalid;
     JsonArray *connection_data;
     GPtrArray *lan_options;
     GtkDropDown *privacy_connection;
@@ -352,6 +353,17 @@ static void access_cancel_edit(GtkButton *button, gpointer data);
 static gboolean administrator_ready(App *app)
 {
     return !app->auth_required || (app->session != NULL && app->session->ready && !app->session->closed);
+}
+
+static void reset_profile_choices(App *app)
+{
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, app->setting_choices);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        GListModel *model = gtk_drop_down_get_model(value);
+        gtk_drop_down_set_selected(value, g_list_model_get_n_items(model) - 1);
+    }
 }
 
 static const char *brand_resource(App *app)
@@ -888,11 +900,7 @@ static void launch_request(Request *request)
     }
     if (g_str_equal(request->title, "Inspect profile configuration")) {
         gtk_label_set_text(app->profile_details, "Loading the selected profile configuration…");
-        GHashTableIter iter;
-        gpointer value;
-        g_hash_table_iter_init(&iter, app->setting_choices);
-        while (g_hash_table_iter_next(&iter, NULL, &value))
-            gtk_drop_down_set_selected(value, GTK_INVALID_LIST_POSITION);
+        reset_profile_choices(app);
     }
     gtk_text_buffer_set_text(app->log, "", 0);
     append_log(app, request->title);
@@ -2344,15 +2352,16 @@ static void handle_data_log(App *app, const char *text)
             g_auto(GStrv) path = g_strsplit(key, ".", 2);
             JsonObject *section = object_member(root, path[0]);
             JsonNode *setting = section != NULL ? json_object_get_member(section, path[1]) : NULL;
-            guint selection = GTK_INVALID_LIST_POSITION;
+            gboolean service = g_str_has_prefix(key, "services.");
+            guint selection = service ? 3U : 2U;
             const char *description = "unknown";
             if (setting != NULL && JSON_NODE_HOLDS_VALUE(setting)) {
-                if (json_node_get_value_type(setting) == G_TYPE_BOOLEAN) {
+                if (!service && json_node_get_value_type(setting) == G_TYPE_BOOLEAN) {
                     selection = json_node_get_boolean(setting) ? 0 : 1;
                     description = selection == 0 ? "enabled" : "disabled";
-                } else if (json_node_get_value_type(setting) == G_TYPE_STRING) {
+                } else if (service && json_node_get_value_type(setting) == G_TYPE_STRING) {
                     description = json_node_get_string(setting);
-                    selection = g_str_equal(description, "enabled") ? 0 : g_str_equal(description, "disabled") ? 1 : g_str_equal(description, "baseline") ? 2 : GTK_INVALID_LIST_POSITION;
+                    selection = g_str_equal(description, "enabled") ? 0 : g_str_equal(description, "disabled") ? 1 : g_str_equal(description, "baseline") ? 2 : 3;
                 }
             }
             if (g_strcmp0(id, selected_profile(app, app->edit_profile)) == 0)
@@ -2435,6 +2444,14 @@ static void build_overview(App *app)
         group_add(group, status_row(app, "exposures", exposure[i][0], exposure[i][1]));
 }
 
+static void edit_profile_changed(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)object; (void)property;
+    App *app = data;
+    reset_profile_choices(app);
+    gtk_label_set_text(app->profile_details, "Inspect this profile to view its saved settings, or choose a new value before saving.");
+}
+
 static void build_protections(App *app)
 {
     GtkWidget *page = page_new(app, "protections", "Profiles & protections", "Use an environment for each control, or restore its previous settings. Authentication is requested only when you perform a system operation.");
@@ -2466,11 +2483,11 @@ static void build_protections(App *app)
     GtkWidget *name_fields[] = {name, NULL};
     group_add(group, control_row("Copy selected profile", "Includes its settings and remembered USB permissions.", profile_button(app, "Create profile", PROFILE_CREATE, app->edit_profile, NULL, NULL, NULL, name_fields)));
     static const char *const settings[][2] = {{"network.autoconnect", "Previously trusted automatic connections"}, {"network.discovery", "Local network discovery"}, {"services.printing", "Printing service"}, {"services.bluetooth", "Bluetooth service"}, {"services.ssh", "Incoming SSH service"}, {"services.discovery", "Discovery service"}, {"services.samba", "File sharing service"}, {"services.remote_desktop", "System remote desktop service"}, {"monitor.enabled", "Security event monitoring"}};
-    static const char *const boolean_choices[] = {"Enabled", "Disabled", NULL};
-    static const char *const service_choices[] = {"Enabled", "Disabled", "Previous setting", NULL};
+    static const char *const boolean_choices[] = {"Enabled", "Disabled", "Choose a value…", NULL};
+    static const char *const service_choices[] = {"Enabled", "Disabled", "Previous setting", "Choose a value…", NULL};
     for (gsize i = 0; i < G_N_ELEMENTS(settings); i++) {
         GtkDropDown *choice = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(g_str_has_prefix(settings[i][0], "services.") ? service_choices : boolean_choices));
-        gtk_drop_down_set_selected(choice, GTK_INVALID_LIST_POSITION);
+        gtk_drop_down_set_selected(choice, g_str_has_prefix(settings[i][0], "services.") ? 3 : 2);
         g_hash_table_insert(app->setting_choices, (gpointer)settings[i][0], choice);
         g_object_set_data(G_OBJECT(choice), "setting-title", (gpointer)settings[i][1]);
         GtkWidget *edit = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -2480,6 +2497,7 @@ static void build_protections(App *app)
     }
     app->profile_details = GTK_LABEL(text_label("Inspect a profile to view its saved configuration and firewall rule identifiers.", "dim-label"));
     gtk_label_set_selectable(app->profile_details, TRUE);
+    g_signal_connect(app->edit_profile, "notify::selected", G_CALLBACK(edit_profile_changed), app);
     gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->profile_details));
     group = group_new(page, "Your GNOME session", "Desktop settings are changed as your normal user and have their own private baseline.");
     group_add(group, action_row(app, "desktop-apply", "Activate", "system-lock-screen-symbolic"));
@@ -2702,6 +2720,11 @@ static void access_cancel_edit(GtkButton *button, gpointer data)
 
 static GStrv access_arguments(App *app, GError **error)
 {
+    if (app->access_profile_invalid) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+            "Refresh system status and permissions to establish the firewall profile before allowing access.");
+        return NULL;
+    }
     const char *profile = app->access_edit_id != NULL ? app->access_edit_profile : selected_profile(app, app->access_profile);
     guint preset = gtk_drop_down_get_selected(app->access_preset);
     const char *ports = preset == 0 ? "80,443" : preset == 1 ? "22" : gtk_editable_get_text(app->access_ports);
@@ -2781,8 +2804,19 @@ static gboolean show_access(App *app, JsonObject *root)
     JsonArray *rules = array_member(root, "rules");
     if (app->access_rules == NULL || rules == NULL || json_array_get_length(rules) > 256) return FALSE;
     const char *profile = string_member(root, "profile", "unmanaged");
+    guint profile_index = GTK_INVALID_LIST_POSITION;
     for (guint i = 0; i < app->profile_ids->len; i++)
-        if (g_str_equal(g_ptr_array_index(app->profile_ids, i), profile)) gtk_drop_down_set_selected(app->access_profile, i);
+        if (g_str_equal(g_ptr_array_index(app->profile_ids, i), profile)) profile_index = i;
+    if (profile_index == GTK_INVALID_LIST_POSITION) {
+        app->access_profile_invalid = TRUE;
+        access_cancel_edit(NULL, app);
+        clear_list(app->access_rules);
+        app->access_loaded = FALSE;
+        gtk_label_set_text(app->access_summary, "The inspected firewall profile is missing from the current profile list. Refresh system status and permissions before continuing.");
+        return FALSE;
+    }
+    gtk_drop_down_set_selected(app->access_profile, profile_index);
+    app->access_profile_invalid = FALSE;
     g_autofree gchar *summary = octoshield_text_sanitize(string_member(root, "summary", "Review the permissions and their observed state below."), -1);
     gtk_label_set_text(app->access_summary, summary);
     clear_list(app->access_rules);
@@ -2834,9 +2868,9 @@ static void privacy_selected(GObject *object, GParamSpec *property, gpointer dat
     App *app = data;
     JsonObject *connection = selected_connection(app);
     if (connection == NULL) {
-        gtk_drop_down_set_selected(app->privacy_autoconnect, GTK_INVALID_LIST_POSITION);
-        gtk_drop_down_set_selected(app->privacy_discovery, GTK_INVALID_LIST_POSITION);
-        gtk_drop_down_set_selected(app->privacy_mac, GTK_INVALID_LIST_POSITION);
+        gtk_drop_down_set_selected(app->privacy_autoconnect, 2);
+        gtk_drop_down_set_selected(app->privacy_discovery, 2);
+        gtk_drop_down_set_selected(app->privacy_mac, 2);
         gtk_label_set_text(app->privacy_source, "Select a connection to see its configuration sources.");
         gtk_widget_set_visible(app->privacy_mac_row, FALSE);
         return;
@@ -2844,12 +2878,12 @@ static void privacy_selected(GObject *object, GParamSpec *property, gpointer dat
     const char *type = string_member(connection, "type", "");
     gtk_widget_set_visible(app->privacy_mac_row, g_str_equal(type, "wifi") || g_str_equal(type, "802-11-wireless"));
     const char *autoconnect = string_member(connection, "autoconnect", "unknown");
-    gtk_drop_down_set_selected(app->privacy_autoconnect, g_str_equal(autoconnect, "yes") ? 0 : g_str_equal(autoconnect, "no") ? 1 : GTK_INVALID_LIST_POSITION);
+    gtk_drop_down_set_selected(app->privacy_autoconnect, g_str_equal(autoconnect, "yes") ? 0 : g_str_equal(autoconnect, "no") ? 1 : 2);
     const char *mdns = string_member(connection, "mdns", "");
     const char *llmnr = string_member(connection, "llmnr", "");
-    gtk_drop_down_set_selected(app->privacy_discovery, g_str_equal(mdns, "2") && g_str_equal(llmnr, "2") ? 0 : g_str_equal(mdns, "0") && g_str_equal(llmnr, "0") ? 1 : GTK_INVALID_LIST_POSITION);
+    gtk_drop_down_set_selected(app->privacy_discovery, g_str_equal(mdns, "2") && g_str_equal(llmnr, "2") ? 0 : g_str_equal(mdns, "0") && g_str_equal(llmnr, "0") ? 1 : 2);
     const char *mac = string_member(connection, "mac", "");
-    gtk_drop_down_set_selected(app->privacy_mac, g_str_equal(mac, "stable") ? 0 : g_str_equal(mac, "permanent") ? 1 : GTK_INVALID_LIST_POSITION);
+    gtk_drop_down_set_selected(app->privacy_mac, g_str_equal(mac, "stable") ? 0 : g_str_equal(mac, "permanent") ? 1 : 2);
     JsonObject *runtime = object_member(connection, "runtime");
     g_autofree gchar *summary = octoshield_text_sanitize(string_member(runtime, "summary", "Active connection privacy has not been verified."), -1);
     g_autofree gchar *coverage = g_strdup_printf("%s%s", summary, app->connections_incomplete ? "\nSome connections could not be inspected. Refresh to retry; the list may be incomplete." : "");
@@ -2905,8 +2939,11 @@ static gboolean show_connections(App *app, JsonObject *root)
     }
     gtk_drop_down_set_model(app->privacy_connection, G_LIST_MODEL(names));
     gtk_drop_down_set_selected(app->privacy_connection, selected_index == GTK_INVALID_LIST_POSITION && json_array_get_length(app->connection_data) > 0 ? 0 : selected_index);
+    /* GTK versions differ in whether a nonempty dropdown can be unselected.
+     * A real placeholder keeps ambiguous scopes outside the valid indices. */
+    if (app->lan_options->len != 1) gtk_string_list_append(networks, app->lan_options->len == 0 ? "No local network detected" : "Choose a local network…");
     gtk_drop_down_set_model(app->access_network, G_LIST_MODEL(networks));
-    gtk_drop_down_set_selected(app->access_network, app->lan_options->len == 1 ? 0 : GTK_INVALID_LIST_POSITION);
+    gtk_drop_down_set_selected(app->access_network, app->lan_options->len == 1 ? 0 : app->lan_options->len);
     adw_action_row_set_subtitle(ADW_ACTION_ROW(app->access_network_row), app->lan_options->len == 0 ? "No active physical Wi-Fi or Ethernet subnet was detected. Connect to your local network and refresh, or enter a custom scope." :
         app->lan_options->len == 1 ? "This subnet and incoming interface limit the permission. The network itself is not authenticated." : "Several subnets are connected. Choose which subnet's devices may connect; the permission does not include the others.");
     g_object_unref(names); g_object_unref(networks);
@@ -2951,14 +2988,14 @@ static void build_privacy(App *app)
     app->privacy_summary = GTK_LABEL(text_label("Refresh connections to inspect your networks.", "dim-label"));
     gtk_box_append(GTK_BOX(page), GTK_WIDGET(app->privacy_summary));
     group = group_new(page, "Privacy choices", "Each Save changes only the selected connection after review. Private MAC addresses can affect networks that register your device address.");
-    app->privacy_autoconnect = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Connect automatically", "Connect manually", NULL}));
-    app->privacy_discovery = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Allow local name discovery", "Disable local name discovery", NULL}));
-    app->privacy_mac = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Private stable address", "Hardware address", NULL}));
+    app->privacy_autoconnect = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Connect automatically", "Connect manually", "Other / unknown · choose…", NULL}));
+    app->privacy_discovery = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Allow local name discovery", "Disable local name discovery", "Other / unknown · choose…", NULL}));
+    app->privacy_mac = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Private stable address", "Hardware address", "Other / unknown · choose…", NULL}));
     GtkDropDown *choices[] = {app->privacy_autoconnect, app->privacy_discovery, app->privacy_mac};
     static const char *const keys[] = {"autoconnect", "discovery", "mac"};
     static const char *const names[] = {"Automatic connection", "Local discovery · mDNS / LLMNR", "Wi-Fi MAC address"};
     for (guint i = 0; i < G_N_ELEMENTS(choices); i++) {
-        gtk_drop_down_set_selected(choices[i], GTK_INVALID_LIST_POSITION);
+        gtk_drop_down_set_selected(choices[i], 2);
         g_ptr_array_add(app->operation_widgets, choices[i]);
         GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
         gtk_box_append(GTK_BOX(controls), GTK_WIDGET(choices[i]));
