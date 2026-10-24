@@ -365,7 +365,7 @@ connections::set() {
     core::log "Connection: $(jq -r .name <<<"$record"). Change $key to $value for this connection only."
     core::log "Current saved choices: $(jq -c '{autoconnect,llmnr,mdns,mac}' <<<"$record")."
     if [[ $key == autoconnect ]]; then
-        core::log 'This saves the automatic-connection preference. It does not require a reconnect or connect a disconnected network now.'
+        core::log 'This saves the automatic-connection preference without requesting a reconnect. NetworkManager decides when an eligible connection activates automatically.'
     else
         core::log 'Saved discovery/address changes require a separate reconnect. No active connection will be disconnected by saving.'
     fi

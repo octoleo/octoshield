@@ -46,6 +46,7 @@ nm_pid=$!
 cleanup() {
     result=$?
     if ((result)); then cat "$temporary/NetworkManager.log" >&2; fi
+    if declare -F core::end >/dev/null; then core::end; fi
     kill "$nm_pid" "$bus_pid" 2>/dev/null || :
     wait "$nm_pid" 2>/dev/null || :
 }
@@ -71,8 +72,7 @@ for module in core controls profiles profile_controls office status connections;
     source "$root/src/lib/$module.sh"
 done
 CORE_STATE="$temporary/state"
-CORE_TRANSACTION=integration
-install -d -m 0700 "$CORE_STATE/backups/$CORE_TRANSACTION/original"
+core::begin 'Real NetworkManager integration'
 core::confirm() { printf 'Integration consent: %s\n' "$*"; }
 
 connections::set "$first" autoconnect true

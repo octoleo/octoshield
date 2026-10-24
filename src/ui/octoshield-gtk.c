@@ -2964,7 +2964,7 @@ static void privacy_save_clicked(GtkButton *button, gpointer data)
     const char *value = g_str_equal(key, "mac") ? (index == 0 ? "stable" : "permanent") : (index == 0 ? "true" : "false");
     const char *args[] = {"connections", "set", string_member(connection, "uuid", ""), key, value};
     start_action(app, "Save connection privacy", g_str_equal(key, "autoconnect") ?
-        "Save the selected network's automatic-connection preference. No reconnect is required; this does not connect a disconnected network now." :
+        "Save the selected network's automatic-connection preference. No reconnect is required. NetworkManager decides when an eligible connection activates automatically." :
         "Review this connection's saved privacy setting. Reconnect separately when ready to activate discovery or address changes.", TRUE, TRUE, G_N_ELEMENTS(args), args);
 }
 
