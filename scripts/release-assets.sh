@@ -74,7 +74,7 @@ Files:
   LICENSE                         Project license
   docs/features.md                Detailed application capabilities
   docs/distribution.md            Native installation and lifecycle instructions
-  gallery/                        All twelve light/dark application page captures
+  gallery/                        All sixteen light/dark application page captures
   branding/                       Original supplied PNG artwork, unchanged
   data/                           Standard AppStream and desktop-entry metadata
   manifest.json                   Version, source commit and image dimensions
@@ -132,7 +132,7 @@ release_assets::main() {
     [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
     for file in "${sources[@]}"; do release_assets::require_file "$root/$file" || return 1; done
     # Validate all input media before creating the output directory.
-    for page in overview protections usb office monitoring recovery; do
+    for page in overview protections usb office privacy diagnostics monitoring recovery; do
         for theme in light dark; do
             name="OctoShield-$page-$theme.png"
             dimensions=$(release_assets::png_dimensions "$root/build/screenshots/$name") || return 1

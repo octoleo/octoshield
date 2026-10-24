@@ -21,7 +21,7 @@ VERSION
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh4kAAAAASUVORK5CYII=' |
         base64 --decode >"$BATS_TEST_TMPDIR/pixel.png"
     local page theme
-    for page in overview protections usb office monitoring recovery; do
+    for page in overview protections usb office privacy diagnostics monitoring recovery; do
         for theme in light dark; do
             cp "$BATS_TEST_TMPDIR/pixel.png" "$FIXTURE/build/screenshots/OctoShield-$page-$theme.png"
         done
@@ -34,10 +34,10 @@ VERSION
     git -C "$FIXTURE" -c user.name='Fixture Author' -c user.email='fixture@example.invalid' commit -qm fixture
 }
 
-@test 'release assets include all twelve captures, original branding and valid checksums' {
+@test 'release assets include all sixteen captures, original branding and valid checksums' {
     run bash "$FIXTURE/scripts/release-assets.sh" "$OUTPUT"
     [ "$status" -eq 0 ]
-    [ "$(find "$OUTPUT/gallery" -type f | wc -l)" -eq 12 ]
+    [ "$(find "$OUTPUT/gallery" -type f | wc -l)" -eq 16 ]
     cmp "$FIXTURE/data/branding/OctoShield-light.png" "$OUTPUT/branding/OctoShield-light.png"
     cmp "$FIXTURE/data/branding/OctoShield-dark.png" "$OUTPUT/branding/OctoShield-dark.png"
     cmp "$FIXTURE/build/screenshots/OctoShield-overview-light.png" "$OUTPUT/gallery/OctoShield-overview-light.png"
@@ -56,7 +56,7 @@ VERSION
     commit=$(git -C "$FIXTURE" rev-parse HEAD)
     jq -e --arg commit "$commit" '.version == "0.2.0" and .application_id == "io.vdm.OctoShield" and
       .source.commit == $commit and .source.worktree_dirty == false and
-      (.gallery | length) == 12 and (.branding | length) == 2 and
+      (.gallery | length) == 16 and (.branding | length) == 2 and
       all(.gallery[]; .width == 1 and .height == 1)' "$OUTPUT/manifest.json"
 }
 
