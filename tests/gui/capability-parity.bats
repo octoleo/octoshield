@@ -201,7 +201,7 @@ test::reject_privileged() {
     local ports='' index value uuid=11111111-2222-3333-4444-555555555555
     for ((index = 10000; index < 10032; index++)); do
         [[ -z $ports ]] || ports+=,
-        ports+=$index
+        ports+="$index"
     done
     [ "${#ports}" -eq 191 ]
     test::privileged_parity access update home g1-2-3 "$ports" tcp any any 0
@@ -209,7 +209,7 @@ test::reject_privileged() {
     ports=''
     for ((index = 1; index <= 33; index++)); do
         [[ -z $ports ]] || ports+=,
-        ports+=$index
+        ports+="$index"
     done
     test::reject_privileged access allow home "$ports" tcp any any 0
     for value in '80,80' '80,' ',443' '0' '01' '65536' '80;id' "\$(id)"; do
