@@ -188,6 +188,50 @@ cups.service'
     [ "$status" -eq 2 ]
 }
 
+@test 'firewall recovery commands use fixed validated system arguments' {
+    run cli::main access recover office
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <access> <recover> <office>' ]
+    run cli::main access reconcile office
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <access> <reconcile> <office>' ]
+    run cli::main access restore
+    [ "$status" -eq 0 ]
+    [ "$output" = 'SYSTEM <access> <restore>' ]
+    for command in recover reconcile; do
+        run cli::main access "$command" '../office'
+        [ "$status" -eq 2 ]
+        run cli::main access "$command" office extra
+        [ "$status" -eq 2 ]
+    done
+    run cli::main access restore firewall
+    [ "$status" -eq 2 ]
+}
+
+@test 'a blocked access menu offers recovery before asking for permission details' {
+    cli::system() {
+        if [[ $1 == access && $2 == list ]]; then
+            printf '%s\n' '{"profile":"office","ready":false,"summary":"Recovery required","recovery":{"observed":{"summary":"Native rules are readable"},"message":"Previous application failed"},"rules":[]}'
+        else
+            printf 'SYSTEM'
+            printf ' <%s>' "$@"
+            printf '\n'
+        fi
+    }
+    run cli::access_menu <<<'1'
+    [ "$status" -ne 0 ]
+    [[ $output != *'Who may connect?'* && $output != *'SYSTEM <access> <allow>'* ]]
+    run cli::access_menu <<<'5'
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <access> <recover> <office>'* ]]
+    run cli::access_menu <<<'6'
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <access> <restore>'* ]]
+    run cli::access_menu <<<'7'
+    [ "$status" -eq 0 ]
+    [[ $output == *'SYSTEM <access> <reconcile> <office>'* ]]
+}
+
 @test 'connection and diagnostic commands share the bounded system route' {
     local uuid=12345678-abcd-1234-5678-123456789abc
     run cli::main connections set "$uuid" discovery false
@@ -205,7 +249,7 @@ cups.service'
 @test 'web access menu selects effective profile and detected LAN without copied IDs' {
     cli::system() {
         case "$1 $2" in
-            'access list') printf '%s\n' '{"kind":"access","profile":"office","summary":"Current permissions","rules":[]}' ;;
+            'access list') printf '%s\n' '{"kind":"access","profile":"office","ready":true,"summary":"Current permissions","rules":[]}' ;;
             'connections list') printf '%s\n' '{"connections":[{"name":"Office cable","active":true,"lan_candidate":true,"interface":"enp3s0","subnets":["192.0.2.0/24"]},{"name":"Docker","active":true,"lan_candidate":false,"interface":"docker0","subnets":["172.17.0.0/16"]}]}' ;;
             *)
                 printf 'SYSTEM'
@@ -227,7 +271,7 @@ cups.service'
 @test 'permission selection revokes grouped rule without identifier entry' {
     cli::system() {
         if [[ $1 == access && $2 == list ]]; then
-            printf '%s\n' '{"profile":"home","summary":"Verified","rules":[{"id":"g123-4-5","label":"Web","state":"active","source":"192.0.2.0/24","interface":"enp3s0"}]}'
+            printf '%s\n' '{"profile":"home","ready":true,"summary":"Verified","rules":[{"id":"g123-4-5","label":"Web","state":"active","source":"192.0.2.0/24","interface":"enp3s0"}]}'
         else
             printf 'SYSTEM'
             printf ' <%s>' "$@"

@@ -21,6 +21,7 @@ setup() {
         [[ $CONFIRM == yes ]]
     }
     controls::local_console() { :; }
+    profile_controls::snapshot() { printf '{"fixture":"unchanged"}\n'; }
     # Ownership syscalls are the privilege boundary; filesystem/data validation
     # remains real, so the suite can run as an ordinary CI account.
     chown() { :; }
@@ -60,6 +61,18 @@ setup() {
     [ "$(jq length <<<"$output")" -eq 4 ]
     jq -e 'all(.[];(.usb|length)==0 and .services.ssh=="disabled")' <<<"$output"
     [ ! -e "$CORE_STATE/profiles" ]
+}
+
+@test 'private operation transaction is validated and excluded from public status' {
+    CORE_TRANSACTION=20261025T113206Z-1749361
+    profiles::_result firewall failed 'Native application failed.'
+    profiles::state | jq -e --arg id "$CORE_TRANSACTION" '.results.firewall.transaction==$id'
+    profiles::public_status | jq -e '.results.firewall|has("transaction")|not'
+    run profiles::_validate_document <<<"$(profiles::state | jq '.results.firewall.transaction="../escape"')"
+    [ "$status" -ne 0 ]
+    document=$(profiles::state | jq 'del(.results.firewall.transaction)')
+    run profiles::_validate_document <<<"$document"
+    [ "$status" -eq 0 ]
 }
 @test 'argument validation rejects option injection malformed addresses and broad unexpected keys' {
     for name in ../oops --profile 'a;id' 'AProfile' unmanaged; do
@@ -135,6 +148,17 @@ setup() {
     grep -qx 'restore firewall' "$CALLS"
     [ "$(profiles::state | jq -r .results.firewall.status)" = unmanaged ]
 }
+@test 'declining the concrete baseline preview preserves the previous result and assignment' {
+    profiles::dispatch apply office firewall
+    profiles::_result firewall failed 'Earlier operation remains available.'
+    before=$(profiles::state)
+    profile_controls::restore() { return 3; }
+    run profiles::dispatch restore firewall
+    [ "$status" -eq 3 ]
+    [ "$(profiles::state)" = "$before" ]
+    [ "$(profiles::active firewall)" = office ]
+}
+
 @test 'invalid JSON or unsafe state permissions fails closed' {
     profiles::dispatch create custom home
     printf '{"schema":99}\n' >"$CORE_STATE/profiles/state.json"

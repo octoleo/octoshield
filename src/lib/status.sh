@@ -26,7 +26,7 @@ status::unit() {
 }
 
 status::firewall() {
-    local observed raw defaults
+    local observed ipv4 ipv6 rules4 rules6
     if ! command -v ufw >/dev/null 2>&1; then
         status::result inactive 'UFW is not installed.'
         return
@@ -43,14 +43,15 @@ status::firewall() {
         status::result unknown 'UFW returned an unrecognized status.'
         return
     }
-    defaults=$(awk -F= '/^[[:space:]]*IPV6[[:space:]]*=/ {gsub(/[[:space:]"\047]/,"",$2); value=$2} END {print value}' "$STATUS_ETC/default/ufw" 2>/dev/null) || defaults=
-    raw=$(status::run ufw show raw) || raw=
-    if [[ $observed != *'deny (incoming)'* || $observed != *'allow (outgoing)'* || $observed != *'deny (routed)'* || $defaults != yes || $raw != *'ufw6-before-input'* ]]; then
-        status::result partial 'UFW is active, but incoming, forwarding, outgoing, and IPv6 baseline protections could not all be verified.'
-    elif [[ $observed == *'ALLOW IN'* || $observed == *'ALLOW FWD'* || $observed == *'LIMIT IN'* ]]; then
+    if ! declare -F profile_firewall::defaults >/dev/null || ! profile_firewall::defaults "$STATUS_ETC/default/ufw" 2>/dev/null ||
+        ! ipv4=$(status::run iptables-save) || ! ipv6=$(status::run ip6tables-save) ||
+        ! rules4=$(profile_firewall::_native 4 "$ipv4" "$(date +%s)" 2>/dev/null) ||
+        ! rules6=$(profile_firewall::_native 6 "$ipv6" "$(date +%s)" 2>/dev/null); then
+        status::result partial 'UFW is active, but its host-input rules and IPv4/IPv6 default policies could not all be verified.'
+    elif [[ -n $rules4 || -n $rules6 ]]; then
         status::result partial 'UFW is active with incoming exceptions. Adopt a profile to manage and verify those exceptions.'
     else
-        status::result active 'UFW blocks unsolicited incoming and forwarded traffic, permits outgoing traffic, and has IPv6 rules. No managed profile is selected.'
+        status::result active 'UFW host-input rules and IPv4/IPv6 default policies are verified. No managed profile is selected; container forwarding is inspected separately.'
     fi
 }
 

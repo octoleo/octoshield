@@ -38,7 +38,7 @@
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.3.2"
+#define OCTOSHIELD_VERSION "1.3.3"
 #endif
 
 typedef struct App App;
@@ -212,6 +212,7 @@ struct Operation {
     gboolean data_truncated;
     gboolean structured_data;
     gboolean session_operation;
+    gboolean firewall_change;
     guint64 request_id;
 };
 
@@ -278,10 +279,28 @@ struct App {
     GtkLabel *access_summary;
     GtkLabel *access_editing;
     GtkButton *access_submit;
+    GtkLabel *access_recovery_summary;
+    GtkLabel *access_recovery_detail;
+    GtkButton *access_inspect;
+    GtkButton *access_apply;
+    GtkButton *access_restore;
+    GtkButton *access_reconcile;
+    GtkButton *access_last_change;
+    GtkExpander *access_failure;
+    GtkTextBuffer *access_failure_log;
     gchar *access_edit_id;
     gchar *access_edit_profile;
+    gchar *access_inspected_profile;
+    gchar *access_transaction;
+    gchar *access_network_identity;
     gchar *firewall_profile;
     gboolean access_profile_invalid;
+    gboolean access_profile_initialized;
+    gboolean access_syncing;
+    gboolean access_ready;
+    gboolean access_can_apply;
+    gboolean access_can_restore;
+    gboolean access_can_reconcile;
     JsonArray *connection_data;
     GPtrArray *lan_options;
     GtkDropDown *privacy_connection;
@@ -350,6 +369,9 @@ static gboolean show_container_plan(App *app, JsonObject *root);
 static void review_status_clicked(GtkButton *button, gpointer data);
 static void clear_list(GtkListBox *list);
 static void access_cancel_edit(GtkButton *button, gpointer data);
+static void access_update_actions(App *app, gboolean enabled);
+static void access_invalidate(App *app, const char *message);
+static void access_retain_failure(App *app);
 static gboolean administrator_ready(App *app)
 {
     return !app->auth_required || (app->session != NULL && app->session->ready && !app->session->closed);
@@ -412,6 +434,9 @@ static void branding_clear(App *app)
     g_clear_pointer(&app->firewall_profile, g_free);
     g_clear_pointer(&app->access_edit_id, g_free);
     g_clear_pointer(&app->access_edit_profile, g_free);
+    g_clear_pointer(&app->access_inspected_profile, g_free);
+    g_clear_pointer(&app->access_transaction, g_free);
+    g_clear_pointer(&app->access_network_identity, g_free);
     g_clear_pointer(&app->connection_data, json_array_unref);
     g_clear_pointer(&app->lan_options, g_ptr_array_unref);
     g_clear_pointer(&app->container_plan, json_object_unref);
@@ -752,12 +777,13 @@ static void operation_maybe_finish(Operation *operation)
                        operation->reported_success && !operation->protocol_failed;
     gboolean changed_access = g_str_equal(operation->title, "Allow network access") ||
         g_str_equal(operation->title, "Update network access") || g_str_equal(operation->title, "Revoke network access");
+    gboolean changed_firewall = operation->firewall_change;
     gboolean changed_connection = g_str_equal(operation->title, "Save connection privacy") ||
         g_str_equal(operation->title, "Reconnect selected network") || g_str_equal(operation->title, "Review external network changes");
     gboolean changed_container = g_str_equal(operation->title, "Restrict container to this computer");
     if (!success) {
         app->private_refresh = 0;
-        if (g_str_equal(operation->title, "Refresh access permissions")) gtk_label_set_text(app->access_summary, "Permission inspection failed. Read the operation details and refresh to retry.");
+        if (g_str_equal(operation->title, "Refresh access permissions")) access_invalidate(app, "Firewall inspection failed. Read the operation details and inspect again before making changes.");
         if (g_str_equal(operation->title, "Refresh connections")) gtk_label_set_text(app->privacy_summary, "Connection inspection failed. Read the operation details and refresh to retry.");
         if (g_str_equal(operation->title, "Review protection details")) gtk_label_set_text(app->diagnostics_summary, "Inspection failed. Read the operation details; no conclusion was established.");
     }
@@ -793,6 +819,7 @@ static void operation_maybe_finish(Operation *operation)
         }
         toast(app, "Review the operation details");
     }
+    if (!success && changed_firewall) access_retain_failure(app);
     gtk_spinner_stop(app->spinner);
     gtk_widget_set_visible(GTK_WIDGET(app->spinner), FALSE);
     app->operation = NULL;
@@ -809,8 +836,9 @@ static void operation_maybe_finish(Operation *operation)
     update_actions(app);
     refresh_status(app);
     maybe_prompt_usb(app);
-    if (changed_access && success) {
-        access_cancel_edit(NULL, app);
+    if (changed_firewall) {
+        if (changed_access && success) access_cancel_edit(NULL, app);
+        access_invalidate(app, "Inspecting the current firewall after this operation. Your permission draft is retained; recovery never submits it.");
         app->private_refresh |= 1U;
     }
     if (changed_connection) app->private_refresh |= 2U;
@@ -818,10 +846,6 @@ static void operation_maybe_finish(Operation *operation)
         gtk_label_set_text(app->diagnostics_summary, "This service's reviewed published host ports are now bound to localhost. Custom routing and firewall paths remain outside that verification. Keep the generated override in future deployments; the source files, recovery snapshot and command remain below.");
         if (app->container_apply != NULL) gtk_widget_set_sensitive(app->container_apply, FALSE);
         g_clear_pointer(&app->container_plan, json_object_unref);
-    }
-    if (changed_access && !success) {
-        clear_list(app->access_rules); app->access_loaded = FALSE;
-        gtk_label_set_text(app->access_summary, "The change did not complete. Read the operation details, then Refresh to verify the current permissions.");
     }
     if (changed_connection && !success) {
         app->connections_loaded = FALSE;
@@ -869,6 +893,15 @@ static void launch_request(Request *request)
     operation->app = app;
     operation->process = process;
     operation->session_operation = session_operation;
+    if (privileged && request->changes) {
+        const gchar *const *args = (const gchar *const *)&request->argv[2];
+        gsize count = g_strv_length(request->argv) - 2;
+        operation->firewall_change = (count >= 2 && (g_str_equal(args[0], "access") ||
+            ((g_str_equal(args[0], "apply") || g_str_equal(args[0], "office")) && g_str_equal(args[1], "firewall")))) ||
+            (count >= 2 && g_str_equal(args[0], "profile") &&
+             ((g_str_equal(args[1], "apply") && (count == 3 || (count == 4 && g_str_equal(args[3], "firewall")))) ||
+              (g_str_equal(args[1], "restore") && (count == 2 || (count == 3 && g_str_equal(args[2], "firewall"))))));
+    }
     operation->answers = session_operation ? app->session->input : g_subprocess_get_stdin_pipe(process);
     operation->title = g_strdup(request->title);
     operation->review = g_string_new(NULL);
@@ -884,7 +917,8 @@ static void launch_request(Request *request)
         g_str_equal(request->title, "Refresh connections") || g_str_equal(request->title, "Review protection details") ||
         g_str_equal(request->title, "Review container local access");
     if (g_str_equal(request->title, "Refresh access permissions")) {
-        app->access_loaded = FALSE; clear_list(app->access_rules);
+        access_invalidate(app, "Inspecting the recorded assignment, current firewall and recovery options…");
+        clear_list(app->access_rules);
         gtk_label_set_text(app->access_summary, "Inspecting saved and active permissions…");
     }
     if (g_str_equal(request->title, "Refresh connections")) {
@@ -1450,6 +1484,7 @@ static void update_actions(App *app)
     gtk_widget_set_visible(app->decline, app->operation != NULL && app->operation->waiting_confirmation);
     if (app->usb_devices != NULL) gtk_widget_set_sensitive(GTK_WIDGET(app->usb_devices), enabled);
     if (app->access_rules != NULL) gtk_widget_set_sensitive(GTK_WIDGET(app->access_rules), enabled);
+    access_update_actions(app, enabled);
     if (app->diagnostics_findings != NULL) gtk_widget_set_sensitive(GTK_WIDGET(app->diagnostics_findings), enabled);
     if (app->access_pages != NULL) gtk_stack_set_visible_child_name(app->access_pages, administrator_ready(app) || app->smoke_test ? "application" : "locked");
     gboolean authenticating = app->session != NULL && !app->session->closed && !app->session->ready;
@@ -1668,6 +1703,7 @@ typedef struct {
     AdwActionRow *row;
     GtkLabel *badge;
     GtkImage *icon;
+    GtkButton *review;
 } StatusRow;
 
 typedef enum {
@@ -1817,6 +1853,7 @@ static GtkWidget *status_row(App *app, const char *section, const char *key, con
     if (g_str_equal(key, "firewall") || g_str_equal(key, "network") ||
         g_str_equal(key, "disk_encryption") || g_str_equal(key, "containers") || g_str_equal(key, "forwarding")) {
         GtkWidget *review = gtk_button_new_with_label(g_str_equal(key, "firewall") || g_str_equal(key, "network") ? "Manage" : "Review");
+        binding->review = GTK_BUTTON(review);
         gtk_widget_set_valign(review, GTK_ALIGN_CENTER);
         g_object_set_data(G_OBJECT(review), "topic", (gpointer)key);
         g_signal_connect(review, "clicked", G_CALLBACK(review_status_clicked), app);
@@ -1845,6 +1882,8 @@ static void update_status_row(StatusRow *row, JsonObject *root)
     JsonObject *profile_state = object_member(root, "profiles");
     JsonNode *available = profile_state != NULL ? json_object_get_member(profile_state, "available") : NULL;
     const char *result = string_member(object_member(object_member(object_member(root, "profiles"), "results"), row->key), "status", "");
+    if (row->review != NULL && g_str_equal(row->key, "firewall"))
+        gtk_button_set_label(row->review, g_str_equal(result, "failed") || g_str_equal(result, "applying") ? "Review & recover" : "Manage");
     if (g_str_equal(row->section, "controls") && (g_str_equal(result, "failed") || g_str_equal(result, "pending") || g_str_equal(result, "applying")))
         state = "partial";
     gboolean managed = g_str_equal(row->section, "controls") && (g_str_equal(row->key, "firewall") || g_str_equal(row->key, "usb") || g_str_equal(row->key, "network") || g_str_equal(row->key, "services") || g_str_equal(row->key, "monitor"));
@@ -1904,21 +1943,31 @@ static void update_catalog(App *app, JsonArray *catalog)
     for (guint i = 0; !changed && i < ids->len; i++)
         changed = !g_str_equal(g_ptr_array_index(ids, i), g_ptr_array_index(app->profile_ids, i));
     if (!changed) return;
+    app->access_syncing = TRUE;
     for (guint i = 0; i < app->profile_selectors->len; i++) {
         GtkDropDown *selector = g_ptr_array_index(app->profile_selectors, i);
         const char *selected = selected_profile(app, selector);
-        guint selected_index = 0;
+        guint selected_index = GTK_INVALID_LIST_POSITION;
         GtkStringList *model = gtk_string_list_new(NULL);
         for (guint j = 0; j < ids->len; j++) {
             gtk_string_list_append(model, g_ptr_array_index(names, j));
             if (g_strcmp0(selected, g_ptr_array_index(ids, j)) == 0) selected_index = j;
         }
+        if (selector == app->access_profile && selected_index == GTK_INVALID_LIST_POSITION &&
+            (selected != NULL || app->access_profile_initialized)) {
+            gtk_string_list_append(model, "Selected profile is no longer available");
+            selected_index = ids->len;
+            app->access_profile_invalid = TRUE;
+            access_invalidate(app, "The selected profile is no longer available. Choose a profile and inspect it; your permission draft is retained.");
+        }
+        if (selected_index == GTK_INVALID_LIST_POSITION) selected_index = 0;
         gtk_drop_down_set_model(selector, G_LIST_MODEL(model));
         gtk_drop_down_set_selected(selector, selected_index);
         g_object_unref(model);
     }
     g_ptr_array_unref(app->profile_ids);
     app->profile_ids = g_steal_pointer(&ids);
+    app->access_syncing = FALSE;
 }
 
 struct UsbDevice {
@@ -2199,14 +2248,15 @@ static void render_status(App *app, JsonObject *root)
     if (firewall != NULL && g_strcmp0(app->firewall_profile, firewall) != 0) {
         g_free(app->firewall_profile);
         app->firewall_profile = g_strdup(firewall);
-        if (app->access_profile != NULL) {
-            access_cancel_edit(NULL, app);
-            clear_list(app->access_rules);
+        if (app->access_profile != NULL && !app->access_profile_initialized) {
+            app->access_syncing = TRUE;
             const char *selected = g_str_equal(firewall, "unmanaged") ? "home" : firewall;
             for (guint i = 0; i < app->profile_ids->len; i++)
                 if (g_str_equal(g_ptr_array_index(app->profile_ids, i), selected)) gtk_drop_down_set_selected(app->access_profile, i);
+            app->access_syncing = FALSE;
+            app->access_profile_initialized = TRUE;
         }
-        app->access_loaded = FALSE;
+        access_invalidate(app, "The recorded firewall assignment changed. Inspect the current firewall before changing permissions; your selected profile and draft are retained.");
     }
     const char *active = string_member(profiles, "active", "Not selected");
     g_free(app->active_profile);
@@ -2603,6 +2653,7 @@ static void build_usb(App *app)
 
 typedef struct {
     gchar *label;
+    gchar *uuid;
     gchar *source;
     gchar *interface;
 } LanOption;
@@ -2610,12 +2661,13 @@ typedef struct {
 typedef struct {
     App *app;
     JsonObject *rule;
+    GtkWidget *revoke;
 } AccessRule;
 
 static void lan_option_free(gpointer data)
 {
     LanOption *option = data;
-    g_free(option->label); g_free(option->source); g_free(option->interface); g_free(option);
+    g_free(option->label); g_free(option->uuid); g_free(option->source); g_free(option->interface); g_free(option);
 }
 
 static void access_rule_free(gpointer data)
@@ -2628,6 +2680,69 @@ static gboolean boolean_member(JsonObject *object, const char *name)
 {
     JsonNode *node = object != NULL ? json_object_get_member(object, name) : NULL;
     return node != NULL && JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_BOOLEAN && json_node_get_boolean(node);
+}
+
+static gboolean boolean_member_valid(JsonObject *object, const char *name)
+{
+    JsonNode *node = object != NULL ? json_object_get_member(object, name) : NULL;
+    return node != NULL && JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_BOOLEAN;
+}
+
+static gboolean access_current(App *app)
+{
+    return app->access_loaded && !app->access_profile_invalid && app->access_inspected_profile != NULL &&
+        g_strcmp0(app->access_inspected_profile, selected_profile(app, app->access_profile)) == 0;
+}
+
+static void access_update_actions(App *app, gboolean enabled)
+{
+    if (app->access_submit == NULL) return;
+    gboolean current = access_current(app);
+    gboolean ready = current && app->access_ready;
+    gtk_widget_set_sensitive(GTK_WIDGET(app->access_submit), enabled && ready);
+    if (app->access_apply != NULL) {
+        const char *profile = selected_profile(app, app->access_profile);
+        g_autofree gchar *label = g_strdup_printf("Review and apply %s…", profile != NULL ? profile : "profile");
+        gtk_button_set_label(app->access_apply, label);
+        gtk_widget_set_sensitive(GTK_WIDGET(app->access_apply), enabled && current && app->access_can_apply);
+        gtk_widget_set_sensitive(GTK_WIDGET(app->access_restore), enabled && current && app->access_can_restore);
+        gtk_widget_set_sensitive(GTK_WIDGET(app->access_reconcile), enabled && current && app->access_can_reconcile);
+        gtk_widget_set_visible(GTK_WIDGET(app->access_reconcile), current && app->access_can_reconcile);
+        gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(app->access_reconcile)), current && app->access_can_reconcile);
+        gboolean transaction = current && app->access_transaction != NULL && *app->access_transaction != '\0';
+        gtk_widget_set_visible(GTK_WIDGET(app->access_last_change), transaction);
+        gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(app->access_last_change)), transaction);
+        gtk_widget_set_sensitive(GTK_WIDGET(app->access_last_change), enabled && transaction);
+    }
+    for (GtkWidget *row = gtk_widget_get_first_child(GTK_WIDGET(app->access_rules)); row != NULL; row = gtk_widget_get_next_sibling(row)) {
+        AccessRule *binding = g_object_get_data(G_OBJECT(row), "access-rule");
+        if (binding != NULL) gtk_widget_set_sensitive(binding->revoke, enabled && ready);
+    }
+}
+
+static void access_invalidate(App *app, const char *message)
+{
+    app->access_loaded = FALSE;
+    app->access_ready = FALSE;
+    app->access_can_apply = FALSE;
+    app->access_can_restore = FALSE;
+    app->access_can_reconcile = FALSE;
+    g_clear_pointer(&app->access_inspected_profile, g_free);
+    g_clear_pointer(&app->access_transaction, g_free);
+    if (app->access_recovery_summary != NULL) gtk_label_set_text(app->access_recovery_summary, "Firewall state needs inspection");
+    if (app->access_recovery_detail != NULL) gtk_label_set_text(app->access_recovery_detail, message);
+    update_actions(app);
+}
+
+static void access_retain_failure(App *app)
+{
+    if (app->access_failure_log == NULL) return;
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(app->log, &start, &end);
+    g_autofree gchar *text = gtk_text_buffer_get_text(app->log, &start, &end, FALSE);
+    gtk_text_buffer_set_text(app->access_failure_log, text, -1);
+    gtk_widget_set_visible(GTK_WIDGET(app->access_failure), TRUE);
+    gtk_expander_set_expanded(app->access_failure, TRUE);
 }
 
 static void clear_list(GtkListBox *list)
@@ -2660,7 +2775,7 @@ static gboolean refresh_private(gpointer data)
     if (app->operation != NULL || app->preview != NULL || app->usb_prompt != NULL) return G_SOURCE_REMOVE;
     if (app->private_refresh & 1U) {
         app->private_refresh &= ~1U;
-        const char *profile = app->firewall_profile != NULL && !g_str_equal(app->firewall_profile, "unmanaged") ? selected_profile(app, app->access_profile) : NULL;
+        const char *profile = app->access_profile_initialized ? selected_profile(app, app->access_profile) : NULL;
         const char *args[] = {"access", "list", profile};
         start_action(app, "Refresh access permissions", NULL, TRUE, FALSE, profile != NULL ? 3 : 2, args);
     } else if (app->private_refresh & 2U) {
@@ -2697,7 +2812,15 @@ static void review_status_clicked(GtkButton *button, gpointer data)
 {
     App *app = data;
     const char *topic = g_object_get_data(G_OBJECT(button), "topic");
-    if (g_strcmp0(topic, "firewall") == 0) { select_page(app, "office"); queue_private_refresh(app, 3U); return; }
+    if (g_strcmp0(topic, "firewall") == 0) {
+        select_page(app, "office");
+        GtkWidget *page = gtk_stack_get_child_by_name(app->pages, "office");
+        GtkAdjustment *scroll = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(page));
+        gtk_adjustment_set_value(scroll, gtk_adjustment_get_lower(scroll));
+        gtk_widget_grab_focus(GTK_WIDGET(app->access_inspect));
+        queue_private_refresh(app, 3U);
+        return;
+    }
     if (g_strcmp0(topic, "network") == 0 && !g_object_get_data(G_OBJECT(button), "inspect-network")) { select_page(app, "privacy"); queue_private_refresh(app, 2U); return; }
     const char *args[] = {"diagnostics", "show", topic};
     select_page(app, "diagnostics");
@@ -2737,9 +2860,9 @@ static void access_cancel_edit(GtkButton *button, gpointer data)
 
 static GStrv access_arguments(App *app, GError **error)
 {
-    if (app->access_profile_invalid) {
+    if (!access_current(app) || !app->access_ready) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-            "Refresh system status and permissions to establish the firewall profile before allowing access.");
+            "Inspect the firewall and complete the recovery shown above before changing permissions. Your draft is retained.");
         return NULL;
     }
     const char *profile = app->access_edit_id != NULL ? app->access_edit_profile : selected_profile(app, app->access_profile);
@@ -2794,6 +2917,7 @@ static void access_revoke_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
     AccessRule *binding = data;
+    if (!access_current(binding->app) || !binding->app->access_ready) return;
     const char *args[] = {"access", "revoke", string_member(binding->rule, "profile", ""), string_member(binding->rule, "id", "")};
     start_action(binding->app, "Revoke network access", "Remove this permission and apply the firewall change immediately after review. Other permissions remain in place.", TRUE, TRUE, G_N_ELEMENTS(args), args);
 }
@@ -2816,24 +2940,121 @@ static void access_edit_clicked(GtkButton *button, gpointer data)
     gtk_widget_grab_focus(GTK_WIDGET(app->access_ports));
 }
 
+static void access_recovery_clicked(GtkButton *button, gpointer data)
+{
+    App *app = data;
+    if (!access_current(app)) return;
+    const char *command = g_object_get_data(G_OBJECT(button), "access-recovery");
+    const char *profile = selected_profile(app, app->access_profile);
+    if (g_strcmp0(command, "restore") == 0 && app->access_can_restore) {
+        const char *args[] = {"access", "restore"};
+        start_action(app, "Restore original firewall", "Review the recorded original firewall settings. This restores only the firewall; your permission draft is retained.", TRUE, TRUE, G_N_ELEMENTS(args), args);
+    } else if (g_strcmp0(command, "recover") == 0 && app->access_can_apply) {
+        const char *args[] = {"access", "recover", profile};
+        start_action(app, "Apply selected firewall profile", "Review the selected profile's exact firewall changes. Applying the profile does not submit the permission draft below.", TRUE, TRUE, G_N_ELEMENTS(args), args);
+    } else if (g_strcmp0(command, "reconcile") == 0 && app->access_can_reconcile) {
+        const char *args[] = {"access", "reconcile", profile};
+        start_action(app, "Review external firewall changes", "Compare external firewall changes with OctoShield's record. Accepting updates tracking only, retains the original recovery baseline, and leaves Apply or Restore as a separate decision.", TRUE, TRUE, G_N_ELEMENTS(args), args);
+    } else if (g_strcmp0(command, "last-change") == 0 && app->access_transaction != NULL && *app->access_transaction != '\0') {
+        const char *args[] = {"backup-show", app->access_transaction};
+        start_action(app, "View last firewall change", NULL, TRUE, FALSE, G_N_ELEMENTS(args), args);
+    }
+}
+
+static gboolean access_result_valid(JsonObject *root)
+{
+    JsonObject *recovery = object_member(root, "recovery");
+    JsonObject *observed = object_member(recovery, "observed");
+    const char *profile = string_member(root, "profile", "");
+    const char *assigned = string_member(root, "assigned_profile", "");
+    const char *reason = string_member(recovery, "reason", "");
+    const char *result = string_member(recovery, "last_result", NULL);
+    const char *message = string_member(recovery, "message", NULL);
+    const char *transaction = string_member(recovery, "transaction", NULL);
+    const char *state = string_member(observed, "state", "");
+    const char *summary = string_member(observed, "summary", NULL);
+    const char *guidance = string_member(root, "summary", NULL);
+    if (!g_regex_match_simple("^[a-z][a-z0-9-]{0,31}$", profile, 0, 0) || g_str_equal(profile, "unmanaged") ||
+        !g_regex_match_simple("^[a-z][a-z0-9-]{0,31}$", assigned, 0, 0) ||
+        !boolean_member_valid(root, "ready") || !boolean_member_valid(root, "managed") ||
+        !boolean_member_valid(recovery, "can_apply") || !boolean_member_valid(recovery, "can_restore") || !boolean_member_valid(recovery, "can_reconcile") ||
+        !g_regex_match_simple("^(ready|unmanaged|different-profile|incomplete|pending|drift|unavailable)$", reason, 0, 0) ||
+        !g_regex_match_simple("^(active|inactive|partial|unknown|unsupported)$", state, 0, 0) ||
+        result == NULL || strlen(result) > 64 || message == NULL || strlen(message) > 4096 ||
+        summary == NULL || strlen(summary) > 4096 || guidance == NULL || strlen(guidance) > 4096 ||
+        transaction == NULL || strlen(transaction) > 40 ||
+        (*transaction != '\0' && !g_regex_match_simple("^[0-9]{8}T[0-9]{6}Z-[1-9][0-9]*$", transaction, 0, 0))) return FALSE;
+    if (boolean_member(root, "ready") &&
+        !((g_str_equal(reason, "ready") && g_str_equal(assigned, profile) && g_str_equal(state, "active") && boolean_member(root, "managed")) ||
+          (g_str_equal(reason, "unmanaged") && g_str_equal(assigned, "unmanaged") && !boolean_member(root, "managed")))) return FALSE;
+    if (boolean_member(root, "ready") && boolean_member(recovery, "can_reconcile")) return FALSE;
+    JsonArray *rules = array_member(root, "rules");
+    if (rules == NULL || json_array_get_length(rules) > 256) return FALSE;
+    for (guint i = 0; i < json_array_get_length(rules); i++) {
+        JsonNode *node = json_array_get_element(rules, i);
+        if (!JSON_NODE_HOLDS_OBJECT(node)) return FALSE;
+        JsonObject *rule = json_node_get_object(node);
+        const char *id = string_member(rule, "id", "");
+        JsonNode *expiry = json_object_get_member(rule, "expires_at");
+        if (!g_regex_match_simple("^[gr][0-9]{1,16}-[0-9]{1,10}-[0-9]{1,5}$", id, 0, 0) ||
+            expiry == NULL || !JSON_NODE_HOLDS_VALUE(expiry) || json_node_get_value_type(expiry) != G_TYPE_INT64 ||
+            json_node_get_int(expiry) < 0 || json_node_get_int(expiry) > G_GINT64_CONSTANT(9007199254740991)) return FALSE;
+        const char *args[] = {"access", "allow", profile, string_member(rule, "ports", ""), string_member(rule, "protocol", ""),
+            string_member(rule, "source", ""), string_member(rule, "interface", ""), "0"};
+        g_auto(GStrv) checked = octoshield_action_argv(TRUE, G_N_ELEMENTS(args), args, NULL);
+        if (checked == NULL) return FALSE;
+    }
+    return TRUE;
+}
+
 static gboolean show_access(App *app, JsonObject *root)
 {
     JsonArray *rules = array_member(root, "rules");
-    if (app->access_rules == NULL || rules == NULL || json_array_get_length(rules) > 256) return FALSE;
+    if (app->access_rules == NULL) return FALSE;
+    if (!access_result_valid(root)) {
+        access_invalidate(app, "The firewall inspection result is incomplete or invalid. Inspect again before making changes; your permission draft is retained.");
+        clear_list(app->access_rules);
+        gtk_label_set_text(app->access_summary, "No current permissions have been verified.");
+        return FALSE;
+    }
     const char *profile = string_member(root, "profile", "unmanaged");
     guint profile_index = GTK_INVALID_LIST_POSITION;
     for (guint i = 0; i < app->profile_ids->len; i++)
         if (g_str_equal(g_ptr_array_index(app->profile_ids, i), profile)) profile_index = i;
     if (profile_index == GTK_INVALID_LIST_POSITION) {
         app->access_profile_invalid = TRUE;
-        access_cancel_edit(NULL, app);
         clear_list(app->access_rules);
-        app->access_loaded = FALSE;
+        access_invalidate(app, "The inspected profile is missing from the current profile list. Refresh system status and inspect again; your draft is retained.");
         gtk_label_set_text(app->access_summary, "The inspected firewall profile is missing from the current profile list. Refresh system status and permissions before continuing.");
         return FALSE;
     }
+    if (app->access_profile_initialized && !app->access_profile_invalid &&
+        g_strcmp0(profile, selected_profile(app, app->access_profile)) != 0) {
+        access_invalidate(app, "The inspection belongs to a different selected profile. Inspect your selected profile before making changes.");
+        clear_list(app->access_rules);
+        return FALSE;
+    }
+    app->access_syncing = TRUE;
     gtk_drop_down_set_selected(app->access_profile, profile_index);
+    app->access_syncing = FALSE;
+    app->access_profile_initialized = TRUE;
     app->access_profile_invalid = FALSE;
+    g_free(app->access_inspected_profile); app->access_inspected_profile = g_strdup(profile);
+    JsonObject *recovery = object_member(root, "recovery");
+    JsonObject *observed = object_member(recovery, "observed");
+    app->access_ready = boolean_member(root, "ready");
+    app->access_can_apply = boolean_member(recovery, "can_apply");
+    app->access_can_restore = boolean_member(recovery, "can_restore");
+    app->access_can_reconcile = boolean_member(recovery, "can_reconcile");
+    g_free(app->access_transaction); app->access_transaction = g_strdup(string_member(recovery, "transaction", ""));
+    g_autofree gchar *heading = g_strdup_printf("%s · Selected profile: %s", app->access_ready ? "Ready for permissions" : "Firewall needs review", profile);
+    gtk_label_set_text(app->access_recovery_summary, heading);
+    g_autofree gchar *detail = g_strdup_printf("Recorded assignment: %s · Last result: %s\n%s\nLast change: %s\nCurrent observation (%s): %s",
+        string_member(root, "assigned_profile", "unknown"), string_member(recovery, "last_result", "unknown"),
+        string_member(root, "summary", ""), string_member(recovery, "message", ""),
+        string_member(observed, "state", "unknown"), string_member(observed, "summary", ""));
+    g_autofree gchar *safe_detail = octoshield_text_sanitize(detail, -1);
+    gtk_label_set_text(app->access_recovery_detail, safe_detail);
     g_autofree gchar *summary = octoshield_text_sanitize(string_member(root, "summary", "Review the permissions and their observed state below."), -1);
     gtk_label_set_text(app->access_summary, summary);
     clear_list(app->access_rules);
@@ -2849,7 +3070,7 @@ static gboolean show_access(App *app, JsonObject *root)
         adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), label);
         const char *state = string_member(rule, "state", "unknown");
         const char *state_label = g_str_equal(state, "active") ? "Active" : g_str_equal(state, "pending") ? "Saved, not active" : g_str_equal(state, "expired") ? "Expired" : g_str_equal(state, "failed") ? "Apply failed" : "Not verified";
-        gint64 expires = json_object_has_member(rule, "expires_at") ? json_object_get_int_member(rule, "expires_at") : 0;
+        gint64 expires = json_object_get_int_member(rule, "expires_at");
         g_autoptr(GDateTime) when = expires > 0 ? g_date_time_new_from_unix_local(expires) : NULL;
         g_autofree gchar *expiry = when != NULL ? g_date_time_format(when, "%a %H:%M") : g_strdup("Until revoked");
         g_autofree gchar *raw = g_strdup_printf("%s · %s/%s · From %s on %s\n%s", state_label, string_member(rule, "ports", "?"), string_member(rule, "protocol", "?"), string_member(rule, "source", "?"), string_member(rule, "interface", "?"), expiry);
@@ -2862,6 +3083,7 @@ static gboolean show_access(App *app, JsonObject *root)
         g_object_set_data_full(G_OBJECT(row), "access-rule", binding, access_rule_free);
         GtkWidget *edit = gtk_button_new_with_label("Edit");
         GtkWidget *revoke = gtk_button_new_with_label("Revoke");
+        binding->revoke = revoke;
         gtk_widget_set_valign(edit, GTK_ALIGN_CENTER); gtk_widget_set_valign(revoke, GTK_ALIGN_CENTER);
         g_signal_connect(edit, "clicked", G_CALLBACK(access_edit_clicked), binding);
         g_signal_connect(revoke, "clicked", G_CALLBACK(access_revoke_clicked), binding);
@@ -2870,6 +3092,7 @@ static gboolean show_access(App *app, JsonObject *root)
     }
     if (json_array_get_length(rules) == 0) gtk_list_box_append(app->access_rules, text_label("No saved permissions in this firewall profile.", "dim-label"));
     app->access_loaded = TRUE;
+    update_actions(app);
     return TRUE;
 }
 
@@ -2922,6 +3145,12 @@ static gboolean show_connections(App *app, JsonObject *root)
     if (connections == NULL || json_array_get_length(connections) > 256 || app->privacy_connection == NULL) return FALSE;
     app->connections_incomplete = boolean_member(root, "incomplete");
     g_autofree gchar *selected = g_strdup(string_member(selected_connection(app), "uuid", ""));
+    guint old_network_index = gtk_drop_down_get_selected(app->access_network);
+    LanOption *old_network = app->lan_options != NULL && old_network_index < app->lan_options->len ? g_ptr_array_index(app->lan_options, old_network_index) : NULL;
+    if (old_network != NULL) {
+        g_free(app->access_network_identity);
+        app->access_network_identity = g_strdup_printf("%s|%s|%s", old_network->uuid, old_network->source, old_network->interface);
+    }
     g_clear_pointer(&app->connection_data, json_array_unref);
     app->connection_data = json_array_new();
     g_clear_pointer(&app->lan_options, g_ptr_array_unref);
@@ -2929,6 +3158,7 @@ static gboolean show_connections(App *app, JsonObject *root)
     GtkStringList *names = gtk_string_list_new(NULL);
     GtkStringList *networks = gtk_string_list_new(NULL);
     guint selected_index = GTK_INVALID_LIST_POSITION;
+    guint network_index = GTK_INVALID_LIST_POSITION;
     for (guint i = 0; i < json_array_get_length(connections); i++) {
         JsonNode *node = json_array_get_element(connections, i);
         if (!JSON_NODE_HOLDS_OBJECT(node)) continue;
@@ -2948,9 +3178,12 @@ static gboolean show_connections(App *app, JsonObject *root)
             JsonNode *subnet = json_array_get_element(subnets, j);
             if (!JSON_NODE_HOLDS_VALUE(subnet) || json_node_get_value_type(subnet) != G_TYPE_STRING) continue;
             LanOption *option = g_new0(LanOption, 1);
+            option->uuid = g_strdup(uuid);
             option->source = g_strdup(json_node_get_string(subnet));
             option->interface = g_strdup(string_member(connection, "interface", ""));
             option->label = g_strdup_printf("%s · %s · %s", name, option->source, option->interface);
+            g_autofree gchar *identity = g_strdup_printf("%s|%s|%s", option->uuid, option->source, option->interface);
+            if (g_strcmp0(app->access_network_identity, identity) == 0) network_index = app->lan_options->len;
             gtk_string_list_append(networks, option->label); g_ptr_array_add(app->lan_options, option);
         }
     }
@@ -2958,9 +3191,13 @@ static gboolean show_connections(App *app, JsonObject *root)
     gtk_drop_down_set_selected(app->privacy_connection, selected_index == GTK_INVALID_LIST_POSITION && json_array_get_length(app->connection_data) > 0 ? 0 : selected_index);
     /* GTK versions differ in whether a nonempty dropdown can be unselected.
      * A real placeholder keeps ambiguous scopes outside the valid indices. */
-    if (app->lan_options->len != 1) gtk_string_list_append(networks, app->lan_options->len == 0 ? "No local network detected" : "Choose a local network…");
+    if (network_index == GTK_INVALID_LIST_POSITION && app->access_network_identity == NULL && app->lan_options->len == 1) network_index = 0;
+    if (network_index == GTK_INVALID_LIST_POSITION) {
+        gtk_string_list_append(networks, app->lan_options->len == 0 ? "No local network detected" : app->access_network_identity != NULL ? "Previous network unavailable · choose a network…" : "Choose a local network…");
+        network_index = app->lan_options->len;
+    }
     gtk_drop_down_set_model(app->access_network, G_LIST_MODEL(networks));
-    gtk_drop_down_set_selected(app->access_network, app->lan_options->len == 1 ? 0 : app->lan_options->len);
+    gtk_drop_down_set_selected(app->access_network, network_index);
     adw_action_row_set_subtitle(ADW_ACTION_ROW(app->access_network_row), app->lan_options->len == 0 ? "No active physical Wi-Fi or Ethernet subnet was detected. Connect to your local network and refresh, or enter a custom scope." :
         app->lan_options->len == 1 ? "This subnet and incoming interface limit the permission. The network itself is not authenticated." : "Several subnets are connected. Choose which subnet's devices may connect; the permission does not include the others.");
     g_object_unref(names); g_object_unref(networks);
@@ -3184,10 +3421,12 @@ static void access_profile_changed(GObject *object, GParamSpec *property, gpoint
 {
     (void)object; (void)property;
     App *app = data;
-    if (app->operation != NULL) return;
+    if (app->operation != NULL || app->access_syncing) return;
+    app->access_profile_initialized = TRUE;
+    app->access_profile_invalid = selected_profile(app, app->access_profile) == NULL;
     access_cancel_edit(NULL, app);
     clear_list(app->access_rules);
-    app->access_loaded = FALSE;
+    access_invalidate(app, "Inspect this selected profile's current firewall state before changing permissions. Your draft values are retained.");
     gtk_label_set_text(app->access_summary, "Refresh to inspect this profile's saved permissions and active state.");
     if (app->auth_required && administrator_ready(app)) queue_private_refresh(app, 1U);
 }
@@ -3195,11 +3434,47 @@ static void access_profile_changed(GObject *object, GParamSpec *property, gpoint
 static void build_office(App *app)
 {
     GtkWidget *page = page_new(app, "office", "Access & exceptions", "Share only the service you need. Choose a service, a local network and a duration; review once to save and apply its permission.");
-    GtkWidget *group = group_new(page, "Allow a service", "Your effective firewall profile is selected automatically. Incoming permissions do not start a server or control Docker's forwarded traffic.");
+    GtkWidget *group = group_new(page, "Firewall status and recovery", "Inspect the current firewall, review a selected profile or restore its original settings. Recovery keeps your permission draft below.");
     app->access_profile = GTK_DROP_DOWN(profile_selector(app));
     gtk_drop_down_set_selected(app->access_profile, GTK_INVALID_LIST_POSITION);
-    group_add(group, control_row("Firewall profile", "Use Profiles & protection to change the active assignment.", GTK_WIDGET(app->access_profile)));
-    group_add(group, control_row("Current permissions and connected networks", NULL, managed_button(app, "Refresh", G_CALLBACK(access_refresh_clicked))));
+    group_add(group, control_row("Selected firewall profile", "A recorded assignment does not establish the current firewall state.", GTK_WIDGET(app->access_profile)));
+    app->access_recovery_summary = GTK_LABEL(text_label("Firewall state needs inspection", "heading"));
+    group_add(group, GTK_WIDGET(app->access_recovery_summary));
+    app->access_recovery_detail = GTK_LABEL(text_label("Inspect to see the recorded assignment, current evidence and available recovery choices.", "dim-label"));
+    gtk_label_set_selectable(app->access_recovery_detail, TRUE);
+    group_add(group, GTK_WIDGET(app->access_recovery_detail));
+    GtkWidget *recovery_buttons = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(recovery_buttons), GTK_SELECTION_NONE);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(recovery_buttons), 1);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(recovery_buttons), 2);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(recovery_buttons), 4);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(recovery_buttons), 6);
+    app->access_inspect = GTK_BUTTON(managed_button(app, "Inspect / Refresh", G_CALLBACK(access_refresh_clicked)));
+    app->access_apply = GTK_BUTTON(managed_button(app, "Review and apply profile…", G_CALLBACK(access_recovery_clicked)));
+    app->access_restore = GTK_BUTTON(managed_button(app, "Restore original firewall…", G_CALLBACK(access_recovery_clicked)));
+    app->access_reconcile = GTK_BUTTON(managed_button(app, "Review external changes…", G_CALLBACK(access_recovery_clicked)));
+    app->access_last_change = GTK_BUTTON(managed_button(app, "View last change", G_CALLBACK(access_recovery_clicked)));
+    g_object_set_data(G_OBJECT(app->access_apply), "access-recovery", "recover");
+    g_object_set_data(G_OBJECT(app->access_restore), "access-recovery", "restore");
+    g_object_set_data(G_OBJECT(app->access_reconcile), "access-recovery", "reconcile");
+    g_object_set_data(G_OBJECT(app->access_last_change), "access-recovery", "last-change");
+    GtkWidget *recovery_actions[] = {GTK_WIDGET(app->access_inspect), GTK_WIDGET(app->access_apply), GTK_WIDGET(app->access_restore), GTK_WIDGET(app->access_reconcile), GTK_WIDGET(app->access_last_change)};
+    for (guint i = 0; i < G_N_ELEMENTS(recovery_actions); i++) gtk_flow_box_insert(GTK_FLOW_BOX(recovery_buttons), recovery_actions[i], -1);
+    group_add(group, recovery_buttons);
+    app->access_failure = GTK_EXPANDER(gtk_expander_new("Last unsuccessful firewall operation · retained details"));
+    GtkWidget *failure_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(failure_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(failure_scroll), 160);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(failure_scroll), 240);
+    GtkWidget *failure_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(failure_view), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(failure_view), GTK_WRAP_WORD_CHAR);
+    app->access_failure_log = gtk_text_view_get_buffer(GTK_TEXT_VIEW(failure_view));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(failure_scroll), failure_view);
+    gtk_expander_set_child(app->access_failure, failure_scroll);
+    group_add(group, GTK_WIDGET(app->access_failure));
+    gtk_widget_set_visible(GTK_WIDGET(app->access_failure), FALSE);
+    group = group_new(page, "Allow a service", "Prepare the permission below. Allow, update and revoke become available after the selected firewall is ready. Incoming permissions do not start a server or control Docker's forwarded traffic.");
     app->access_preset = GTK_DROP_DOWN(gtk_drop_down_new_from_strings((const char *const[]){"Web server · HTTP + HTTPS", "Incoming SSH", "Custom ports…", NULL}));
     group_add(group, control_row("What would you like to share?", NULL, GTK_WIDGET(app->access_preset)));
     app->access_custom = group_new(page, "Custom service", "Enter one port or comma-separated ports. Each port receives the same scope and duration.");

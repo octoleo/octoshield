@@ -90,6 +90,37 @@ The status cache is ephemeral at `/run/octoshield/status.json`. If it is stale, 
 
 Timed firewall permissions are runtime-only and stop permitting new connections at their kernel UTC deadline, including after uninstall. Existing established connections retain UFW's normal stateful behavior and are not forcibly terminated. A reboot or `sudo ufw reload` drops timed grants sooner while retaining permanent UFW rules. OctoShield reports that narrower state and allows explicit profile application to restore still-unexpired permissions. Expired permissions never reopen automatically during boot. Use `octoshield status` and `octoshield profile show NAME` to inspect actual state and saved deadlines, because `ufw status` alone does not list timed runtime grants. Applying a new timed grant requires a running observer for status and cleanup and kernel time-match support; unsupported matching is refused without an untimed fallback.
 
+## Recover a failed firewall change
+
+“The previous firewall change did not complete” is a saved operation result. It does not mean another process is still running. It deliberately blocks another permission change until the existing firewall is inspected and recovered. Deleting a lock, restarting the app or repeatedly clicking **Review and allow access** cannot resolve that recorded failure.
+
+Before 1.3.3, the firewall verifier required UFW to display `deny (routed)`. UFW normally displays `disabled (routed)` when IP forwarding is disabled, including on ordinary laptops with the correct configured DROP policy. This could mark a successfully applied firewall as failed. Version 1.3.3 accepts that display only when the configured defaults and actual IPv4/IPv6 input paths and default policies also verify. Other native failures remain possible; inspect the saved action history and the new native finding to determine the cause on your machine. This distinction follows [UFW's default-policy reporting implementation](https://sources.debian.org/src/ufw/0.36.2-9/src/backend.py).
+
+After installing the updated package and reopening the app, select **Overview → Review & recover**, or open **Access & exceptions → Firewall status and recovery**. The section identifies the selected saved profile, its recorded assignment, the last result and the current native finding. Permission actions remain unavailable while recovery is needed. Recovery and inspection preserve your pending service, network and duration choices.
+
+Choose the action matching the displayed evidence:
+
+| Action | Reviewed result |
+| --- | --- |
+| **Inspect / Refresh** | Refreshes the native finding and recovery choices without changing policy. |
+| **Review and apply PROFILE** | Reapplies only that selected saved firewall profile and its saved exceptions, then verifies it. Other protection areas and the pending permission form are retained. |
+| **Review external changes** | Shows native rule differences and current configuration before accepting the displayed state for conflict checks. It retains the original baseline, changes no firewall rules, and still requires a separate Apply or Restore. |
+| **Restore original firewall** | Previews and restores the retained pre-profile configuration, including whether UFW was enabled. Native readback must succeed before the original recovery evidence is released. This can reduce protection. |
+| **View last change** | Opens the verified private transaction reference when the result contains one. Older results without that reference remain inspectable through **Recovery & updates → Inspect transaction**. |
+
+For the reported Office profile, the equivalent reviewed terminal workflow is:
+
+```bash
+octoshield access list office
+octoshield access recover office
+```
+
+If inspection reports supported external changes, review them first with `octoshield access reconcile office`, then explicitly choose `octoshield access recover office` or `octoshield access restore`. Each command retains the normal authentication and confirmation flow. Select your actual saved profile name instead of `office` when appropriate. On systems with both installation types, use `/usr/bin/octoshield` to select the updated package.
+
+After recovery succeeds, review your network permission separately. For HTTP and HTTPS, select the detected local network and **Until revoked**, then use **Review and allow access**. Recovery does not grant that pending permission automatically. An allowed IPv4 subnet does not also grant IPv6 access; Docker-published services still require their separate forwarding review.
+
+Unsafe or missing baseline data, modified UFW hooks and unsupported native input rules are preserved for manual inspection. The application does not replace recovery evidence, erase a failure, or approve a configuration it cannot safely preview simply to enable a button. Preserve `/var/lib/octoshield/profiles` and the relevant transaction. Do not use `ufw reset` or delete profile records as a generic workaround; the targeted restoration guidance below remains available when automatic recovery cannot verify the saved state.
+
 ## Operations and automatic recovery
 
 From 1.2.2, ordinary background observation no longer makes Apply immediately fail with “Another OctoShield operation is running.” A requested change closes admission to new readers, reports that it is waiting, and lets existing inspections finish before entering the normal review and confirmation flow. You do not need to keep retrying. No policy changes begin while the helper is waiting for the lock.

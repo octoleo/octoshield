@@ -283,6 +283,7 @@ Launch **OctoShield** from the application menu, run \`octoshield-gtk\`, or use 
 - Firewall, network, service, update and AppArmor controls with explicit change previews.
 - USB authorization, device inspection and reviewed enrollment.
 - Office network, firewall and service exceptions.
+- Direct firewall failure recovery with fresh native inspection, reviewed profile application, external-change reconciliation and verified original-policy restoration.
 - Security monitoring and user-session notifications.
 - GNOME desktop settings with light/dark appearance and user preference recovery.
 - Local configuration recovery snapshots and action history; these are not full-file backups. Restic/S3 backup management is not included in this release.
@@ -295,6 +296,8 @@ Installing the package does not automatically enable protections or enroll USB d
 Install a newer matching Debian package with the same \`sudo apt install ./...deb\` command to upgrade. Automatic APT updates require the separately configured, signed OctoShield APT repository; downloading this package alone does not enroll it.
 
 After upgrading, use **Recovery & updates → Repair system** or \`octoshield repair\` to review any retired settings reported by the application. Package installation preserves native policy until you approve that repair.
+
+For a recorded firewall failure, open **Access & exceptions → Firewall status and recovery**. Inspect the current finding, then review application of the selected saved firewall profile or restoration of its original settings. Supported external changes have a separate tracking-only review. Recovery preserves a pending permission for a separate decision. UFW's normal forwarding-disabled display is now verified against native IPv4/IPv6 policy instead of being treated as a failure by itself.
 
 Remove the application with \`sudo apt remove octoshield\`. Native security policies and private configuration recovery snapshots are preserved; consult the recovery guide before reversing protection settings.
 

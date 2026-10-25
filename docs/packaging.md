@@ -17,17 +17,17 @@ sudo apt-get install build-essential debhelper pkg-config \
 dpkg-buildpackage -us -uc -b
 ```
 
-`make package` is the repository's convenience target for the package build. For version 1.3.2 on amd64, a local build emits `../octoshield_1.3.2_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `1.3.2`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
+`make package` is the repository's convenience target for the package build. For version 1.3.3 on amd64, a local build emits `../octoshield_1.3.3_amd64.deb`; an arm64 build uses `_arm64.deb`. The local Debian filename does not identify which Ubuntu release built it: preserve that information when distributing it. CI renames assets to include the Ubuntu release while retaining internal package version `1.3.3`. Debian's shared-library dependency calculation lets APT reject missing or incompatible dependencies.
 
 Inspect and install a locally built package in a disposable test system:
 
 ```bash
-dpkg-deb --info ../octoshield_1.3.2_amd64.deb
-dpkg-deb --contents ../octoshield_1.3.2_amd64.deb
-sudo apt install ../octoshield_1.3.2_amd64.deb
+dpkg-deb --info ../octoshield_1.3.3_amd64.deb
+dpkg-deb --contents ../octoshield_1.3.3_amd64.deb
+sudo apt install ../octoshield_1.3.3_amd64.deb
 ```
 
-These example filenames describe the amd64 1.3.2 build; use the actual emitted filename for another version or architecture.
+These example filenames describe the amd64 1.3.3 build; use the actual emitted filename for another version or architecture.
 
 ## Program ownership and lifecycle
 
@@ -60,8 +60,8 @@ The **Test lint and package** workflow currently builds this matrix:
 
 | Build | Actions artifact | Distributed package |
 | --- | --- | --- |
-| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_1.3.2_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_1.3.2_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 amd64 | `octoshield-ubuntu-24.04-amd64` | `octoshield_1.3.3_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 amd64 | `octoshield-ubuntu-26.04-amd64` | `octoshield_1.3.3_ubuntu26.04_amd64.deb` |
 
 Artifacts and releases use separate `SHA256SUMS-ubuntu24.04` and `SHA256SUMS-ubuntu26.04` files. After extraction/download, run the matching command, for example `sha256sum -c SHA256SUMS-ubuntu24.04`. These detect content changes, not independent publisher identity.
 
@@ -73,4 +73,4 @@ The native metadata identifies the developer as **Vast Development Method**, the
 
 ## Acceptance
 
-Package validation covers installation of the published 1.1.0, 1.2.0, 1.2.1 and 1.3.1 packages followed by a real upgrade to 1.3.2, reinstall, removal and purge. Each baseline has a fresh disposable container on Ubuntu 24.04 and 26.04. CI pins the old archives' SHA-256 values and checks both launchers, desktop metadata, PolicyKit policy, ownership, preserved recovery snapshots/native configuration/user preferences/profile state/monitor enablement, and the absence of automatic hardening. A live reader holds the actual operation lock during upgrade to exercise recovery from the older packages' failing removal scripts and normal observer shutdown from 1.2.1. Exclusive mutation locks still prevent replacement. Starting the status observer is intentional; starting the security-event collector without a previous user choice is forbidden. Native window tests run under an isolated display without applying privileged controls. See [testing.md](testing.md) for the separate hardware checklist.
+Package validation covers installation of the published 1.1.0, 1.2.0, 1.2.1, 1.3.1 and 1.3.2 packages followed by a real upgrade to 1.3.3, reinstall, removal and purge. Each baseline has a fresh disposable container on Ubuntu 24.04 and 26.04. CI pins the old archives' SHA-256 values and checks both launchers, desktop metadata, PolicyKit policy, ownership, preserved recovery snapshots/native configuration/user preferences/profile state/monitor enablement, and the absence of automatic hardening. A live reader holds the actual operation lock during upgrade to exercise recovery from the older packages' failing removal scripts and normal observer shutdown from 1.2.1. Exclusive mutation locks still prevent replacement. Starting the status observer is intentional; starting the security-event collector without a previous user choice is forbidden. Native window tests run under an isolated display without applying privileged controls. See [testing.md](testing.md) for the separate hardware checklist.

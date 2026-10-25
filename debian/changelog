@@ -1,3 +1,16 @@
+octoshield (1.3.3) unstable; urgency=medium
+
+  * Recognize UFW's forwarding-disabled status with verified IPv4/IPv6 policy.
+  * Expose firewall inspection, reviewed retry, external-change reconciliation
+    and original-policy restoration directly above the access permission form.
+  * Preserve pending permission choices and failure evidence across recovery.
+  * Verify original firewall restoration before releasing recovery snapshots,
+    and reject unsupported input paths and unsafe or stale recovery evidence.
+  * Gate publication on real UFW packet and recovery tests on both Ubuntu
+    versions and package upgrades from the published 1.3.2 release.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Sun, 25 Oct 2026 20:22:42 +0000
+
 octoshield (1.3.2) unstable; urgency=medium
 
   * Remove the retired system-wide zero-timeout sudo authentication control.

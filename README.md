@@ -17,12 +17,12 @@ Read the [feature guide](docs/features.md) for the complete capability overview 
 
 ### Desktop application and CLI: install the package
 
-Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version 1.3.2 is published after this release branch merges and its checks pass. Its release provides these packages:
+Download an installable package from the public [latest release](https://github.com/octoleo/octoshield/releases/latest). No GitHub account or source checkout is needed. Version 1.3.3 is published after this release branch merges and its checks pass. Its release provides these packages:
 
-| Ubuntu / architecture | Download | Package install command for version 1.3.2 |
+| Ubuntu / architecture | Download | Package install command for version 1.3.3 |
 | --- | --- | --- |
-| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.3.2/octoshield_1.3.2_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.3.2/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.3.2_ubuntu24.04_amd64.deb` |
-| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.3.2/octoshield_1.3.2_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.3.2/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.3.2_ubuntu26.04_amd64.deb` |
+| Ubuntu 24.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.3.3/octoshield_1.3.3_ubuntu24.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.3.3/SHA256SUMS-ubuntu24.04) | `sudo apt install ./octoshield_1.3.3_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 / amd64 | [Package](https://github.com/octoleo/octoshield/releases/download/v1.3.3/octoshield_1.3.3_ubuntu26.04_amd64.deb) · [Checksums](https://github.com/octoleo/octoshield/releases/download/v1.3.3/SHA256SUMS-ubuntu26.04) | `sudo apt install ./octoshield_1.3.3_ubuntu26.04_amd64.deb` |
 
 Choose the package matching **both your Ubuntu release and CPU architecture**:
 
@@ -46,7 +46,7 @@ fi
 
 Open **OctoShield** from GNOME's application launcher, or run `octoshield-gtk`. No reboot is required. Run it as your normal desktop user: the system administrator dialog unlocks the application once, and its authenticated session lasts until the window closes. You can then refresh status and review changes without entering a password for every action. Locking the application or desktop also ends the authorization and requires another unlock. The GTK process still runs as your own user; only the fixed system-control helper receives administrator privileges. Installation starts the background status observer, but does not apply hardening, enroll USB devices, select a profile, or enable security-event collection automatically.
 
-To upgrade an existing 1.0.0, 1.1.0, 1.2.0, 1.2.1, 1.2.2, 1.3.0 or 1.3.1 installation, download the matching 1.3.2 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
+To upgrade an existing 1.0.0, 1.1.0, 1.2.0, 1.2.1, 1.2.2, 1.3.0, 1.3.1 or 1.3.2 installation, download the matching 1.3.3 package and open it with your desktop's Debian package installer, or use the same `sudo apt install ./...deb` command. The package manager requests administrator permission and upgrades the existing `octoshield` package in place. Policies, profile settings, user preferences and recovery snapshots are retained; installation does not switch you into a new protection profile. If your desktop does not associate `.deb` files with an installer, use APT. The application offers **Check for updates**; the equivalent CLI command is `octoshield updates check`. This checks the fixed official GitHub release source on request and offers the matching download; installation remains a package-manager operation.
 
 Version 1.2.1 fixes upgrades incorrectly blocked by background status inspection. The installer pauses that observer before acquiring its replacement lock and restores its previous running state afterward. An older package may print a failed `prerm` warning before dpkg automatically recovers using the new package's script. You do not need to uninstall first or delete a lock file. A real protection change must finish before replacement; the installer waits briefly and safely refuses if that operation is still busy. See [upgrade troubleshooting](docs/distribution.md#upgrade-troubleshooting).
 
@@ -65,7 +65,7 @@ If you previously installed the standalone version, `/usr/local/bin/octoshield` 
 For CLI-only use, install from the public release checkout. With Git available:
 
 ```bash
-git clone --branch v1.3.2 --depth 1 https://github.com/octoleo/octoshield.git
+git clone --branch v1.3.3 --depth 1 https://github.com/octoleo/octoshield.git
 cd octoshield
 bash src/octoshield install
 ```
@@ -123,6 +123,8 @@ To share a local web server, open **Access & exceptions**, choose **Web server �
 
 The guided operation saves, applies and verifies the whole permission together. Temporary deadlines start after confirmation, immediately before activation. A failed application attempts to restore the previous policy and reports any incomplete recovery. Unapplied profile edits and external firewall changes must be reviewed before adding another permission. Adopting an unmanaged firewall shows its existing exceptions before replacement. A subnet and interface identify packet scope, not an authenticated trusted network; another network can reuse that subnet. Select each required IPv4/IPv6 subnet explicitly and revoke access before moving to an untrusted network. These allowances govern UFW host input; Docker-published ports have a separate packet path.
 
+If a previous firewall change failed, **Overview → Review & recover** opens **Firewall status and recovery** above the access form. It shows the saved outcome separately from a fresh native inspection. **Review and apply** reapplies only the selected saved firewall profile; **Restore original firewall** reviews and verifies the retained pre-profile configuration. When external changes need acceptance first, **Review external changes** displays the current evidence, updates conflict tracking after confirmation and leaves recovery pending until Apply or Restore. Your ports, network and duration stay in the form for a separate permission review. See [firewall recovery](docs/recovery.md#recover-a-failed-firewall-change) for the equivalent terminal commands and older-version guidance.
+
 **Connection privacy** lists saved connections by name, including their interface, addresses, configuration sources and current verification. Adjust automatic connection, local discovery or Wi-Fi MAC behavior for one connection, then explicitly reconnect when required. The override belongs to the effective network profile and is retained when that profile is reapplied. Changing saved settings does not silently disconnect an active network. Unsupported active-state checks remain **Unable to verify**. Use `octoshield connections` for the same guided workflow.
 
 Saving **Automatic connection** updates and reads back the selected NetworkManager connection's actual preference; no reconnect is required. NetworkManager decides when an eligible saved connection activates; OctoShield does not request a reconnect. Other saved connections can change independently without blocking this focused save. OctoShield retains those unrelated differences for whole-profile checks. If Apply or Restore reports differences, use **Connection privacy → Review external changes** (`sudo octoshield connections reconcile`) to inspect and explicitly accept the current saved settings. This updates tracking only, retains the original recovery baseline, and never reconnects or applies a profile. Restoring that baseline previews the saved settings to restore and verifies the result, including edits made without adopting a profile.
@@ -142,7 +144,7 @@ Open OctoShield and use its sidebar:
 | Overview | Read refreshed protection indicators, global profile and overrides; switch profiles. |
 | Protections | Activate, adjust or restore controls; edit profile settings; apply/restore GNOME settings; open the system account settings. |
 | USB devices | Inspect blocked/allowed devices, review a numeric device ID, allow temporarily or remember for the effective USB profile, and revoke trust. |
-| Access & exceptions | Allow web/SSH/custom service access on a selected network; review, edit and revoke grouped permissions. |
+| Access & exceptions | Inspect and recover a failed firewall change; allow web/SSH/custom service access on a selected network; review, edit and revoke grouped permissions. |
 | Connection privacy | Select a named connection, adjust privacy settings, inspect active verification, and explicitly reconnect. |
 | Details & fixes | Read the evidence and configuration sources behind encryption, Docker, forwarding and network findings; review supported Docker repairs. |
 | Monitoring | Enable/disable collection, inspect status/logs, and control this user's notifications. |
@@ -262,7 +264,7 @@ Disabling desktop notifications does not disable the firewall, USB policy, or sy
 
 `octoshield desktop restore` restores only the saved GNOME settings from before first apply. System snapshots are private and are not automatically reapplied; see [docs/recovery.md](docs/recovery.md) for targeted recovery, partial failures, and USB lockout instructions.
 
-`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.3.2.
+`octoshield backups` lists local configuration recovery snapshots created before OctoShield changes system settings. Their directory is restricted to root; the files are not separately encrypted by OctoShield. They are not backups of your folders or a complete system image. Restic/S3 folder backup integration is future scope and is not included in version 1.3.3.
 
 ## Scope and limits
 

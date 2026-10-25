@@ -442,6 +442,8 @@ static void action_guided_access(void)
 {
     static const gchar *const valid[][10] = {
         {"access", "list", NULL}, {"access", "list", "home", NULL},
+        {"access", "recover", "office", NULL}, {"access", "restore", NULL},
+        {"access", "reconcile", "home", NULL},
         {"access", "allow", "home", "80,443", "tcp", "192.168.1.0/24", "wlan0", "60", NULL},
         {"access", "update", "home", "g1-2-3", "80,443", "tcp", "2001:db8::/64", "eth0", "10080", NULL},
         {"access", "update", "office", "r1-2-3", "22", "tcp", "any", "any", "0", NULL},
@@ -474,6 +476,10 @@ static void action_guided_access(void)
 static void action_guided_reject(void)
 {
     static const gchar *const invalid[][11] = {
+        {"access", "recover", NULL}, {"access", "recover", "unmanaged", NULL},
+        {"access", "recover", "office", "extra", NULL},
+        {"access", "restore", "office", NULL}, {"access", "reconcile", NULL},
+        {"access", "reconcile", "$(id)", NULL}, {"access", "reconcile", "home", "extra", NULL},
         {"access", "allow", "unmanaged", "80", "tcp", "any", "any", "0", NULL},
         {"access", "allow", "home", "80,80", "tcp", "any", "any", "0", NULL},
         {"access", "allow", "home", "80,", "tcp", "any", "any", "0", NULL},
