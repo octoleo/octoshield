@@ -11,7 +11,7 @@ declare -gAr CLI_CONTROLS=(
 
 cli::usage() {
     cat <<'USAGE'
-OctoShield 1.3.2 — Ubuntu laptop protection, part of the OctoLeo suite
+OctoShield 1.3.3 — Ubuntu laptop protection, part of the OctoLeo suite
 
 Usage: octoshield [COMMAND]
   setup                     Guided setup and later adjustments (default)
@@ -36,6 +36,9 @@ Usage: octoshield [COMMAND]
   access update PROFILE ID PORTS PROTO SOURCE INTERFACE MINUTES
                             Review and replace one permission
   access revoke PROFILE ID  Revoke a permission immediately
+  access recover PROFILE    Review and reapply only this saved firewall profile
+  access restore            Review and restore the original firewall settings
+  access reconcile PROFILE  Review external firewall changes before recovery
   connections               Select a named connection and adjust privacy
   connections list          Inspect saved and active connection details as JSON
   connections set UUID KEY VALUE
@@ -153,7 +156,7 @@ cli::status() {
         return $?
     fi
     printf 'Live status is unavailable or stale. Showing a limited direct inspection.\n\n'
-    printf 'OctoShield 1.3.2 — inspection (unknown means not verified)\n\n'
+    printf 'OctoShield 1.3.3 — inspection (unknown means not verified)\n\n'
     printf 'Operating system: '
     sed -n 's/^PRETTY_NAME=//p' /etc/os-release
     if command -v ufw >/dev/null; then
@@ -358,16 +361,51 @@ cli::select_item() {
 }
 
 cli::access_menu() {
-    local document profile action selected identifier='' ports protocol=tcp source interface minutes networks choices scope
+    local document profile action selected identifier='' ports protocol=tcp source interface minutes networks choices scope transaction
     core::require_local || return 1
     document=$(cli::system access list) || return 1
     profile=$(jq -er '.profile' <<<"$document") || return 1
     printf '\nFirewall profile: %s\n' "$profile"
     jq '.summary' <<<"$document" | cli::safe_text || return 1
+    jq '.recovery.observed.summary//"Native inspection unavailable."' <<<"$document" | cli::safe_text || return 1
+    jq '.recovery.message//"No earlier operation details are available."' <<<"$document" | cli::safe_text || return 1
     jq -r '.rules[]|"  \(.label) — \(.state), from \(.source), interface \(.interface)"' <<<"$document"
-    printf '\n1) Allow a service\n2) Edit a permission\n3) Revoke a permission\nChoice (empty returns): '
+    printf '\n1) Allow a service\n2) Edit a permission\n3) Revoke a permission\n4) Inspect current firewall\n5) Review and apply selected firewall profile\n6) Restore original firewall settings\n7) Review external firewall changes\n8) Inspect last firewall change\nChoice (empty returns): '
     IFS= read -r action || return 1
     [[ -n $action ]] || return 0
+    case "$action" in
+        1 | 2 | 3)
+            jq -e '.ready==true' <<<"$document" >/dev/null || {
+                core::die 'Firewall recovery is required before editing permissions. Use the recovery choices in this menu.'
+                return 1
+            }
+            ;;
+        4)
+            cli::system access list "$profile"
+            return
+            ;;
+        5)
+            cli::system access recover "$profile"
+            return
+            ;;
+        6)
+            cli::system access restore
+            return
+            ;;
+        7)
+            cli::system access reconcile "$profile"
+            return
+            ;;
+        8)
+            transaction=$(jq -r '.recovery.transaction//""' <<<"$document") || return 1
+            profiles::valid_transaction "$transaction" || {
+                core::die 'No verified transaction reference is available for this older result. Inspect Recovery and the saved change records.'
+                return 1
+            }
+            cli::system backup-show "$transaction"
+            return
+            ;;
+    esac
     case "$action" in
         1) action=allow ;;
         2 | 3)
@@ -502,7 +540,7 @@ cli::main() {
             ;;
         --version)
             (($# == 0)) || return 2
-            printf 'OctoShield 1.3.2\n'
+            printf 'OctoShield 1.3.3\n'
             ;;
         status)
             if [[ $# -eq 1 && $1 == --json ]]; then

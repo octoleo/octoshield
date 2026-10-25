@@ -307,22 +307,37 @@ fixture() {
 
 @test 'firewall needs actual IPv6 chain evidence as well as enabled configuration' {
     source "$BATS_TEST_DIRNAME/../src/lib/status.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/profiles.sh"
+    source "$BATS_TEST_DIRNAME/../src/lib/profile_firewall_verify.sh"
     STATUS_ETC="$BATS_TEST_TMPDIR/etc"
-    printf 'IPV6=yes\n' >"$STATUS_ETC/default/ufw"
+    printf 'IPV6=yes\nDEFAULT_INPUT_POLICY="DROP"\nDEFAULT_OUTPUT_POLICY="ACCEPT"\nDEFAULT_FORWARD_POLICY="DROP"\n' >"$STATUS_ETC/default/ufw"
     ufw() { :; }
     status::run() {
-        [[ $2 == status ]] && printf 'Status: active\nDefault: deny (incoming), allow (outgoing), deny (routed)\n'
+        [[ $1 != ufw ]] || printf 'Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n'
         return 0
     }
     run status::firewall
     [ "$status" -eq 0 ]
     jq -e '.state == "partial"' <<<"$output"
     status::run() {
-        if [[ $2 == status ]]; then printf 'Status: active\nDefault: deny (incoming), allow (outgoing), deny (routed)\n'; else printf 'Chain ufw6-before-input\n'; fi
+        local prefix=ufw
+        case "$1" in
+            ufw) printf 'Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n' ;;
+            iptables-save | ip6tables-save)
+                [[ $1 == iptables-save ]] || prefix=ufw6
+                printf '*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:%s-user-input - [0:0]\n' "$prefix"
+                printf '%s\n' "-A INPUT -j $prefix-before-input" "-A $prefix-before-input -j $prefix-user-input" COMMIT
+                ;;
+            *) return 1 ;;
+        esac
     }
     run status::firewall
     [ "$status" -eq 0 ]
     jq -e '.state == "active"' <<<"$output"
+    sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' "$STATUS_ETC/default/ufw"
+    run status::firewall
+    [ "$status" -eq 0 ]
+    jq -e '.state == "partial"' <<<"$output"
 }
 
 @test 'active monitor needs a recent valid heartbeat' {

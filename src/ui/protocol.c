@@ -346,6 +346,9 @@ static gboolean access_action(gsize argc, const gchar *const *args)
 {
     if (g_str_equal(args[1], "list"))
         return argc == 2 || (argc == 3 && profile_id(args[2]));
+    if (g_str_equal(args[1], "restore")) return argc == 2;
+    if (g_str_equal(args[1], "recover") || g_str_equal(args[1], "reconcile"))
+        return argc == 3 && profile_id(args[2]);
     if (argc < 3 || !profile_id(args[2])) return FALSE;
     gboolean update = g_str_equal(args[1], "update");
     if (g_str_equal(args[1], "revoke") || update) {

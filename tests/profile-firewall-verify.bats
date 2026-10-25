@@ -307,3 +307,121 @@ fixture_config() {
     [ "$status" -ne 0 ]
     [ ! -s "$TEST_MUTATIONS" ]
 }
+
+@test 'both families need a unique reachable INPUT and before-to-user hook' {
+    local family output
+    for family in 4 6; do
+        output=$(fixture_native "$family" '')
+        run profile_firewall::_native "$family" "$(sed '/^-A INPUT -j ufw6\?-before-input$/d' <<<"$output")"
+        [ "$status" -ne 0 ]
+        [[ $output == *'INPUT-to-UFW-to-user-rule path'* ]]
+        output=$(fixture_native "$family" '')
+        run profile_firewall::_native "$family" "$(sed '/^-A .*before-input -j .*user-input$/d' <<<"$output")"
+        [ "$status" -ne 0 ]
+    done
+    output=$(fixture_native 4 '')
+    run profile_firewall::_native 4 "${output/COMMIT/$'-A INPUT -j ufw-before-input\nCOMMIT'}"
+    [ "$status" -ne 0 ]
+}
+
+@test 'unknown nested input jumps and logging accept paths are refused' {
+    local rule
+    for rule in \
+        $'-A ufw-before-input -j CUSTOM\n-A CUSTOM -j ACCEPT' \
+        $'-A ufw-not-local -j CUSTOM\n-A CUSTOM -j ACCEPT' \
+        '-A ufw-logging-deny -j ACCEPT' \
+        '-A ufw-before-input -g ufw-user-input'; do
+        TEST_EXTRA_INPUT=$rule
+        run profile_firewall::verify '{"rules":[]}'
+        [ "$status" -ne 0 ]
+        [[ $output == *'unrecognized UFW input-chain jump'* ]]
+    done
+}
+
+@test 'vendor logging and not-local paths remain supported without claiming Docker forwarding coverage' {
+    TEST_EXTRA_INPUT=$'-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny\n-A ufw-before-input -m conntrack --ctstate INVALID -j DROP\n-A ufw-before-input -j ufw-not-local\n-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN\n-A ufw-not-local -j DROP\n-A ufw-after-input -m addrtype --dst-type BROADCAST -j ufw-skip-to-policy-input\n-A ufw-skip-to-policy-input -j DROP\n-A ufw-logging-deny -m limit --limit 3/min -j LOG --log-prefix "[UFW BLOCK] "\n-A FORWARD -j DOCKER-USER\n-A DOCKER-USER -j ACCEPT'
+    # The IPv4-only extension is irrelevant to the IPv6 fixture, just as
+    # unrelated non-UFW forwarding chains are outside host-input verification.
+    run profile_firewall::verify '{"rules":[]}'
+    [ "$status" -eq 0 ]
+    [ ! -s "$TEST_MUTATIONS" ]
+}
+
+@test 'configured forwarding DROP is required even when UFW calls routing disabled' {
+    local defaults="$BATS_TEST_TMPDIR/ufw-defaults"
+    printf 'IPV6=yes\nDEFAULT_INPUT_POLICY="DROP"\nDEFAULT_OUTPUT_POLICY="ACCEPT"\nDEFAULT_FORWARD_POLICY="DROP"\n' >"$defaults"
+    profile_firewall::defaults "$defaults"
+    sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' "$defaults"
+    run profile_firewall::defaults "$defaults"
+    [ "$status" -ne 0 ]
+    [[ $output == *'DROP for incoming and forwarded'* ]]
+    printf 'DEFAULT_FORWARD_POLICY="DROP"\n' >>"$defaults"
+    run profile_firewall::defaults "$defaults"
+    [ "$status" -ne 0 ]
+}
+
+@test 'reviewed reconciliation accepts vendor discovery but refuses an injected broad before-input grant' {
+    local native
+    TEST_EXTRA_INPUT='-A ufw-before-input -d 224.0.0.251/32 -p udp -m udp --dport 5353 -j ACCEPT'
+    native=$(fixture_native 4 '')
+    run profile_firewall::_native 4 "$native" 0 reconcile
+    [ "$status" -eq 0 ]
+    TEST_EXTRA_INPUT='-A ufw-before-input -p tcp -m tcp --dport 443 -j ACCEPT'
+    run profile_firewall::_native 4 "$(fixture_native 4 '')" 0 reconcile
+    [ "$status" -ne 0 ]
+}
+
+@test 'each family must retain DROP forwarding and ACCEPT outgoing kernel defaults' {
+    local family native
+    for family in 4 6; do
+        native=$(fixture_native "$family" '')
+        run profile_firewall::_native "$family" "${native/:FORWARD DROP/:FORWARD ACCEPT}"
+        [ "$status" -ne 0 ]
+        [[ $output == *'kernel defaults'* ]]
+        run profile_firewall::_native "$family" "${native/:OUTPUT ACCEPT/:OUTPUT DROP}"
+        [ "$status" -ne 0 ]
+        [[ $output == *'kernel defaults'* ]]
+    done
+}
+
+@test 'defaults distinguish literal quoted values from trailing comments without sourcing data' {
+    local defaults="$BATS_TEST_TMPDIR/ufw-defaults"
+    printf 'IPV6=yes\nDEFAULT_INPUT_POLICY="DROP" # incoming=closed\nDEFAULT_OUTPUT_POLICY="ACCEPT"\nDEFAULT_FORWARD_POLICY="DROP"\n' >"$defaults"
+    profile_firewall::defaults "$defaults"
+    sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="DROP#not-the-policy"/' "$defaults"
+    run profile_firewall::defaults "$defaults"
+    [ "$status" -ne 0 ]
+}
+
+@test 'inactive UFW primary remnants normalize only when every retained chain is empty' {
+    local family prefix stage direction native normalized bad
+    for family in 4 6; do
+        prefix=ufw
+        [[ $family == 4 ]] || prefix=ufw6
+        native=$'*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]'
+        for stage in before-logging before after after-logging reject track; do
+            for direction in input output forward; do
+                native+=$'\n'":$prefix-$stage-$direction - [0:0]"
+                native+=$'\n'"-A ${direction^^} -j $prefix-$stage-$direction"
+            done
+        done
+        native+=$'\n-A FORWARD -j DOCKER-USER\nCOMMIT'
+        normalized=$(profile_firewall::_inactive "$family" "$native")
+        [ "$normalized" = $':INPUT ACCEPT\n:FORWARD ACCEPT\n:OUTPUT ACCEPT' ]
+        for bad in "-A $prefix-before-input -j ACCEPT" "-A $prefix-after-input -j RETURN" \
+            '-A INPUT -j CUSTOM' ":$prefix-custom-input - [0:0]"; do
+            run profile_firewall::_inactive "$family" "${native/COMMIT/$bad$'\nCOMMIT'}"
+            [ "$status" -ne 0 ]
+        done
+        run profile_firewall::_inactive "$family" "${native/:INPUT ACCEPT/:INPUT DROP}"
+        [ "$status" -eq 0 ]
+        [ "$output" = $':INPUT DROP\n:FORWARD ACCEPT\n:OUTPUT ACCEPT' ]
+        run profile_firewall::_inactive "$family" "${native/:FORWARD ACCEPT/:FORWARD DROP}"
+        [ "$status" -eq 0 ]
+        [ "$output" = $':INPUT ACCEPT\n:FORWARD DROP\n:OUTPUT ACCEPT' ]
+        run profile_firewall::_inactive "$family" "${native/:FORWARD ACCEPT/:FORWARD UNKNOWN}"
+        [ "$status" -ne 0 ]
+        run profile_firewall::_inactive "$family" 'unrecognized output' snapshot
+        [ "$status" -ne 0 ]
+    done
+}

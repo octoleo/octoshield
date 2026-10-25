@@ -13,6 +13,56 @@
 static App test_app;
 static gchar *test_executable;
 
+static void access_fixture_recovery(JsonObject *root, const char *reason, gboolean ready)
+{
+    const char *profile = string_member(root, "profile", "home");
+    json_object_set_string_member(root, "assigned_profile", g_str_equal(reason, "unmanaged") ? "unmanaged" : profile);
+    json_object_set_boolean_member(root, "managed", !g_str_equal(reason, "unmanaged"));
+    json_object_set_boolean_member(root, "ready", ready);
+    JsonObject *recovery = json_object_new();
+    json_object_set_string_member(recovery, "reason", reason);
+    json_object_set_string_member(recovery, "last_result", ready ? "applied" : "failed");
+    json_object_set_string_member(recovery, "message", ready ? "Selected firewall verified." : "Requested profile change failed: fixture nftables reload was refused.");
+    json_object_set_string_member(recovery, "transaction", "20261025T120000Z-1234");
+    json_object_set_boolean_member(recovery, "can_apply", !g_str_equal(reason, "drift"));
+    json_object_set_boolean_member(recovery, "can_restore", !g_str_equal(reason, "unmanaged") && !g_str_equal(reason, "drift"));
+    json_object_set_boolean_member(recovery, "can_reconcile", g_str_equal(reason, "drift"));
+    JsonObject *observed = json_object_new();
+    json_object_set_string_member(observed, "state", ready ? "active" : "partial");
+    json_object_set_string_member(observed, "summary", ready ? "The selected native firewall policy is verified." : "Native policy differs from the selected profile.");
+    json_object_set_object_member(recovery, "observed", observed);
+    json_object_set_object_member(root, "recovery", recovery);
+}
+
+static JsonObject *access_fixture(const char *profile, const char *reason, gboolean ready)
+{
+    JsonObject *root = json_object_new();
+    json_object_set_string_member(root, "kind", "access");
+    json_object_set_string_member(root, "profile", profile);
+    json_object_set_string_member(root, "summary", "Fixture permissions; no host changes.");
+    json_object_set_array_member(root, "rules", json_array_new());
+    access_fixture_recovery(root, reason, ready);
+    return root;
+}
+
+static void select_access_profile(const char *profile)
+{
+    for (guint i = 0; i < test_app.profile_ids->len; i++) {
+        if (g_str_equal(g_ptr_array_index(test_app.profile_ids, i), profile)) {
+            gtk_drop_down_set_selected(test_app.access_profile, i);
+            return;
+        }
+    }
+    g_assert_not_reached();
+}
+
+static void ready_access_fixture(void)
+{
+    select_access_profile("home");
+    g_autoptr(JsonObject) root = access_fixture("home", "ready", TRUE);
+    g_assert_true(show_access(&test_app, root));
+}
+
 static void save_widget_png(GtkWidget *widget, const char *path)
 {
     if (g_getenv("OCTOSHIELD_TEST_SCREENSHOTS") == NULL)
@@ -39,8 +89,67 @@ static void save_widget_png(GtkWidget *widget, const char *path)
     gsk_render_node_unref(node);
 }
 
+static void fixture_text_event(const char *type, gint64 request, const char *text)
+{
+    g_autoptr(JsonObject) object = json_object_new();
+    json_object_set_string_member(object, "type", type);
+    json_object_set_int_member(object, "request", request);
+    json_object_set_string_member(object, "text", text);
+    g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(node, object);
+    g_autoptr(JsonGenerator) generator = json_generator_new();
+    json_generator_set_root(generator, node);
+    g_autofree gchar *line = json_generator_to_data(generator, NULL);
+    puts(line);
+}
+
 static int fixture(const char *name)
 {
+    if (g_str_equal(name, "access-session")) {
+        fputs("{\"type\":\"ready\"}\n", stdout); fflush(stdout);
+        char line[8192];
+        guint count = 0;
+        const char *commands[] = {"recover", "list", "recover", "list", "restore", "list", "reconcile", "list"};
+        while (fgets(line, sizeof(line), stdin) != NULL) {
+            g_autoptr(JsonParser) parser = json_parser_new();
+            if (!json_parser_load_from_data(parser, line, -1, NULL) || count >= G_N_ELEMENTS(commands)) return 20;
+            JsonObject *request = json_node_get_object(json_parser_get_root(parser));
+            gint64 id = json_object_get_int_member(request, "id");
+            JsonArray *args = array_member(request, "args");
+            const char *command = commands[count++];
+            gboolean restore = g_str_equal(command, "restore");
+            if (args == NULL || json_array_get_length(args) != (restore ? 2U : 3U) ||
+                g_strcmp0(json_array_get_string_element(args, 0), "access") != 0 ||
+                g_strcmp0(json_array_get_string_element(args, 1), command) != 0 ||
+                (!restore && g_strcmp0(json_array_get_string_element(args, 2), "office") != 0)) return 21;
+            if (g_str_equal(command, "list")) {
+                const char *reason = count == 2 ? "incomplete" : count == 4 ? "ready" : count == 6 ? "unmanaged" : "pending";
+                g_autoptr(JsonObject) result = access_fixture("office", reason, count == 4 || count == 6);
+                g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+                json_node_set_object(node, result);
+                g_autoptr(JsonGenerator) generator = json_generator_new();
+                json_generator_set_root(generator, node);
+                g_autofree gchar *json = json_generator_to_data(generator, NULL);
+                fixture_text_event("data", id, json);
+            } else {
+                g_autofree gchar *review = g_strdup_printf("Exact fixture firewall review: access %s%s. Permission draft is not submitted.", command, restore ? "" : " office");
+                fixture_text_event("log", id, review);
+                printf("{\"type\":\"confirm\",\"request\":%" G_GINT64_FORMAT ",\"id\":1,\"text\":\"Apply this exact firewall operation?\"}\n", id);
+                fflush(stdout);
+                if (fgets(line, sizeof(line), stdin) == NULL || !json_parser_load_from_data(parser, line, -1, NULL)) return 22;
+                JsonObject *answer = json_node_get_object(json_parser_get_root(parser));
+                if (g_strcmp0(string_member(answer, "type", ""), "answer") != 0 ||
+                    json_object_get_int_member(answer, "request") != id || json_object_get_int_member(answer, "id") != 1 ||
+                    !boolean_member(answer, "allow")) return 23;
+            }
+            gboolean success = count != 1;
+            if (!success) fixture_text_event("stderr", id, "Retained fixture error: nftables reload refused after partial changes.");
+            printf("{\"type\":\"done\",\"request\":%" G_GINT64_FORMAT ",\"success\":%s,\"change_started\":true}\n", id, success ? "true" : "false");
+            printf("{\"type\":\"finished\",\"request\":%" G_GINT64_FORMAT ",\"exit_code\":%d}\n", id, success ? 0 : 1);
+            fflush(stdout);
+        }
+        return 0;
+    }
     if (g_str_equal(name, "session")) {
         fputs("{\"type\":\"ready\"}\n", stdout); fflush(stdout);
         char line[8192];
@@ -212,6 +321,7 @@ static void test_observed_status_and_overrides(void)
     StatusRow *firewall = g_ptr_array_index(test_app.status_rows, 0);
     StatusRow *usb = g_ptr_array_index(test_app.status_rows, 1);
     g_assert_cmpstr(gtk_label_get_text(firewall->badge), ==, "Needs attention");
+    g_assert_cmpstr(gtk_button_get_label(firewall->review), ==, "Review & recover");
     g_assert_cmpstr(gtk_label_get_text(usb->badge), ==, "Active");
     g_assert_nonnull(strstr(adw_action_row_get_subtitle(usb->row), "office (override)"));
     g_assert_nonnull(strstr(gtk_label_get_text(test_app.usb_pending), "2 blocked devices"));
@@ -809,8 +919,92 @@ static void test_session_reuses_authenticated_transport(void)
     update_actions(&test_app);
 }
 
+static void test_access_recovery_uses_session_and_retains_failure(void)
+{
+    select_access_profile("office");
+    access_cancel_edit(NULL, &test_app);
+    gtk_drop_down_set_selected(test_app.access_preset, 2);
+    gtk_drop_down_set_selected(test_app.access_scope, 1);
+    gtk_editable_set_text(test_app.access_ports, "8080,8443");
+    gtk_editable_set_text(test_app.access_source, "192.168.20.42");
+    gtk_editable_set_text(test_app.access_interface, "wlp2s0");
+    gtk_drop_down_set_selected(test_app.access_duration, 2);
+    g_autoptr(JsonObject) initial = access_fixture("office", "incomplete", FALSE);
+    g_assert_true(show_access(&test_app, initial));
+    const char *const argv[] = {test_executable, "--fixture", "access-session", NULL};
+    g_autoptr(GError) error = NULL;
+    Session *session = g_new0(Session, 1);
+    session->app = &test_app;
+    session->process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+    g_assert_no_error(error);
+    session->input = g_subprocess_get_stdin_pipe(session->process);
+    session->output = g_subprocess_get_stdout_pipe(session->process);
+    session->line = g_byte_array_new();
+    test_app.session = session; test_app.auth_required = TRUE;
+    session_read_next(session);
+    g_subprocess_wait_async(session->process, NULL, session_waited, session);
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (!session->ready && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_true(session->ready);
+    GtkButton *buttons[] = {test_app.access_apply, test_app.access_apply, test_app.access_restore, test_app.access_reconcile};
+    const char *reviews[] = {"access recover office", "access recover office", "access restore", "access reconcile office"};
+    for (guint i = 0; i < G_N_ELEMENTS(buttons); i++) {
+        if (i == 3) {
+            access_fixture_recovery(initial, "drift", FALSE);
+            g_assert_true(show_access(&test_app, initial));
+        }
+        g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(buttons[i])));
+        g_signal_emit_by_name(buttons[i], "clicked");
+        deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+        while (test_app.confirmation == NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+        g_assert_nonnull(test_app.confirmation);
+        g_assert_true(test_app.session == session);
+        g_assert_null(test_app.preview);
+        GtkWidget *scroll = adw_message_dialog_get_extra_child(test_app.confirmation);
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scroll))));
+        GtkTextIter start, end;
+        gtk_text_buffer_get_bounds(buffer, &start, &end);
+        g_autofree gchar *review = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+        g_assert_nonnull(strstr(review, reviews[i]));
+        adw_message_dialog_response(test_app.confirmation, "accept");
+        deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+        guint64 expected = 2 * (i + 1);
+        while ((session->next_request < expected || test_app.operation != NULL || test_app.private_refresh_idle != 0) && g_get_monotonic_time() < deadline) {
+            g_main_context_iteration(NULL, FALSE); g_usleep(1000);
+        }
+        g_assert_null(test_app.operation);
+        g_assert_cmpuint(session->next_request, ==, expected);
+        g_assert_true(test_app.session == session);
+        g_assert_true(session->ready);
+        g_assert_true(test_app.access_loaded);
+        g_assert_cmpstr(selected_profile(&test_app, test_app.access_profile), ==, "office");
+        g_assert_cmpstr(gtk_editable_get_text(test_app.access_ports), ==, "8080,8443");
+        g_assert_cmpstr(gtk_editable_get_text(test_app.access_source), ==, "192.168.20.42");
+        g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_duration), ==, 2);
+        g_assert_true(gtk_widget_get_visible(GTK_WIDGET(test_app.access_failure)));
+        gtk_text_buffer_get_bounds(test_app.access_failure_log, &start, &end);
+        g_autofree gchar *failure = gtk_text_buffer_get_text(test_app.access_failure_log, &start, &end, FALSE);
+        g_assert_nonnull(strstr(failure, "Retained fixture error: nftables reload refused after partial changes."));
+        g_autofree gchar *current_log = log_text();
+        g_assert_null(strstr(current_log, "Retained fixture error"));
+        g_assert_cmpint(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)), ==, i == 1 || i == 2);
+    }
+    /* Finish GTK dialog and text-scrolling transitions before unmapping the
+     * application immediately after these deliberately rapid fixture replies. */
+    deadline = g_get_monotonic_time() + 250 * G_TIME_SPAN_MILLISECOND;
+    while (g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    session_revoke(&test_app, "Test recovery lock");
+    deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (test_app.session != NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_null(test_app.session);
+    test_app.auth_required = FALSE;
+    test_app.local_session_ready = FALSE;
+    update_actions(&test_app);
+}
+
 static void test_guided_access_and_connections(void)
 {
+    ready_access_fixture();
     g_autoptr(JsonParser) parser = json_parser_new();
     const char *data = "{\"kind\":\"connections\",\"connections\":["
         "{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Workshop Wi-Fi\",\"type\":\"wifi\",\"interface\":\"wlp2s0\",\"active\":true,\"lan_candidate\":true,\"subnets\":[\"192.168.20.0/24\"],\"autoconnect\":\"no\",\"mdns\":\"0\",\"llmnr\":\"0\",\"mac\":\"stable\",\"runtime\":{\"state\":\"pending\",\"summary\":\"Reconnect to apply the saved privacy settings.\"},\"source_files\":[\"/etc/NetworkManager/system-connections/workshop.nmconnection\"]},"
@@ -858,6 +1052,9 @@ static void test_guided_access_and_connections(void)
 
 static void test_ambiguous_network_and_privacy(void)
 {
+    ready_access_fixture();
+    g_clear_pointer(&test_app.lan_options, g_ptr_array_unref);
+    g_clear_pointer(&test_app.access_network_identity, g_free);
     g_autoptr(JsonParser) parser = json_parser_new();
     const char *data = "{\"kind\":\"connections\",\"connections\":["
         "{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Workshop Wi-Fi\",\"type\":\"wifi\",\"interface\":\"wlp2s0\",\"active\":true,\"lan_candidate\":true,\"subnets\":[\"192.168.20.0/24\"],\"autoconnect\":\"unknown\",\"mdns\":\"0\",\"llmnr\":\"2\",\"mac\":\"random\"},"
@@ -876,6 +1073,21 @@ static void test_ambiguous_network_and_privacy(void)
     g_assert_no_error(error); g_assert_nonnull(chosen);
     g_assert_cmpstr(chosen[5], ==, "192.168.30.0/24");
     g_assert_cmpstr(chosen[6], ==, "enp1s0");
+    g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_network), ==, 1);
+    g_auto(GStrv) preserved = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(preserved);
+    g_assert_cmpstr(preserved[5], ==, "192.168.30.0/24");
+    JsonArray *connections = array_member(json_node_get_object(json_parser_get_root(parser)), "connections");
+    JsonNode *first = json_node_copy(json_array_get_element(connections, 0));
+    json_array_remove_element(connections, 0);
+    json_array_add_element(connections, first);
+    g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_network), ==, 0);
+    g_auto(GStrv) reordered = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(reordered);
+    g_assert_cmpstr(reordered[5], ==, "192.168.30.0/24");
+    g_assert_cmpstr(reordered[6], ==, "enp1s0");
     g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_autoconnect), ==, 2);
     g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_discovery), ==, 2);
     g_assert_cmpuint(gtk_drop_down_get_selected(test_app.privacy_mac), ==, 2);
@@ -896,14 +1108,26 @@ static void test_ambiguous_network_and_privacy(void)
     }
     g_assert_true(refused);
     g_object_unref(save);
+    /* A disappearing selection must not silently become another single LAN
+     * on either the first inspection or a later refresh. */
+    json_array_remove_element(connections, 0);
+    for (guint i = 0; i < 2; i++) {
+        g_assert_true(show_connections(&test_app, json_node_get_object(json_parser_get_root(parser))));
+        g_assert_cmpuint(test_app.lan_options->len, ==, 1);
+        g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_network), ==, 1);
+        g_auto(GStrv) disappeared = access_arguments(&test_app, &error);
+        g_assert_null(disappeared); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    }
 }
 
 static void test_access_rows_and_edit(void)
 {
+    select_access_profile("home");
     g_autoptr(JsonParser) parser = json_parser_new();
     const char *data = "{\"kind\":\"access\",\"profile\":\"home\",\"managed\":true,\"summary\":\"Verified host firewall permissions.\",\"rules\":[{\"id\":\"g123-456-789\",\"label\":\"Web server\",\"ports\":\"80,443\",\"protocol\":\"tcp\",\"source\":\"192.168.20.0/24\",\"interface\":\"wlp2s0\",\"expires_at\":0,\"state\":\"active\"}]}";
     g_assert_true(json_parser_load_from_data(parser, data, -1, NULL));
-    show_access(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    access_fixture_recovery(json_node_get_object(json_parser_get_root(parser)), "ready", TRUE);
+    g_assert_true(show_access(&test_app, json_node_get_object(json_parser_get_root(parser))));
     GtkWidget *row = gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules));
     g_assert_true(ADW_IS_ACTION_ROW(row));
     g_assert_cmpstr(adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)), ==, "Web server");
@@ -923,6 +1147,7 @@ static void test_access_rows_and_edit(void)
     g_assert_true(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)) == row);
     JsonObject *root = json_node_get_object(json_parser_get_root(parser));
     json_object_set_string_member(root, "profile", "missing-custom-profile");
+    access_fixture_recovery(root, "ready", TRUE);
     g_assert_false(show_access(&test_app, root));
     g_assert_false(test_app.access_loaded);
     g_assert_null(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)));
@@ -930,6 +1155,7 @@ static void test_access_rows_and_edit(void)
     g_auto(GStrv) unknown = access_arguments(&test_app, &error);
     g_assert_null(unknown); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
     json_object_set_string_member(root, "profile", "home");
+    access_fixture_recovery(root, "ready", TRUE);
     g_assert_true(show_access(&test_app, root));
     g_auto(GStrv) refreshed = access_arguments(&test_app, &error);
     g_assert_no_error(error); g_assert_nonnull(refreshed);
@@ -961,8 +1187,96 @@ static void test_independent_encryption_and_details(void)
     save_widget_png(GTK_WIDGET(test_app.window), "build/ui-storage-details.png");
 }
 
+static void test_access_recovery_readiness_and_draft(void)
+{
+    select_access_profile("office");
+    access_cancel_edit(NULL, &test_app);
+    g_autoptr(JsonObject) root = access_fixture("office", "incomplete", FALSE);
+    JsonObject *rule = json_object_new();
+    json_object_set_string_member(rule, "id", "g123-456-789");
+    json_object_set_string_member(rule, "label", "Fixture web server");
+    json_object_set_string_member(rule, "ports", "80,443");
+    json_object_set_string_member(rule, "protocol", "tcp");
+    json_object_set_string_member(rule, "source", "192.168.20.0/24");
+    json_object_set_string_member(rule, "interface", "wlp2s0");
+    json_object_set_string_member(rule, "state", "failed");
+    json_object_set_int_member(rule, "expires_at", 0);
+    json_array_add_object_element(array_member(root, "rules"), rule);
+    g_assert_true(show_access(&test_app, root));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.access_recovery_detail), "nftables reload was refused"));
+    g_assert_nonnull(strstr(gtk_label_get_text(test_app.access_recovery_detail), "Recorded assignment: office"));
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_apply)));
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_restore)));
+    g_assert_true(gtk_widget_get_visible(GTK_WIDGET(test_app.access_last_change)));
+    GtkWidget *row = gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules));
+    AccessRule *binding = g_object_get_data(G_OBJECT(row), "access-rule");
+    g_assert_nonnull(binding);
+    g_assert_false(gtk_widget_get_sensitive(binding->revoke));
+    access_revoke_clicked(NULL, binding);
+    g_assert_null(test_app.operation);
+    access_edit_clicked(NULL, binding);
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_ports)));
+    gtk_editable_set_text(test_app.access_ports, "8080,8443");
+    gtk_editable_set_text(test_app.access_source, "192.168.20.42");
+    gtk_drop_down_set_selected(test_app.access_duration, 2);
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) blocked = access_arguments(&test_app, &error);
+    g_assert_null(blocked); g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT); g_clear_error(&error);
+    select_page(&test_app, "office");
+    save_widget_png(GTK_WIDGET(test_app.window), "build/ui-firewall-recovery.png");
+
+    access_fixture_recovery(root, "ready", TRUE);
+    g_assert_true(show_access(&test_app, root));
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    g_assert_cmpstr(test_app.access_edit_id, ==, "g123-456-789");
+    g_assert_cmpstr(gtk_editable_get_text(test_app.access_ports), ==, "8080,8443");
+    g_assert_cmpstr(gtk_editable_get_text(test_app.access_source), ==, "192.168.20.42");
+    g_assert_cmpuint(gtk_drop_down_get_selected(test_app.access_duration), ==, 2);
+    g_auto(GStrv) resumed = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(resumed);
+    g_assert_cmpstr(resumed[1], ==, "update");
+    g_assert_cmpstr(resumed[2], ==, "office");
+    g_assert_cmpstr(resumed[4], ==, "8080,8443");
+    g_assert_null(test_app.operation);
+
+    access_fixture_recovery(root, "drift", FALSE);
+    g_assert_true(show_access(&test_app, root));
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_apply)));
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_restore)));
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_reconcile)));
+    json_object_set_boolean_member(root, "ready", TRUE);
+    g_assert_false(show_access(&test_app, root));
+    for (guint i = 0; i < 7; i++) {
+        access_fixture_recovery(root, "ready", TRUE);
+        JsonObject *recovery = object_member(root, "recovery");
+        if (i == 0) json_object_set_string_member(root, "ready", "true");
+        if (i == 1) json_object_set_string_member(recovery, "can_apply", "true");
+        if (i == 2) json_object_set_string_member(recovery, "transaction", "../../etc/shadow");
+        if (i == 3) json_object_set_string_member(object_member(recovery, "observed"), "state", "complete");
+        if (i == 4) json_object_remove_member(root, "recovery");
+        if (i == 5) json_object_set_string_member(object_member(recovery, "observed"), "state", "unknown");
+        if (i == 6) json_object_set_string_member(rule, "expires_at", "unexpected text");
+        g_assert_false(show_access(&test_app, root));
+        g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+        g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_apply)));
+        g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_restore)));
+        g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_reconcile)));
+        g_assert_cmpstr(gtk_editable_get_text(test_app.access_ports), ==, "8080,8443");
+        g_assert_cmpstr(test_app.access_edit_id, ==, "g123-456-789");
+    }
+    json_object_set_int_member(rule, "expires_at", 0);
+    access_fixture_recovery(root, "unmanaged", TRUE);
+    g_assert_true(show_access(&test_app, root));
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    access_cancel_edit(NULL, &test_app);
+}
+
 static void test_access_profile_freshness(void)
 {
+    test_app.access_profile_initialized = FALSE;
+    g_clear_pointer(&test_app.firewall_profile, g_free);
     g_autoptr(JsonParser) parser = json_parser_new();
     g_autofree gchar *snapshot = g_strdup_printf("{\"checked_at\":%" G_GINT64_FORMAT ",\"profiles\":{\"active\":\"home\",\"assignments\":{\"firewall\":\"office\"}},\"controls\":{},\"exposures\":{}}", g_get_real_time() / G_USEC_PER_SEC);
     g_assert_true(json_parser_load_from_data(parser, snapshot, -1, NULL));
@@ -971,12 +1285,24 @@ static void test_access_profile_freshness(void)
     render_status(&test_app, NULL);
     g_assert_cmpstr(selected_profile(&test_app, test_app.access_profile), ==, "office");
     g_assert_cmpstr(test_app.firewall_profile, ==, "office");
+    access_cancel_edit(NULL, &test_app);
     test_app.access_edit_id = g_strdup("g123-456-789");
     test_app.access_edit_profile = g_strdup("office");
     for (guint i = 0; i < test_app.profile_ids->len; i++)
         if (g_str_equal(g_ptr_array_index(test_app.profile_ids, i), "home")) gtk_drop_down_set_selected(test_app.access_profile, i);
     g_assert_null(test_app.access_edit_id); g_assert_null(test_app.access_edit_profile);
     g_assert_null(gtk_widget_get_first_child(GTK_WIDGET(test_app.access_rules)));
+    gtk_editable_set_text(test_app.access_ports, "8080,8443");
+    test_app.access_edit_id = g_strdup("g123-456-789");
+    test_app.access_edit_profile = g_strdup("home");
+    JsonObject *assignments = object_member(object_member(json_node_get_object(json_parser_get_root(parser)), "profiles"), "assignments");
+    json_object_set_string_member(assignments, "firewall", "unmanaged");
+    render_status(&test_app, json_node_get_object(json_parser_get_root(parser)));
+    g_assert_cmpstr(selected_profile(&test_app, test_app.access_profile), ==, "home");
+    g_assert_cmpstr(test_app.access_edit_id, ==, "g123-456-789");
+    g_assert_cmpstr(gtk_editable_get_text(test_app.access_ports), ==, "8080,8443");
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    access_cancel_edit(NULL, &test_app);
 }
 
 static void test_private_data_rejection_and_queue(void)
@@ -1040,6 +1366,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/access/ambiguous-networks-and-unknown-privacy", test_ambiguous_network_and_privacy);
     g_test_add_func("/ui/access/inline-rules-and-atomic-edit", test_access_rows_and_edit);
     g_test_add_func("/ui/access/stale-status-retains-effective-profile", test_access_profile_freshness);
+    g_test_add_func("/ui/access/recovery-readiness-and-preserved-draft", test_access_recovery_readiness_and_draft);
     g_test_add_func("/ui/diagnostics/private-data-rejection-and-queue", test_private_data_rejection_and_queue);
     g_test_add_func("/ui/diagnostics/encryption-independent-of-profile", test_independent_encryption_and_details);
     g_test_add_func("/ui/usb/prompt-deduplication-and-cancel", test_usb_prompt_deduplication_and_cancel);
@@ -1047,6 +1374,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/usb/profile-and-remembered-decisions", test_usb_profile_and_remembered_decisions);
     g_test_add_func("/ui/session/local-unlocked-graphical-owner", test_login_requires_local_unlocked_graphical_owner);
     g_test_add_func("/ui/session/reuses-authenticated-transport", test_session_reuses_authenticated_transport);
+    g_test_add_func("/ui/session/firewall-recovery-reuses-session-and-retains-failure", test_access_recovery_uses_session_and_retains_failure);
     g_test_add_func("/ui/process/success-drains-both-streams", test_success);
     g_test_add_func("/ui/process/exit-without-done-fails", test_missing_done);
     g_test_add_func("/ui/process/done-with-bad-exit-fails", test_exit_mismatch);

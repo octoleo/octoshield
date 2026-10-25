@@ -266,6 +266,29 @@ test::reject_privileged() {
     test::privileged_parity monitor disable
 }
 
+@test "firewall recovery uses fixed privileged actions with GUI CLI and helper parity" {
+    test::privileged_parity access recover office
+    test::privileged_parity access restore
+    test::privileged_parity access reconcile home
+    local action
+    local -a words
+    for action in 'access recover' 'access recover unmanaged' 'access recover home extra' \
+        'access restore home' 'access reconcile' 'access reconcile ../home' 'access reconcile home extra'; do
+        read -r -a words <<<"$action"
+        run "$OCTOSHIELD_CAPABILITY_DRIVER" privileged "${words[@]}"
+        [ "$status" -ne 0 ]
+        run api::validate "${words[@]}"
+        [ "$status" -ne 0 ]
+    done
+    for action in 'access recover office' 'access restore' 'access reconcile home'; do
+        read -r -a words <<<"$action"
+        run "$OCTOSHIELD_CAPABILITY_DRIVER" user "${words[@]}"
+        [ "$status" -ne 0 ]
+        run user_api::validate "${words[@]}"
+        [ "$status" -ne 0 ]
+    done
+}
+
 @test "desktop restoration notification preferences and recovery stay unprivileged" {
     test::user_parity desktop apply
     test::user_parity desktop restore

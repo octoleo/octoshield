@@ -43,6 +43,7 @@ setup() {
         rm -f -- "$TEST_NATIVE/$1"
     }
     profile_controls::conflict() { return 0; }
+    profile_controls::snapshot() { if [[ -f $TEST_NATIVE/$1 ]]; then jq -Rn --arg value "$(cat "$TEST_NATIVE/$1")" '{fixture:$value}'; else printf '{}\n'; fi; }
     profile_controls::remember_desired() { return 0; }
     profile_controls::expiry_due() { [[ -f "$TEST_NATIVE/expiry-due" ]]; }
     profile_controls::expire() {

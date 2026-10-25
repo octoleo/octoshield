@@ -21,6 +21,8 @@ access::_valid_permission() {
 access::validate() {
     case "${1-}" in
         list) [[ $# -eq 1 || $# -eq 2 ]] && { [[ $# -eq 1 ]] || profiles::valid_name "$2"; } ;;
+        recover | reconcile) [[ $# -eq 2 ]] && profiles::valid_name "$2" ;;
+        restore) [[ $# -eq 1 ]] ;;
         allow) [[ $# -eq 7 ]] && profiles::valid_name "$2" && access::_valid_permission "${@:3}" ;;
         update) [[ $# -eq 8 ]] && profiles::valid_name "$2" && access::valid_id "$3" && access::_valid_permission "${@:4}" ;;
         revoke) [[ $# -eq 3 ]] && profiles::valid_name "$2" && access::valid_id "$3" ;;
@@ -35,8 +37,70 @@ access::default_profile() {
       else (.profiles|keys|first) end'
 }
 
+# Read-only assessment shared by the form and its mutation guard. A historical
+# failure remains visible even when native inspection now finds matching rules.
+# Only an explicitly reviewed Apply/Restore completes that failed operation.
+access::_assessment() {
+    local profile=$1 active=$2 document=$3 saved='' current='' desired result message transaction='' directory
+    local ready=false can_apply=false can_restore=false can_reconcile=false matches=false narrowed=false
+    local reason=unavailable summary='Firewall state or recovery evidence could not be read. Inspect the last change before retrying.' observed
+    result=$(jq -r '.results.firewall.status//"unmanaged"' <<<"$document") || return 1
+    message=$(jq -r '.results.firewall.message//"No previous firewall operation is recorded."' <<<"$document") || return 1
+    transaction=$(jq -r '.results.firewall.transaction//""' <<<"$document") || return 1
+    if ! profiles::valid_transaction "$transaction" ||
+        ! profiles::_secure_file "$CORE_STATE/backups/$transaction" directory ||
+        ! profiles::_secure_file "$CORE_STATE/backups/$transaction/actions.log"; then transaction=; fi
+    observed=$(profile_controls::firewall_observe "$profile" 2>/dev/null) || observed='{}'
+    observed=$(jq -ce 'select(type=="object" and (.state|IN("active","inactive","partial","unknown","unsupported")) and
+        (.summary|type=="string" and length<=1024)) | {state,summary}' <<<"$observed" 2>/dev/null) ||
+        observed='{"state":"unknown","summary":"Current native firewall policy could not be inspected."}'
+    directory=$(profile_controls::_directory) || return 1
+    if saved=$(profile_controls::_read firewall 2>/dev/null); then
+        if profile_controls::firewall_baseline_available 2>/dev/null && current=$(profile_controls::snapshot firewall 2>/dev/null); then
+            [[ $(profile_controls::_hash <<<"$current") != "$(jq -r .expected <<<"$saved")" ]] || matches=true
+            if [[ $matches == false ]] && profile_controls::_runtime_narrowed "$saved" "$current" >/dev/null 2>&1; then narrowed=true; fi
+            if [[ $matches == false && $narrowed == false ]]; then
+                reason=drift
+                summary='The native firewall differs from the recorded state. Review external changes here before applying a saved profile or restoring the original settings.'
+                if profile_controls::firewall_reconcile_safe >/dev/null 2>&1; then can_reconcile=true; fi
+                if [[ $can_reconcile == false ]]; then
+                    summary='The native firewall differs from the recorded state and contains unsupported or unsafe configuration. Inspect its rules and the last change; automatic reconciliation is unavailable.'
+                fi
+            else
+                can_apply=true can_restore=true
+                desired=$(jq -c --arg p "$profile" '.profiles[$p].firewall' <<<"$document" | profile_controls::_hash) || return 1
+                if [[ $active != unmanaged && $active != "$profile" ]]; then
+                    reason=different-profile
+                    summary="Firewall currently uses $active. Select that profile for a permission change, or review and apply the selected $profile firewall profile here."
+                elif [[ $result == failed || $result == applying || $active == unmanaged ]]; then
+                    reason=incomplete
+                    summary='The previous firewall change did not complete. Review and apply the selected firewall profile here, or restore the original firewall settings. This is a saved result, not a running operation.'
+                elif [[ $result == pending || $narrowed == true || $(jq -r .desired <<<"$saved") != "$desired" ]]; then
+                    reason=pending
+                    summary='This firewall profile has saved changes awaiting Apply, or needs reapplication after reviewed recovery. Review and apply it here before changing live permissions.'
+                elif [[ $(jq -r .state <<<"$observed") != active ]]; then
+                    reason=incomplete
+                    summary='Current native rules do not verify against the selected firewall profile. Inspect the finding below, then review and apply the profile or restore its original settings.'
+                else
+                    reason=ready ready=true
+                    summary='The selected firewall profile is verified. Review a permission to allow, update or revoke access.'
+                fi
+            fi
+        fi
+    elif [[ $active == unmanaged && $result != failed && $result != applying &&
+        ! -e $directory/firewall.json && ! -L $directory/firewall.json &&
+        ! -e $directory/firewall-baseline && ! -L $directory/firewall-baseline ]]; then
+        reason=unmanaged ready=true can_apply=true
+        summary='No profile controls the firewall. The next reviewed application will show and replace native UFW exceptions while retaining an original recovery baseline.'
+    fi
+    jq -cn --arg reason "$reason" --arg summary "$summary" --arg result "$result" --arg message "$message" --arg transaction "$transaction" \
+        --argjson ready "$ready" --argjson apply "$can_apply" --argjson restore "$can_restore" --argjson reconcile "$can_reconcile" --argjson observed "$observed" \
+        '{ready:$ready,summary:$summary,recovery:{reason:$reason,last_result:$result,message:$message,transaction:$transaction,
+          can_apply:$apply,can_restore:$restore,can_reconcile:$reconcile,observed:$observed}}'
+}
+
 access::list() {
-    local profile=${1-} document active observation='{}' now
+    local profile=${1-} document active assessment now
     document=$(profiles::state) || return 1
     active=$(jq -r .active.firewall <<<"$document") || return 1
     [[ -n $profile ]] || profile=$(jq -r 'if .active.firewall!="unmanaged" then .active.firewall
@@ -47,18 +111,13 @@ access::list() {
         core::die 'The selected firewall profile no longer exists. Refresh permissions.'
         return 1
     }
-    if [[ $active == "$profile" ]]; then
-        observation=$(profile_controls::verify firewall) || observation='{}'
-    fi
+    assessment=$(access::_assessment "$profile" "$active" "$document") || return 1
     now=$(date +%s) || return 1
-    jq -cn --argjson doc "$document" --argjson observed "$observation" --arg p "$profile" --arg active "$active" --argjson now "$now" '
-      ($doc.results.firewall.status//"unmanaged") as $result |
-      (if $active!=$p then "pending" elif $result=="failed" or $result=="applying" then "failed"
-       elif $observed.state=="active" then "active" elif $observed.state=="partial" then "pending" else "unknown" end) as $state |
-      {kind:"access",profile:$p,managed:($active!="unmanaged"),state:$state,
-       summary:(if $active=="unmanaged" then "Choose and review a profile before adopting the existing firewall. Current native exceptions will be shown before replacement."
-                elif $active!=$p then "This is a saved profile. Select the active firewall profile to change live permissions."
-                else ($observed.summary//"Current firewall policy could not be verified.") end),
+    jq -cn --argjson doc "$document" --argjson assessment "$assessment" --arg p "$profile" --arg active "$active" --argjson now "$now" '
+      (if $assessment.recovery.reason=="ready" then "active" elif $assessment.recovery.reason=="incomplete" then "failed"
+       elif $assessment.recovery.reason|IN("pending","unmanaged","different-profile") then "pending" else "unknown" end) as $state |
+      {kind:"access",profile:$p,assigned_profile:$active,managed:($active!="unmanaged"),state:$state,
+       ready:$assessment.ready,summary:$assessment.summary,recovery:$assessment.recovery,
        rules:($doc.profiles[$p].firewall.rules | group_by([(.group//.id),.protocol,.source,.interface,.expires_at]) |
          map(.[0] as $first | (map(.port)|sort|map(tostring)|join(",")) as $ports |
            {id:($first.group//$first.id),label:(if $ports=="80,443" and $first.protocol=="tcp" then "Web server (HTTP + HTTPS)"
@@ -68,24 +127,12 @@ access::list() {
 }
 
 access::_ready() {
-    local profile=$1 active=$2 document=$3 saved desired result
-    if [[ $active != unmanaged && $active != "$profile" ]]; then
-        core::die "Firewall currently uses $active. Select that profile for a permission change, or explicitly switch profiles under Protections first."
-        return 1
-    fi
+    local profile=$1 active=$2 document=$3 assessment
     jq -e --arg p "$profile" '.profiles[$p]!=null' <<<"$document" >/dev/null || return 1
-    result=$(jq -r '.results.firewall.status//"unmanaged"' <<<"$document") || return 1
-    if [[ $result == failed || $result == applying ]]; then
-        core::die 'The previous firewall change did not complete. Review its result and retry or restore the firewall from Protections before changing permissions.'
+    assessment=$(access::_assessment "$profile" "$active" "$document") || return 1
+    if ! jq -e '.ready==true' <<<"$assessment" >/dev/null; then
+        core::die "$(jq -r .summary <<<"$assessment")"
         return 1
-    fi
-    if [[ $active != unmanaged ]]; then
-        saved=$(profile_controls::_read firewall) || return 1
-        desired=$(jq -c --arg p "$profile" '.profiles[$p].firewall' <<<"$document" | profile_controls::_hash) || return 1
-        [[ $(jq -r .desired <<<"$saved") == "$desired" ]] || {
-            core::die 'This firewall profile has saved changes awaiting Apply. Review and apply those changes under Protections before adding or revoking a live permission.'
-            return 1
-        }
     fi
     profile_controls::preflight firewall "$profile"
 }
@@ -213,6 +260,148 @@ access::change() {
     return 1
 }
 
+access::recover() {
+    local profile=$1 document active assessment
+    controls::local_console || return 1
+    document=$(profiles::state) || return 1
+    jq -e --arg p "$profile" '.profiles[$p]!=null' <<<"$document" >/dev/null || return 1
+    active=$(jq -r .active.firewall <<<"$document") || return 1
+    assessment=$(access::_assessment "$profile" "$active" "$document") || return 1
+    jq -e '.recovery.can_apply==true' <<<"$assessment" >/dev/null || {
+        core::die "$(jq -r .summary <<<"$assessment")"
+        return 1
+    }
+    core::log "Review and apply the saved $profile firewall profile. Only its saved permissions are applied; other protection areas are unchanged."
+    profiles::apply "$profile" firewall || return 1
+    document=$(profiles::state) || return 1
+    assessment=$(access::_assessment "$profile" "$profile" "$document") || return 1
+    if ! jq -e '.ready==true' <<<"$assessment" >/dev/null; then
+        profiles::_result firewall failed 'Firewall recovery did not pass the final native inspection. Review its current state before changing permissions.' || :
+        core::die "$(jq -r .summary <<<"$assessment")"
+        return 1
+    fi
+    core::record "ACCESS recover $profile" || return 1
+    core::log "The saved $profile firewall profile is verified. Review your requested permission separately when ready."
+}
+
+access::restore() {
+    local document active profile assessment
+    controls::local_console || return 1
+    document=$(profiles::state) || return 1
+    active=$(jq -r .active.firewall <<<"$document") || return 1
+    profile=$(access::default_profile) || return 1
+    assessment=$(access::_assessment "$profile" "$active" "$document") || return 1
+    jq -e '.recovery.can_restore==true' <<<"$assessment" >/dev/null || {
+        core::die "No reviewed firewall restoration is available. $(jq -r .summary <<<"$assessment")"
+        return 1
+    }
+    profiles::restore firewall || return 1
+    core::record 'ACCESS restore original firewall' || return 1
+    core::log 'The original firewall configuration was restored and verified. Other protection areas and saved profile permissions were retained.'
+}
+
+access::_review_file() {
+    local file=$1 metadata
+    [[ -f $file && ! -L $file ]] || return 1
+    metadata=$(stat -c '%u:%a:%h:%s' -- "$file") || return 1
+    [[ $metadata =~ ^0:([0-7]{3,4}):1:([0-9]+)$ ]] || return 1
+    (((8#${BASH_REMATCH[1]} & 022) == 0 && BASH_REMATCH[2] <= 32768)) || return 1
+    if [[ -s $file ]]; then LC_ALL=C grep -Iq . "$file" || return 1; fi
+    printf '\nCurrent configuration file: %s\n' "$file"
+    cat -- "$file" || return 1
+    printf '\n'
+}
+
+# Old records contain file fingerprints, not previous file bodies. Show the
+# real kernel difference and current configuration without inventing a diff.
+access::_reconcile_preview() {
+    local saved=$1 current=$2 previous field difference result file count=0 metadata
+    previous=$(jq -ce '.observed//.before' <<<"$saved") || return 1
+    jq -e --argjson current "$current" 'all([.,$current][]; type=="object" and
+        (.config|type=="string" and test("^[a-f0-9]{64}$")) and
+        (.status|type=="string" and length<=262144) and
+        (.ipv4|type=="string" and length<=4194304) and (.ipv6|type=="string" and length<=4194304))' <<<"$previous" >/dev/null || return 1
+    for field in status ipv4 ipv6; do
+        result=0
+        difference=$(diff -u --label "Recorded $field" --label "Current $field" \
+            <(jq -er --arg field "$field" '.[$field] | select(type=="string")' <<<"$previous") \
+            <(jq -er --arg field "$field" '.[$field] | select(type=="string")' <<<"$current")) || result=$?
+        ((result <= 1)) || return 1
+        [[ -z $difference ]] || printf '%s\n' "$difference"
+    done
+    if [[ $(jq -r .config <<<"$previous") != "$(jq -r .config <<<"$current")" ]]; then
+        printf '\nThe on-disk configuration differs from its recorded fingerprint. The previous file contents are not available in that record. Review the current configuration below.\n'
+    fi
+    printf '\nUFW before/after hooks match supported, package-verified templates. Current configuration file inventory (ownership, mode and SHA-256):\n'
+    while IFS= read -r -d '' file; do
+        count=$((count + 1))
+        ((count <= 64)) || return 1
+        [[ -f $file && ! -L $file ]] || return 1
+        metadata=$(stat -c '%u:%g:%a:%h:%s' -- "$file") || return 1
+        printf '%s %s\n' "$metadata" "$file"
+        sha256sum -- "$file" || return 1
+    done < <(find "$PROFILE_ETC/ufw" -type f -print0 | sort -z)
+    for file in "$PROFILE_ETC/default/ufw" "$PROFILE_ETC/ufw/ufw.conf" "$PROFILE_ETC/ufw/sysctl.conf" \
+        "$PROFILE_ETC/ufw/user.rules" "$PROFILE_ETC/ufw/user6.rules"; do
+        [[ -e $file || -L $file ]] || continue
+        access::_review_file "$file" || return 1
+    done
+}
+
+access::reconcile() {
+    local profile=$1 saved current document reviewed preview updated directory expected
+    controls::local_console || return 1
+    document=$(profiles::state) || return 1
+    jq -e --arg p "$profile" '.profiles[$p]!=null' <<<"$document" >/dev/null || return 1
+    saved=$(profile_controls::_read firewall) || {
+        core::die 'No safe saved firewall record is available for reconciliation. Inspect the recovery history.'
+        return 1
+    }
+    if ! profile_controls::firewall_baseline_available || ! profile_controls::firewall_reconcile_safe; then
+        core::die 'The firewall contains unsupported hooks or unsafe recovery evidence. No native policy or tracking state was changed.'
+        return 1
+    fi
+    current=$(profile_controls::snapshot firewall) || return 1
+    expected=$(profile_controls::_hash <<<"$current") || return 1
+    if [[ $expected == "$(jq -r .expected <<<"$saved")" ]]; then
+        core::log 'Current firewall settings already match the recorded state. Review and apply the selected saved profile, or restore the original firewall settings.'
+        return 0
+    fi
+    preview=$(access::_reconcile_preview "$saved" "$current") || {
+        core::die 'The current firewall configuration cannot be fully previewed safely. Inspect it manually before recovery; nothing was changed.'
+        return 1
+    }
+    ((${#preview} <= 65536)) || {
+        core::die 'The firewall differences exceed the review limit. Inspect them manually; no tracking state or native rules were changed.'
+        return 1
+    }
+    core::log "Review the current firewall before recovering the selected $profile profile. Non-printing characters in the evidence below are escaped."
+    printf '%s\n' "$preview" | LC_ALL=C sed -n l || return 1
+    core::log 'Accepting records this current state for conflict checks. It does not change firewall rules, apply a profile, or replace the original recovery baseline. A later Apply replaces UFW exceptions with the selected saved profile; Restore reinstates the original configuration.'
+    core::confirm 'Accept this displayed current firewall state as reviewed, keeping recovery pending?' || return 1
+    reviewed=$(profile_controls::snapshot firewall) || return 1
+    if [[ $reviewed != "$current" || $(profile_controls::_read firewall) != "$saved" || $(profiles::state) != "$document" ]]; then
+        core::die 'The firewall or saved profile changed during review. No reconciliation was applied; inspect and review again.'
+        return 1
+    fi
+    profile_controls::firewall_baseline_available && profile_controls::firewall_reconcile_safe || return 1
+    directory=$(profile_controls::_directory) || return 1
+    core::backup "$directory/firewall.json" || return 1
+    core::backup "$CORE_STATE/profiles/state.json" || return 1
+    if [[ $(profile_controls::snapshot firewall) != "$current" || $(profile_controls::_read firewall) != "$saved" || $(profiles::state) != "$document" ]]; then
+        core::die 'The firewall changed while preparing its recovery record. Nothing was accepted; review again.'
+        return 1
+    fi
+    updated=$(jq -c --arg expected "$expected" --argjson observed "$current" '.expected=$expected|.observed=$observed' <<<"$saved") || return 1
+    profile_controls::_write firewall "$updated" || return 1
+    if ! profiles::_result firewall pending 'Current firewall settings were accepted after review. Apply a selected saved firewall profile or restore the original settings before changing permissions.'; then
+        profile_controls::_write firewall "$saved" || core::die 'Could not restore the previous tracking record after a state-write failure. Inspect the saved transaction.'
+        return 1
+    fi
+    core::record "ACCESS reconcile $profile reviewed native firewall" || return 1
+    core::log 'Current firewall state accepted. Native rules and the original baseline are unchanged; review Apply or Restore to finish recovery.'
+}
+
 access::dispatch() {
     access::validate "$@" || {
         core::die 'Invalid access command or arguments.'
@@ -222,5 +411,8 @@ access::dispatch() {
     case "$1" in
         list) access::list "${2-}" ;;
         allow | update | revoke) access::change "$@" ;;
+        recover) access::recover "$2" ;;
+        restore) access::restore ;;
+        reconcile) access::reconcile "$2" ;;
     esac
 }

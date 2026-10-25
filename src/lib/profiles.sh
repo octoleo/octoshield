@@ -5,6 +5,7 @@
 
 profiles::valid_name() { [[ ${1-} =~ ^[a-z][a-z0-9-]{0,31}$ && $1 != unmanaged ]]; }
 profiles::valid_control() { case "${1-}" in firewall | usb | network | services | monitor) return 0 ;; *) return 1 ;; esac }
+profiles::valid_transaction() { [[ ${#1} -le 40 && $1 =~ ^[0-9]{8}T[0-9]{6}Z-[1-9][0-9]*$ ]]; }
 profiles::valid_key() {
     case "${1-}" in network.autoconnect | network.discovery | services.printing | services.bluetooth | services.ssh | services.discovery | services.samba | services.remote_desktop | monitor.enabled) return 0 ;; *) return 1 ;; esac
 }
@@ -80,7 +81,8 @@ profiles::_validate_document() {
         and (.expires_at|type=="number" and floor==. and .>=0 and .<=9007199254740991);
       .schema==1 and (.global|slug) and (.profiles|type=="object" and length>=1 and length<=64)
       and (.active|type=="object" and (keys|sort)==(["firewall","usb","network","services","monitor"]|sort) and all(.[];slug))
-      and (.results|type=="object" and all(to_entries[];(.key|control) and (.value|type=="object") and (.value.status|IN("applied","failed","unmanaged","pending","applying")) and (.value.message|type=="string" and length<=512)))
+      and (.results|type=="object" and all(to_entries[];(.key|control) and (.value|type=="object") and (.value.status|IN("applied","failed","unmanaged","pending","applying")) and (.value.message|type=="string" and length<=512)
+        and ((.value|has("transaction")|not) or (.value.transaction|type=="string" and length<=40 and test("^[0-9]{8}T[0-9]{6}Z-[1-9][0-9]*$")))))
       and all(.profiles|to_entries[];(.key|slug) and .key!="unmanaged" and (.value|
         type=="object" and (keys|sort)==(["name","firewall","usb","network","services","monitor"]|sort)
         and (.name|type=="string" and length>=1 and length<=64 and (test("[\u0000-\u001f\u007f]")|not))
@@ -147,12 +149,14 @@ profiles::active() {
 profiles::public_status() {
     local document
     document=$(profiles::_read) || return 1
-    jq -c '{schema,global,active,results,catalog:(.profiles|to_entries|map({id:.key,name:.value.name})),overrides:(. as $root|.active|with_entries(select(.value!=$root.global)))}' <<<"$document"
+    jq -c '{schema,global,active,results:(.results|map_values({status,message})),catalog:(.profiles|to_entries|map({id:.key,name:.value.name})),overrides:(. as $root|.active|with_entries(select(.value!=$root.global)))}' <<<"$document"
 }
 profiles::_result() {
-    local control=$1 status=$2 message=$3 active=${4-} document
+    local control=$1 status=$2 message=$3 active=${4-} document transaction=${CORE_TRANSACTION:-}
+    profiles::valid_transaction "$transaction" || transaction=
     document=$(profiles::_read) || return 1
-    document=$(jq -c --arg c "$control" --arg s "$status" --arg m "$message" --arg a "$active" '.results[$c]={status:$s,message:$m}|if $a!="" then .active[$c]=$a else . end' <<<"$document") || return 1
+    document=$(jq -c --arg c "$control" --arg s "$status" --arg m "$message" --arg a "$active" --arg t "$transaction" \
+        '.results[$c]=({status:$s,message:$m} + (if $t!="" then {transaction:$t} else {} end))|if $a!="" then .active[$c]=$a else . end' <<<"$document") || return 1
     profiles::_save "$document"
 }
 profiles::_hook() {
@@ -168,14 +172,23 @@ profiles::_hook() {
     fi
 }
 profiles::apply() {
-    local profile=$1 control=${2-} document item failed=0
+    local profile=$1 control=${2-} document item failed=0 reviewed firewall_reviewed=''
     local -a controls=(firewall usb network services monitor)
     [[ -z $control ]] || controls=("$control")
     profiles::get "$profile" >/dev/null || return 1
     controls::local_console || return 1
+    reviewed=$(profiles::_read) || return 1
     core::log "Apply $profile to: ${controls[*]}. Existing permissions are replaced only for the selected controls. Other changes are preserved."
-    for item in "${controls[@]}"; do profiles::_hook preflight "$item" "$profile" || return 1; done
+    for item in "${controls[@]}"; do
+        profiles::_hook preflight "$item" "$profile" || return 1
+        if [[ $item == firewall ]]; then firewall_reviewed=$(profile_controls::snapshot firewall) || return 1; fi
+    done
     core::confirm "Apply the reviewed $profile profile settings? Individual controls can fail; verified results will show any incomplete switch." || return 1
+    if [[ $(profiles::_read) != "$reviewed" ]] ||
+        [[ -n $firewall_reviewed && $(profile_controls::snapshot firewall) != "$firewall_reviewed" ]]; then
+        core::die 'The saved profile or native firewall changed during review. No profile was applied; inspect and review again.'
+        return 1
+    fi
     if [[ -z $control ]]; then
         document=$(profiles::_read) || return 1
         document=$(jq -c --arg p "$profile" '.global=$p' <<<"$document") || return 1
@@ -209,6 +222,10 @@ profiles::restore() {
         if profiles::_hook restore "$item"; then
             profiles::_result "$item" unmanaged 'Restored the saved pre-profile baseline.' unmanaged || return 1
         else
+            result=$?
+            # A control may present a second, concrete baseline preview. Its
+            # pre-mutation cancellation preserves the previous recorded result.
+            ((result != 3)) || return 3
             profiles::_result "$item" failed 'Baseline restoration failed or external changes require review.' || return 1
             failed=1
             break

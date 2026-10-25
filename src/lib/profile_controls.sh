@@ -26,24 +26,34 @@ profile_controls::_write() {
     fi
 }
 profile_controls::_hash() { sha256sum | cut -d ' ' -f1; }
-profile_controls::_tree_hash() {
-    local path file
-    for path in "$PROFILE_ETC/ufw" "$PROFILE_ETC/default/ufw"; do
+profile_controls::_tree_hash() (
+    set -o pipefail
+    local path file logical metadata digest index
+    local -a sources=("${1:-$PROFILE_ETC/ufw}" "${2:-$PROFILE_ETC/default/ufw}")
+    local -a targets=("$PROFILE_ETC/ufw" "$PROFILE_ETC/default/ufw")
+    for index in 0 1; do
+        path=${sources[index]}
+        logical=${targets[index]}
         [[ ! -L $path ]] || return 1
         [[ -e $path ]] || {
-            printf 'absent:%s\n' "$path"
+            printf 'absent:%s\n' "$logical"
             continue
         }
-        stat -c '%n:%u:%g:%a:%F' -- "$path" || return 1
+        metadata=$(stat -c '%u:%g:%a:%F' -- "$path") || return 1
+        printf '%s:%s\n' "$logical" "$metadata"
         if [[ -d $path ]]; then
             [[ -z $(find "$path" -type l -print -quit) ]] || return 1
-            while IFS= read -r -d '' file; do
-                stat -c '%n:%u:%g:%a:%F' -- "$file" || return 1
-                sha256sum -- "$file" || return 1
-            done < <(find "$path" -type f -print0 | sort -z)
-        else sha256sum -- "$path" || return 1; fi
+            find "$path" -type f -print0 | sort -z | while IFS= read -r -d '' file; do
+                metadata=$(stat -c '%u:%g:%a:%F' -- "$file") || return 1
+                digest=$(sha256sum -- "$file") || return 1
+                printf '%s:%s\n%s  %s\n' "$logical${file#"$path"}" "$metadata" "${digest%% *}" "$logical${file#"$path"}"
+            done || return 1
+        else
+            digest=$(sha256sum -- "$path") || return 1
+            printf '%s  %s\n' "${digest%% *}" "$logical"
+        fi
     done | profile_controls::_hash
-}
+)
 profile_controls::_firewall_snapshot() {
     local config status ipv4 ipv6
     config=$(profile_controls::_tree_hash) || return 1
@@ -52,6 +62,79 @@ profile_controls::_firewall_snapshot() {
     ipv4=$(iptables-save | awk '/^:(INPUT|FORWARD|OUTPUT) / || /^:ufw/ || /^-A ufw/ || /^-A (INPUT|FORWARD|OUTPUT) / {gsub(/\[[0-9]+:[0-9]+\]/,"[counter]");print}') || return 1
     ipv6=$(ip6tables-save | awk '/^:(INPUT|FORWARD|OUTPUT) / || /^:ufw/ || /^-A ufw/ || /^-A (INPUT|FORWARD|OUTPUT) / {gsub(/\[[0-9]+:[0-9]+\]/,"[counter]");print}') || return 1
     jq -cn --arg config "$config" --arg status "$status" --arg ipv4 "$ipv4" --arg ipv6 "$ipv6" '{config:$config,status:$status,ipv4:$ipv4,ipv6:$ipv6}'
+}
+
+profile_controls::_firewall_trusted_path() {
+    local path=$1 kind=${2:-file} owner mode links size
+    [[ ! -L $path ]] || return 1
+    if [[ $kind == directory ]]; then [[ -d $path ]] || return 1; else [[ -f $path ]] || return 1; fi
+    IFS=: read -r owner mode links size < <(stat -c '%u:%a:%h:%s' -- "$path")
+    [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ && $links =~ ^[0-9]+$ && $size =~ ^[0-9]+$ ]] || return 1
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ $kind == directory ]] || ((links == 1 && size <= 1048576))
+}
+
+profile_controls::_firewall_trusted_tree() (
+    set -o pipefail
+    local directory=$1 path count=0
+    profile_controls::_firewall_trusted_path "$directory" directory || return 1
+    find "$directory" -print0 | while IFS= read -r -d '' path; do
+        # Retained tree names are data, but must be representable by the legacy
+        # path-based fingerprint without newline or checksum escaping ambiguity.
+        [[ $path != *[[:cntrl:]\\]* ]] || return 1
+        count=$((count + 1))
+        ((count <= 4096)) || return 1
+        if [[ -d $path ]]; then
+            profile_controls::_firewall_trusted_path "$path" directory || return 1
+        else profile_controls::_firewall_trusted_path "$path" || return 1; fi
+    done
+)
+
+# Availability means a trustworthy, complete original, not merely a directory
+# with the expected name. The old fingerprint uses live absolute paths, so hash
+# the retained copy under those same logical names without touching /etc.
+profile_controls::firewall_baseline_available() {
+    local directory saved baseline fingerprint
+    directory=$(profile_controls::_directory) || return 1
+    baseline="$directory/firewall-baseline"
+    profiles::_secure_file "$CORE_STATE" directory && profiles::_secure_file "$CORE_STATE/profiles" directory &&
+        profiles::_secure_file "$directory" directory && profiles::_secure_file "$baseline" directory || return 1
+    profile_controls::_firewall_trusted_path "$directory/firewall.json" || return 1
+    saved=$(profile_controls::_read firewall) || return 1
+    jq -se 'length==1 and (.[0] | .schema==1 and
+      (.expected|type=="string" and test("^[a-f0-9]{64}$")) and
+      (.desired|type=="string" and (.=="" or test("^[a-f0-9]{64}$"))) and
+      (.before|type=="object" and (.config|type=="string" and test("^[a-f0-9]{64}$")) and
+        (.status|type=="string" and length<=262144 and (test("^Status: active(\\n|$)") or .=="Status: inactive")) and
+        (.ipv4|type=="string" and length<=4194304) and (.ipv6|type=="string" and length<=4194304)))' <<<"$saved" >/dev/null || return 1
+    profile_controls::_firewall_trusted_tree "$baseline/ufw" && profile_controls::_firewall_trusted_path "$baseline/default-ufw" || return 1
+    fingerprint=$(profile_controls::_tree_hash "$baseline/ufw" "$baseline/default-ufw") || return 1
+    [[ $fingerprint == "$(jq -r .before.config <<<"$saved")" ]]
+}
+
+profile_controls::firewall_reconcile_safe() {
+    local observed ipv4 ipv6
+    if ! profile_controls::_firewall_trusted_path "$PROFILE_ETC" directory ||
+        ! profile_controls::_firewall_trusted_path "$PROFILE_ETC/default" directory ||
+        ! profile_controls::_firewall_trusted_path "$PROFILE_ETC/default/ufw" ||
+        ! profile_controls::_firewall_trusted_tree "$PROFILE_ETC/ufw"; then
+        core::die 'UFW configuration paths, ownership or permissions are unsafe. Reconciliation was refused.'
+        return 1
+    fi
+    profile_controls::_verified_ufw_hooks recognized || return 1
+    if ! observed=$(LC_ALL=C ufw status verbose) || ! ipv4=$(LC_ALL=C iptables-save) || ! ipv6=$(LC_ALL=C ip6tables-save); then
+        core::die 'The current UFW status and both address families must be readable before reconciliation.'
+        return 1
+    fi
+    if [[ $observed == 'Status: inactive' ]]; then
+        profile_firewall::_inactive 4 "$ipv4" >/dev/null && profile_firewall::_inactive 6 "$ipv6" >/dev/null
+        return
+    fi
+    [[ $observed == 'Status: active'$'\n'* ]] || {
+        core::die 'UFW returned an unrecognized active state.'
+        return 1
+    }
+    profile_firewall::_native 4 "$ipv4" 0 reconcile >/dev/null && profile_firewall::_native 6 "$ipv6" 0 reconcile >/dev/null
 }
 profile_controls::_network_read() {
     if declare -F connections::_run >/dev/null; then
@@ -400,7 +483,7 @@ profile_controls::apply() {
     profile_controls::remember_desired "$control" "$profile"
 }
 profile_controls::_restore_native() {
-    local control=$1 saved before directory temporary unit enabled active uuid autoconnect llmnr mdns mac type content mode current restore_expected
+    local control=$1 saved before directory temporary unit enabled active uuid autoconnect llmnr mdns mac type content mode current restore_expected preview
     directory=$(profile_controls::_directory) || return 1
     [[ -e $directory/$control.json ]] || return 0
     profile_controls::conflict "$control" || return 1
@@ -419,23 +502,78 @@ profile_controls::_restore_native() {
             return 1
         }
     fi
-    PROFILE_RESTORE_STARTED=true
+    [[ $control == firewall ]] || PROFILE_RESTORE_STARTED=true
     case "$control" in
         firewall)
-            [[ -d $directory/firewall-baseline/ufw && -f $directory/firewall-baseline/default-ufw ]] || return 1
+            profile_controls::firewall_baseline_available || {
+                core::die 'The original firewall baseline is missing, unsafe or differs from its saved fingerprint. Recovery evidence was retained.'
+                return 1
+            }
+            if ! profile_controls::_firewall_trusted_path "$PROFILE_ETC" directory ||
+                ! profile_controls::_firewall_trusted_path "$PROFILE_ETC/default" directory ||
+                ! profile_controls::_firewall_trusted_path "$PROFILE_ETC/default/ufw" ||
+                ! profile_controls::_firewall_trusted_tree "$PROFILE_ETC/ufw"; then
+                core::die 'Current firewall paths are unsafe; the original baseline was not installed.'
+                return 1
+            fi
+            current=$(profile_controls::snapshot firewall) || return 1
+            preview=$(profile_controls::_firewall_restore_preview "$saved") || {
+                core::die 'The complete original firewall policy cannot be previewed within the safe display limit. Inspect the retained baseline manually; nothing was restored.'
+                return 1
+            }
+            preview=$(printf '%s\n' "$preview" | LC_ALL=C sed -n l) || return 1
+            ((${#preview} <= 65536)) || {
+                core::die 'The escaped original firewall policy exceeds the review limit. Inspect the retained baseline manually; nothing was restored.'
+                return 1
+            }
+            core::log 'Review the original firewall state, recorded input rules and retained configuration below. Non-printing characters are escaped.' || return 1
+            printf '%s\n' "$preview" || return 1
+            core::log 'Restore reinstates these saved UFW settings and exceptions. If the original state was inactive, UFW will be disabled. Other protection areas and unrelated container forwarding rules are not restored.' || return 1
+            # A declined review is distinct from a failed native restoration;
+            # callers preserve the existing result for this no-change outcome.
+            core::confirm 'Restore this displayed original firewall state and saved exceptions?' || return 3
+            if [[ $(profile_controls::_read firewall) != "$saved" || $(profile_controls::snapshot firewall) != "$current" ]] ||
+                ! profile_controls::firewall_baseline_available; then
+                core::die 'The firewall or original recovery evidence changed during review. Nothing was restored; refresh and review again.'
+                return 1
+            fi
+            # Retain the original evidence in this transaction as well as its
+            # management location, so a later cleanup error cannot destroy it.
+            core::backup "$directory/firewall.json" || return 1
+            core::backup "$directory/firewall-baseline" || return 1
             core::backup "$PROFILE_ETC/ufw" || return 1
             core::backup "$PROFILE_ETC/default/ufw" || return 1
             temporary=$(mktemp -d "$PROFILE_ETC/.octoshield-ufw.XXXXXX") || return 1
             cp -a -- "$directory/firewall-baseline/ufw" "$temporary/ufw" || return 1
+            cp -a -- "$directory/firewall-baseline/default-ufw" "$temporary/default-ufw" || return 1
+            [[ $(profile_controls::_tree_hash "$temporary/ufw" "$temporary/default-ufw") == "$(jq -r .config <<<"$before")" ]] || {
+                core::die 'The staged original firewall files did not match their saved fingerprint; nothing was restored.'
+                return 1
+            }
+            # Staging and backup can take time. Preserve any native change that
+            # appeared after the reviewed conflict check rather than replacing it.
+            if [[ $(profile_controls::_read firewall) != "$saved" || $(profile_controls::snapshot firewall) != "$current" ]] ||
+                ! profile_controls::firewall_baseline_available; then
+                core::die 'The firewall or saved recovery evidence changed during staging; nothing was restored.'
+                return 1
+            fi
+            profile_controls::conflict firewall || return 1
+            PROFILE_RESTORE_STARTED=true
             mv -- "$PROFILE_ETC/ufw" "$temporary/replaced" || return 1
             if ! mv -- "$temporary/ufw" "$PROFILE_ETC/ufw"; then
                 mv -- "$temporary/replaced" "$PROFILE_ETC/ufw" || :
                 return 1
             fi
-            core::write_file "$PROFILE_ETC/default/ufw" 0644 <"$directory/firewall-baseline/default-ufw" || return 1
+            mode=$(stat -c %a -- "$temporary/default-ufw") || return 1
+            core::write_file "$PROFILE_ETC/default/ufw" "$mode" <"$temporary/default-ufw" || return 1
+            chown --reference="$temporary/default-ufw" -- "$PROFILE_ETC/default/ufw" || return 1
             if [[ $(jq -r .status <<<"$before") == *'Status: active'* ]]; then
                 ufw --force enable && ufw reload || return 1
             else ufw --force disable || return 1; fi
+            profile_controls::_firewall_restore_verified "$before" || {
+                core::die 'The original firewall files or effective UFW state did not verify after restoration. The baseline and transaction were retained for recovery.'
+                return 1
+            }
             rm -rf -- "$temporary" || return 1
             ;;
         network)
@@ -468,21 +606,101 @@ profile_controls::_restore_native() {
             ;;
         *) return 1 ;;
     esac
-    rm -f -- "$directory/$control.json" || return 1
-    [[ $control != firewall ]] || rm -rf -- "$directory/firewall-baseline" || return 1
-    core::record "PROFILE restore $control"
+    core::record "PROFILE restore $control" || return 1
+    if [[ $control == firewall ]] && ! rm -rf -- "$directory/firewall-baseline"; then
+        core::die 'Firewall restoration verified, but baseline cleanup failed. The original evidence remains in the saved transaction.'
+        return 1
+    fi
+    rm -f -- "$directory/$control.json" || {
+        core::die 'Restoration verified, but its tracking record could not be removed. Inspect the saved recovery transaction.'
+        return 1
+    }
+}
+
+profile_controls::_firewall_restore_preview() {
+    local saved=$1 directory baseline recorded family file label bytes total=0
+    local LC_ALL=C
+    directory=$(profile_controls::_directory) || return 1
+    baseline="$directory/firewall-baseline"
+    recorded=$(jq -er '.before.status' <<<"$saved") || return 1
+    total=${#recorded}
+    ((total <= 32768)) || return 1
+    printf 'Original firewall state and listed exceptions:\n%s\n' "$recorded"
+    for family in ipv4 ipv6; do
+        recorded=$(jq -er --arg family "$family" '.before[$family]' <<<"$saved") || return 1
+        recorded=$(profile_controls::_firewall_restore_rules <<<"$recorded") || return 1
+        total=$((total + ${#recorded} + 256))
+        ((total <= 65536)) || return 1
+        printf '\nRecorded %s UFW/input rules and default policies:\n%s\n' "$family" "$recorded"
+    done
+    for label in default-ufw ufw.conf sysctl.conf before.init after.init before.rules before6.rules after.rules after6.rules user.rules user6.rules; do
+        if [[ $label == default-ufw ]]; then file="$baseline/default-ufw"; else file="$baseline/ufw/$label"; fi
+        if [[ ! -e $file && ! -L $file ]]; then
+            printf '\nRetained %s: absent\n' "$label"
+            continue
+        fi
+        profile_controls::_firewall_trusted_path "$file" || return 1
+        bytes=$(stat -c %s -- "$file") || return 1
+        total=$((total + bytes + 256))
+        ((total <= 65536)) || return 1
+        if [[ -s $file ]]; then LC_ALL=C grep -Iq . "$file" || return 1; fi
+        printf '\nRetained %s:\n' "$label"
+        # Bound a file that grows after stat as well. The caller checks the
+        # complete escaped output and rechecks the baseline after consent.
+        head -c 65537 -- "$file" || return 1
+        printf '\n'
+    done
+}
+
+profile_controls::_firewall_restore_rules() {
+    # Empty filter tables are equivalent to their three ACCEPT policies. Ignore
+    # unrelated Docker/output/forwarding jumps while checking UFW-owned chains,
+    # INPUT rules and native defaults; restoring UFW must not undo those systems.
+    awk '
+      /^:(INPUT|FORWARD|OUTPUT) / {policy[$1]=$2; next}
+      /^:ufw/ || /^-A ufw/ || /^-A INPUT / {rules=rules $0 "\n"}
+      END {
+        split(":INPUT :FORWARD :OUTPUT", names, " ")
+        for (i=1;i<=3;i++) print names[i] " " (names[i] in policy ? policy[names[i]] : "ACCEPT")
+        printf "%s", rules
+      }'
+}
+
+profile_controls::_firewall_restore_verified() {
+    local before=$1 current family previous_rules current_rules number inactive=false
+    current=$(profile_controls::snapshot firewall) || return 1
+    [[ $(jq -r .config <<<"$current") == "$(jq -r .config <<<"$before")" ]] || return 1
+    [[ $(jq -r '.status|split("\n")[0]' <<<"$current") == "$(jq -r '.status|split("\n")[0]' <<<"$before")" ]] || return 1
+    [[ $(jq -r .status <<<"$before") != 'Status: inactive' ]] || inactive=true
+    for family in ipv4 ipv6; do
+        previous_rules=$(jq -r --arg family "$family" '.[$family]' <<<"$before") || return 1
+        current_rules=$(jq -r --arg family "$family" '.[$family]' <<<"$current") || return 1
+        if [[ $inactive == true ]]; then
+            number=${family#ipv}
+            previous_rules=$(profile_firewall::_inactive "$number" "$previous_rules" snapshot) || return 1
+            current_rules=$(profile_firewall::_inactive "$number" "$current_rules" snapshot) || return 1
+        else
+            previous_rules=$(profile_controls::_firewall_restore_rules <<<"$previous_rules") || return 1
+            current_rules=$(profile_controls::_firewall_restore_rules <<<"$current_rules") || return 1
+        fi
+        [[ $previous_rules == "$current_rules" ]] || return 1
+    done
 }
 profile_controls::restore() {
-    local control=$1
+    local control=$1 result
     local PROFILE_RESTORE_STARTED=false
-    if profile_controls::_restore_native "$control"; then return 0; fi
+    if profile_controls::_restore_native "$control"; then return 0; else result=$?; fi
     # A rejected preflight must never accept external state as our own work.
     if [[ $PROFILE_RESTORE_STARTED == true ]]; then profile_controls::_record_actual "$control" || :; fi
-    return 1
+    return "$result"
 }
 profile_controls::verify() {
     local control=$1 profile saved current expected desired state summary document result
     profile=$(profiles::active "$control") || return 1
+    if [[ $control == firewall && $profile != unmanaged ]]; then
+        profile_controls::firewall_observe "$profile"
+        return
+    fi
     document=$(profiles::state) || return 1
     result=$(jq -r --arg c "$control" '.results[$c].status//"unmanaged"' <<<"$document") || return 1
     if [[ $result == failed || $result == applying ]]; then
@@ -533,7 +751,7 @@ profile_controls::_satisfies() {
     config=$(profiles::get "$profile" "$control") || return 1
     baseline=$(profile_controls::_read "$control") || return 1
     case "$control" in
-        firewall) profile_firewall::verify "$config" && profile_controls::_expiry_ready "$config" ;;
+        firewall) profile_controls::_firewall_verified "$config" && profile_controls::_expiry_ready "$config" ;;
         monitor)
             if [[ $(jq -r .enabled <<<"$config") == true ]]; then
                 jq -e 'any(.units[]; .unit=="octoshield-monitor.service" and .enabled=="enabled" and .active=="active")' <<<"$current" >/dev/null
@@ -624,13 +842,17 @@ profile_controls::expire() {
 # Refuse adoption when package-owned base rules were changed instead of silently
 # reporting that an earlier unconditional ACCEPT is protected by default-deny.
 profile_controls::_standard_ufw_hooks() {
-    local manifest name path vendor relative expected actual vendor_hash
     if [[ -e $(profile_controls::_directory)/firewall.json ]]; then
         # First adoption checked the vendor files before removing the four
         # discovery grants. Subsequent changes must match our recorded policy.
         profile_controls::conflict firewall
         return
     fi
+    profile_controls::_verified_ufw_hooks stock
+}
+
+profile_controls::_verified_ufw_hooks() {
+    local mode=$1 manifest name path vendor relative expected actual vendor_hash filtered_hash filtered
     # UFW installs these hooks through ucf/postinst, not dpkg Conffiles. Verify
     # their package-owned templates against dpkg's payload checksums, then compare
     # installed hooks to those verified templates. A modified vendor template
@@ -638,11 +860,18 @@ profile_controls::_standard_ufw_hooks() {
     manifest=$(dpkg-query --control-show ufw md5sums) || return 1
     for name in before.rules before6.rules after.rules after6.rules before.init after.init; do
         path="$PROFILE_ETC/ufw/$name"
-        [[ -e $path || -L $path ]] || continue
-        [[ -f $path && ! -L $path ]] || return 1
+        if [[ ! -e $path && ! -L $path ]]; then
+            case "$name" in *.init) continue ;; esac
+            core::die "UFW $name is missing; restore the installed package rules before continuing."
+            return 1
+        fi
+        profile_controls::_firewall_trusted_path "$path" || {
+            core::die "UFW $name has unsafe ownership, permissions or file type."
+            return 1
+        }
         case "$name" in *.rules) relative="iptables/$name" ;; *) relative=$name ;; esac
         vendor="$PROFILE_SHARE/$relative"
-        [[ -f $vendor && ! -L $vendor ]] || {
+        profile_controls::_firewall_trusted_path "$vendor" || {
             core::die "The UFW vendor template for $name is missing or unsafe; reinstall ufw before profile adoption."
             return 1
         }
@@ -657,6 +886,11 @@ profile_controls::_standard_ufw_hooks() {
             return 1
         }
         actual=$(md5sum -- "$path") || return 1
+        if [[ $mode == recognized && ($name == before.rules || $name == before6.rules) ]]; then
+            filtered=$(profile_controls::_discovery_filter "$vendor") || return 1
+            filtered_hash=$(md5sum <<<"$filtered") || return 1
+            [[ ${actual%% *} != "${filtered_hash%% *}" ]] || continue
+        fi
         [[ ${actual%% *} == "$expected" ]] || {
             core::die "UFW $name contains administrator changes. Profile switching will not overwrite or claim coverage of those rules."
             return 1
@@ -677,6 +911,16 @@ profile_controls::_expiry_ready() {
     }
 }
 
+profile_controls::_discovery_filter() {
+    awk '
+      $0=="-A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT" {next}
+      $0=="-A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT" {next}
+      $0=="-A ufw6-before-input -p udp -d ff02::fb --dport 5353 -j ACCEPT" {next}
+      $0=="-A ufw6-before-input -p udp -d ff02::f --dport 1900 -j ACCEPT" {next}
+      {print}
+    ' "$1"
+}
+
 profile_controls::_restrict_discovery() {
     local name file content
     for name in before.rules before6.rules; do
@@ -684,13 +928,7 @@ profile_controls::_restrict_discovery() {
         [[ -f $file && ! -L $file ]] || continue
         # Remove only exact package rules verified during first adoption. Do
         # not rewrite unrelated ICMP, DHCP, established, or loopback behavior.
-        content=$(awk '
-          $0=="-A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT" {next}
-          $0=="-A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT" {next}
-          $0=="-A ufw6-before-input -p udp -d ff02::fb --dport 5353 -j ACCEPT" {next}
-          $0=="-A ufw6-before-input -p udp -d ff02::f --dport 1900 -j ACCEPT" {next}
-          {print}
-        ' "$file") || return 1
+        content=$(profile_controls::_discovery_filter "$file") || return 1
         core::write_file "$file" 0640 <<<"$content" || return 1
     done
 }
@@ -718,11 +956,49 @@ profile_controls::_runtime_narrowed() {
 
 profile_controls::_firewall_verified() {
     local config=$1 status
-    status=$(LC_ALL=C ufw status verbose) || return 1
-    [[ $status == *'Status: active'* && $status == *'deny (incoming)'* && $status == *'allow (outgoing)'* && $status == *'deny (routed)'* ]] || return 1
-    profile_firewall::verify "$config" || return 1
-    # A persisted IPv6=yes setting alone is not evidence of a live IPv6 filter.
-    ip6tables-save | awk '/^-A INPUT .*ufw6-before-input/ {input=1} /^:ufw6-user-input / {user=1} END {exit !(input && user)}'
+    profile_firewall::defaults "$PROFILE_ETC/default/ufw" || return 1
+    status=$(LC_ALL=C ufw status verbose) || {
+        core::die 'The current UFW status could not be read after the firewall change.'
+        return 1
+    }
+    [[ $status == 'Status: active'$'\n'* && $status == *'deny (incoming)'* && $status == *'allow (outgoing)'* &&
+        ($status == *'deny (routed)'* || $status == *'disabled (routed)'*) ]] || {
+        core::die 'UFW is inactive or its reported default policies do not match the selected firewall protection.'
+        return 1
+    }
+    # "disabled (routed)" is a display of forwarding sysctls, not its DROP
+    # policy. Prove both kernel families and their actual INPUT hooks instead.
+    profile_firewall::verify "$config"
+}
+
+# Live findings remain visible even when a previous operation failed. This is
+# an observation, never consent to reconcile fingerprints or clear its result.
+profile_controls::firewall_observe() {
+    local profile=$1 config observed reason state summary
+    profiles::valid_name "$profile" || return 1
+    config=$(profiles::get "$profile" firewall) || return 1
+    if ! observed=$(LC_ALL=C ufw status verbose); then
+        state=unknown
+        summary='The current UFW state could not be read. No firewall changes were made.'
+    elif [[ $observed == 'Status: inactive' ]]; then
+        state=inactive
+        summary='UFW is inactive. The selected firewall profile is not currently enforced.'
+    elif [[ $observed != 'Status: active'$'\n'* ]]; then
+        state=unknown
+        summary='UFW returned an unrecognized state; inspect the native firewall.'
+    elif ! reason=$(profile_controls::_firewall_verified "$config" 2>&1); then
+        state=partial
+        reason=$(LC_ALL=C tr -d '\000-\037\177' <<<"$reason") || return 1
+        summary="${reason:0:700}"
+        [[ -n $summary ]] || summary='The running UFW policy does not satisfy the selected firewall profile.'
+    elif ! reason=$(profile_controls::_expiry_ready "$config" 2>&1); then
+        state=partial
+        summary='The native firewall matches, but temporary-permission status bookkeeping is unavailable. Review the OctoShield status service.'
+    else
+        state=active
+        summary="Live UFW host-input permissions and default policies match $profile. Container forwarding is inspected separately."
+    fi
+    jq -cn --arg state "$state" --arg summary "$summary" '{state:$state,summary:$summary}'
 }
 
 profile_controls::_required_services() {

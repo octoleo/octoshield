@@ -10,7 +10,8 @@ setup() {
     mkdir -m 0700 "$CORE_STATE"
     CALLS="$BATS_TEST_TMPDIR/calls"
     LIVE="$BATS_TEST_TMPDIR/live"
-    SAVED="$BATS_TEST_TMPDIR/saved"
+    SAVED="$CORE_STATE/profiles/controls/firewall.json"
+    install -d -m 0700 "${SAVED%/*}"
     CLOCK="$BATS_TEST_TMPDIR/clock"
     : >"$CALLS"
     printf '1000\n' >"$CLOCK"
@@ -26,6 +27,7 @@ setup() {
     }
     core::log() { printf '%s\n' "$*" >&2; }
     core::record() { printf 'record %s\n' "$*" >>"$CALLS"; }
+    core::backup() { printf 'backup %s\n' "$*" >>"$CALLS"; }
     controls::local_console() { :; }
     core::confirm() {
         printf 'confirm\n' >>"$CALLS"
@@ -49,12 +51,20 @@ setup() {
         if [[ ${2-} == directory ]]; then [[ -d $1 && $(stat -c %a "$1") == 700 ]]; else [[ -f $1 && $(stat -c %a "$1") == 600 ]]; fi
     }
     profile_controls::_hash() { sha256sum | cut -d ' ' -f1; }
+    profile_controls::_directory() { printf '%s/profiles/controls\n' "$CORE_STATE"; }
     profile_controls::_read() { cat "$SAVED"; }
+    profile_controls::_write() {
+        printf '%s\n' "$2" >"$SAVED"
+        chmod 0600 "$SAVED"
+    }
+    profile_controls::firewall_baseline_available() { [[ -f $SAVED ]]; }
+    profile_controls::firewall_reconcile_safe() { [[ ${UNSAFE_FIREWALL:-no} == no ]]; }
+    profile_controls::_runtime_narrowed() { return 1; }
     profile_controls::snapshot() { cat "$LIVE"; }
     profile_controls::preflight() { printf 'preflight %s\n' "$*" >>"$CALLS"; }
     profile_controls::_expiry_ready() { :; }
     profile_controls::apply() {
-        local policy desired
+        local policy desired before
         printf 'apply %s\n' "$*" >>"$CALLS"
         policy=$(profiles::get "$2" firewall) || return 1
         printf '%s\n' "$policy" >"$LIVE"
@@ -63,12 +73,17 @@ setup() {
             return 1
         fi
         desired=$(profile_controls::_hash <<<"$policy") || return 1
-        jq -cn --arg desired "$desired" '{desired:$desired}' >"$SAVED"
+        before='{"rules":[]}'
+        if [[ -f $SAVED ]]; then before=$(jq -c .before "$SAVED"); fi
+        jq -cn --arg desired "$desired" --argjson before "$before" --argjson policy "$policy" \
+            '{schema:1,before:$before,desired:$desired,expected:$desired,observed:$policy,policy:$policy}' >"$SAVED"
+        chmod 0600 "$SAVED"
     }
     profile_controls::restore() {
-        printf 'restore %s\n' "$*" >>"$CALLS"
+        printf 'restore %s\n' "$1" >>"$CALLS"
         [[ $FAIL_RESTORE != yes ]] || return 1
         printf '{"rules":[]}\n' >"$LIVE"
+        rm -f "$SAVED"
     }
     profile_controls::verify() {
         local profile desired current
@@ -83,6 +98,13 @@ setup() {
             printf '{"state":"active","summary":"Verified native policy matches."}\n'
         else
             printf '{"state":"partial","summary":"Saved changes are not active."}\n'
+        fi
+    }
+    profile_controls::firewall_observe() {
+        if [[ $(profiles::get "$1" firewall) == "$(cat "$LIVE")" ]]; then
+            printf '{"state":"active","summary":"Verified native policy matches."}\n'
+        else
+            printf '{"state":"partial","summary":"Native rules differ from the selected policy."}\n'
         fi
     }
     ufw() { printf 'Existing UFW rule for TCP 9000\n'; }
@@ -183,6 +205,7 @@ setup() {
 
 @test 'failed first adoption restores the original native baseline' {
     profiles::_save "$(profiles::_defaults)"
+    rm -f "$SAVED"
     before=$(profiles::state)
     FAIL_APPLY=once
     run access::dispatch allow home 80,443 tcp 192.168.1.0/24 eth0 0
@@ -219,6 +242,7 @@ setup() {
 
 @test 'first adoption previews native exceptions before consent and keeps cancellation read-only' {
     profiles::_save "$(profiles::_defaults)"
+    rm -f "$SAVED"
     before=$(profiles::state)
     CONFIRM=no
     run access::dispatch allow home 80,443 tcp 192.168.1.0/24 eth0 0
@@ -258,6 +282,7 @@ setup() {
 
 @test 'unmanaged default selection remains usable after deleting the home preset' {
     profiles::_save "$(profiles::_defaults)"
+    rm -f "$SAVED"
     profiles::dispatch delete home
     run access::list
     [ "$status" -eq 0 ]
@@ -271,4 +296,208 @@ setup() {
     [ "$status" -ne 0 ]
     [[ $output == *'Edit that permission instead'* ]]
     [ "$(profiles::state)" = "$before" ]
+}
+
+@test 'a saved failure remains blocked while actual healthy findings and recovery are visible' {
+    profiles::_result firewall failed 'A previous verification failed.'
+    before=$(profiles::state)
+    run access::list home
+    [ "$status" -eq 0 ]
+    jq -e '.ready==false and .state=="failed" and .assigned_profile=="home" and
+        .recovery.reason=="incomplete" and .recovery.last_result=="failed" and
+        .recovery.observed.state=="active" and .recovery.can_apply and .recovery.can_restore' <<<"$output"
+    [ "$(profiles::state)" = "$before" ]
+    run access::dispatch allow home 80,443 tcp 192.168.1.0/24 wlan0 0
+    [ "$status" -ne 0 ]
+    [[ $output == *'saved result, not a running operation'* ]]
+    [ "$(profiles::state)" = "$before" ]
+}
+
+@test 'reviewed recovery reapplies only the selected saved firewall without adding a draft permission' {
+    profiles::_result firewall failed 'Failed earlier.'
+    before=$(profiles::state)
+    run access::dispatch recover home
+    [ "$status" -eq 0 ]
+    jq -e '.results.firewall.status=="applied" and .profiles.home.firewall.rules==[]' <<<"$(profiles::state)"
+    [ "$(jq -c '.profiles' <<<"$(profiles::state)")" = "$(jq -c '.profiles' <<<"$before")" ]
+    grep -qx 'apply firewall home' "$CALLS"
+    run access::list home
+    jq -e '.ready==true and .recovery.reason=="ready"' <<<"$output"
+    access::dispatch allow home 80,443 tcp 192.168.1.0/24 wlan0 0
+    [ "$(profiles::get home firewall.rules | jq length)" -eq 2 ]
+}
+
+@test 'declined recovery preserves the failed result and original tracking evidence' {
+    profiles::_result firewall failed 'Failed earlier.'
+    before=$(profiles::state)
+    saved=$(cat "$SAVED")
+    CONFIRM=no
+    run access::dispatch recover home
+    [ "$status" -ne 0 ]
+    [ "$(profiles::state)" = "$before" ]
+    [ "$(cat "$SAVED")" = "$saved" ]
+    run grep -q '^apply ' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'a changed firewall during recovery confirmation is preserved before any application' {
+    profiles::_result firewall failed 'Failed earlier.'
+    before=$(profiles::state)
+    CHANGE_DURING_REVIEW=yes
+    run access::dispatch recover home
+    [ "$status" -ne 0 ]
+    [[ $output == *'changed during review'* ]]
+    [ "$(profiles::state)" = "$before" ]
+    run grep -q '^apply ' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'failed recovery never clears its outcome or permits the next grant' {
+    profiles::_result firewall failed 'Failed earlier.'
+    FAIL_APPLY=yes
+    run access::dispatch recover home
+    [ "$status" -ne 0 ]
+    [ "$(profiles::state | jq -r .results.firewall.status)" = failed ]
+    run access::list home
+    jq -e '.ready==false and .recovery.last_result=="failed"' <<<"$output"
+}
+
+@test 'restore is accessible after failure and only resets the firewall assignment' {
+    profiles::_result firewall failed 'Failed earlier.'
+    profiles::_result network applied 'Network retained.' office
+    run access::dispatch restore
+    [ "$status" -eq 0 ]
+    [ "$(profiles::active firewall)" = unmanaged ]
+    [ "$(profiles::active network)" = office ]
+    grep -qx 'restore firewall' "$CALLS"
+    run access::list home
+    jq -e '.ready==true and .recovery.reason=="unmanaged" and .recovery.can_restore==false' <<<"$output"
+}
+
+@test 'recovery capabilities do not conceal native drift or missing evidence' {
+    printf '{"external":true}\n' >"$LIVE"
+    run access::list home
+    jq -e '.ready==false and .recovery.reason=="drift" and .recovery.can_apply==false and
+        .recovery.can_restore==false and .recovery.can_reconcile==true' <<<"$output"
+    run access::dispatch recover home
+    [ "$status" -ne 0 ]
+    UNSAFE_FIREWALL=yes
+    run access::list home
+    jq -e '.recovery.can_reconcile==false' <<<"$output"
+    profile_controls::firewall_baseline_available() { return 1; }
+    run access::list home
+    jq -e '.recovery.reason=="unavailable" and .ready==false and .recovery.can_apply==false and .recovery.can_restore==false' <<<"$output"
+}
+
+access_reconcile_fixture() {
+    [[ $EUID == 0 ]] || skip 'Configuration review uses root-owned fixture files.'
+    local original changed desired
+    PROFILE_ETC="$BATS_TEST_TMPDIR/etc"
+    mkdir -p "$PROFILE_ETC/ufw" "$PROFILE_ETC/default"
+    printf 'IPV6=yes\nDEFAULT_INPUT_POLICY="DROP"\n' >"$PROFILE_ETC/default/ufw"
+    printf 'ENABLED=yes\n' >"$PROFILE_ETC/ufw/ufw.conf"
+    printf '# Current permanent configuration\n' >"$PROFILE_ETC/ufw/user.rules"
+    original=$(jq -cn --arg config "$(printf '%064d' 0)" '{config:$config,status:"Status: active",ipv4:"-A ufw-before-input -j ufw-user-input",ipv6:"-A ufw6-before-input -j ufw6-user-input"}')
+    changed=$(jq -c '.ipv4+="\n-A ufw-user-input -p tcp --dport 9000 -j ACCEPT"' <<<"$original")
+    desired=$(profiles::get home firewall | profile_controls::_hash)
+    jq -cn --argjson before "$original" --arg desired "$desired" --arg expected "$(profile_controls::_hash <<<"$original")" \
+        '{schema:1,before:$before,observed:$before,expected:$expected,desired:$desired,policy:{rules:[]}}' >"$SAVED"
+    printf '%s\n' "$changed" >"$LIVE"
+}
+
+@test 'reconciliation reviews real fixture evidence without applying rules or replacing the original baseline' {
+    access_reconcile_fixture
+    before=$(cat "$SAVED")
+    live=$(cat "$LIVE")
+    run access::dispatch reconcile home
+    [ "$status" -eq 0 ]
+    [[ $output == *'--dport 9000'* && $output == *'Current configuration file:'* ]]
+    [ "$(cat "$LIVE")" = "$live" ]
+    [ "$(jq -c '{before,desired,policy}' "$SAVED")" = "$(jq -c '{before,desired,policy}' <<<"$before")" ]
+    [ "$(jq -r .expected "$SAVED")" = "$(profile_controls::_hash <<<"$live")" ]
+    [ "$(profiles::state | jq -r .results.firewall.status)" = pending ]
+    run access::dispatch allow home 80 tcp any any 0
+    [ "$status" -ne 0 ]
+    run grep -q '^apply ' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'cancelled reconciliation leaves the tracking record and failed outcome untouched' {
+    access_reconcile_fixture
+    profiles::_result firewall failed 'Failed earlier.'
+    before=$(cat "$SAVED")
+    document=$(profiles::state)
+    CONFIRM=no
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [ "$(cat "$SAVED")" = "$before" ]
+    [ "$(profiles::state)" = "$document" ]
+}
+
+@test 'native edits during reconciliation review or backup are never accepted' {
+    access_reconcile_fixture
+    before=$(cat "$SAVED")
+    CHANGE_DURING_REVIEW=yes
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [[ $output == *'changed during review'* ]]
+    [ "$(cat "$SAVED")" = "$before" ]
+    access_reconcile_fixture
+    CHANGE_DURING_REVIEW=no
+    core::backup() { printf '{"late":true}\n' >"$LIVE"; }
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [[ $output == *'changed while preparing'* ]]
+    [ "$(cat "$SAVED")" = "$before" ]
+}
+
+@test 'reconciliation refuses unsafe hooks malformed observations and unsafe configuration files' {
+    access_reconcile_fixture
+    before=$(cat "$SAVED")
+    UNSAFE_FIREWALL=yes
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    UNSAFE_FIREWALL=no
+    jq '.observed.ipv4=null' "$SAVED" >"$SAVED.new"
+    mv "$SAVED.new" "$SAVED"
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [[ $output == *'cannot be fully previewed safely'* ]]
+    printf '%s\n' "$before" >"$SAVED"
+    chmod 0666 "$PROFILE_ETC/ufw/user.rules"
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [ "$(cat "$SAVED")" = "$before" ]
+    run grep -q '^confirm' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'failed configuration reads stop reconciliation before confirmation or tracking changes' {
+    access_reconcile_fixture
+    before=$(cat "$SAVED")
+    document=$(profiles::state)
+    cat() {
+        [[ ${*: -1} != "$PROFILE_ETC/ufw/user.rules" ]] || return 1
+        command cat "$@"
+    }
+    run access::dispatch reconcile home
+    [ "$status" -ne 0 ]
+    [[ $output == *'cannot be fully previewed safely'* ]]
+    [ "$(cat "$SAVED")" = "$before" ]
+    [ "$(profiles::state)" = "$document" ]
+    run grep -q '^confirm' "$CALLS"
+    [ "$status" -eq 1 ]
+}
+
+@test 'transaction history is offered only for a valid accessible private action record' {
+    CORE_TRANSACTION=20261025T113206Z-1749361
+    profiles::_result firewall failed 'Native change failed.'
+    run access::list home
+    jq -e '.recovery.transaction==""' <<<"$output"
+    install -d -m 0700 "$CORE_STATE/backups/$CORE_TRANSACTION"
+    printf 'Failure details\n' >"$CORE_STATE/backups/$CORE_TRANSACTION/actions.log"
+    chmod 0600 "$CORE_STATE/backups/$CORE_TRANSACTION/actions.log"
+    run access::list home
+    jq -e --arg id "$CORE_TRANSACTION" '.recovery.transaction==$id' <<<"$output"
+    profiles::public_status | jq -e '.results.firewall|has("transaction")|not'
 }

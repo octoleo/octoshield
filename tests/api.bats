@@ -56,6 +56,27 @@ setup() {
     jq -e -s 'length == 2 and .[-1] == {type:"done",success:false}' <<<"$output"
 }
 
+@test 'firewall recovery uses one reviewed helper transaction and rejects extra arguments' {
+    access::recover() {
+        printf 'Review selected firewall %s\n' "$1"
+        core::confirm 'Apply the selected firewall?' || return 1
+        printf 'recovered %s\n' "$1" >>"$TEST_CALLS"
+    }
+    run api::main access recover office <<<'1 yes'
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^begin ' "$TEST_CALLS")" -eq 1 ]
+    grep -qx 'recovered office' "$TEST_CALLS"
+    jq -e -s 'any(.[];.type=="confirm") and .[-1].success==true' <<<"$output"
+    : >"$TEST_CALLS"
+    run api::main access recover office extra
+    [ "$status" -eq 2 ]
+    run api::main access restore office
+    [ "$status" -eq 2 ]
+    run api::main access reconcile '../office'
+    [ "$status" -eq 2 ]
+    [ ! -s "$TEST_CALLS" ]
+}
+
 @test 'private inventory remains one complete structured event beyond display log size' {
     access::dispatch() { jq -cn '{kind:"access",profile:"home",summary:("quoted \" detail " * 700),rules:[]}'; }
     run api::main access list
