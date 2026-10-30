@@ -209,3 +209,14 @@ MOCK
     [ "$(snapshot)" = "$before" ]
     [ -L "$VERSION_REPO/debian/changelog" ]
 }
+
+@test 'maintenance patch increments stay small and carry nine into the next minor' {
+    run bash "$VERSION_REPO/scripts/version.sh" --set 900.3.3
+    [ "$status" -eq 0 ]
+    for version in 900.3.4 900.3.5 900.3.6 900.3.7 900.3.8 900.3.9 900.4.0; do
+        run bash "$VERSION_REPO/scripts/version.sh" --bump patch
+        [ "$status" -eq 0 ]
+        run bash "$VERSION_REPO/scripts/version.sh" --check "v$version"
+        [ "$status" -eq 0 ]
+    done
+}

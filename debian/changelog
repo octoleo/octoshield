@@ -1,3 +1,15 @@
+octoshield (1.3.4) unstable; urgency=medium
+
+  * Ship the verified Office firewall access-readiness fix from 1.3.3's
+    follow-up changes; retain scoped access when original restoration is absent.
+  * Reuse fresh inspections on navigation and coalesce pending and running reads.
+  * Keep successful automatic inspections quiet and preserve user change output.
+  * Refresh after network/profile changes, including uncertain failures and locks.
+  * Test permanent TCP 9003 access with real UFW and unavailable restore evidence.
+  * Keep maintenance versions patch-sized, carrying 1.3.9 into 1.4.0.
+
+ -- OctoLeo <octoleo@users.noreply.github.com>  Fri, 30 Oct 2026 13:44:09 +0000
+
 octoshield (1.3.3) unstable; urgency=medium
 
   * Recognize UFW's forwarding-disabled status with verified IPv4/IPv6 policy.

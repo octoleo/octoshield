@@ -32,7 +32,12 @@ version::bump() {
     local root=$1 component=$2 major minor patch
     IFS=. read -r major minor patch <<<"$VERSION_CURRENT"
     case "$component" in
-        patch) patch=$(version::increment "$patch") ;;
+        patch)
+            if [[ $patch == 9 ]]; then
+                minor=$(version::increment "$minor")
+                patch=0
+            else patch=$(version::increment "$patch"); fi
+            ;;
         minor)
             minor=$(version::increment "$minor")
             patch=0

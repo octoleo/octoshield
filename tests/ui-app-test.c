@@ -103,8 +103,48 @@ static void fixture_text_event(const char *type, gint64 request, const char *tex
     puts(line);
 }
 
+static int refresh_session_fixture(void)
+{
+    fputs("{\"type\":\"ready\"}\n", stdout); fflush(stdout);
+    char line[8192];
+    guint count = 0;
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        g_autoptr(JsonParser) parser = json_parser_new();
+        if (!json_parser_load_from_data(parser, line, -1, NULL)) return 70;
+        JsonObject *request = json_node_get_object(json_parser_get_root(parser));
+        gint64 id = json_object_get_int_member(request, "id");
+        JsonArray *args = array_member(request, "args");
+        if (args == NULL || json_array_get_length(args) < 2) return 71;
+        const char *kind = json_array_get_string_element(args, 0);
+        const char *command = json_array_get_string_element(args, 1);
+        count++;
+        g_usleep(60000); /* Navigate while a genuine asynchronous read is in flight. */
+        gboolean success = TRUE;
+        if (g_str_equal(kind, "connections") && g_str_equal(command, "list")) {
+            fixture_text_event("data", id, count == 5 ? "{invalid" : "{\"kind\":\"connections\",\"connections\":[]}");
+        } else if (g_str_equal(kind, "access") && g_str_equal(command, "list")) {
+            const char *profile = json_array_get_length(args) > 2 ? json_array_get_string_element(args, 2) : "office";
+            g_autoptr(JsonObject) result = access_fixture(profile, "ready", TRUE);
+            g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+            json_node_set_object(node, result);
+            g_autoptr(JsonGenerator) generator = json_generator_new();
+            json_generator_set_root(generator, node);
+            g_autofree gchar *json = json_generator_to_data(generator, NULL);
+            fixture_text_event("data", id, json);
+        } else if (g_str_equal(kind, "profile") && g_str_equal(command, "apply")) {
+            fixture_text_event("log", id, "Fixture failed network change; refresh its actual state.");
+            success = FALSE;
+        } else return 72;
+        printf("{\"type\":\"done\",\"request\":%" G_GINT64_FORMAT ",\"success\":%s,\"change_started\":%s}\n", id, success ? "true" : "false", success ? "false" : "true");
+        printf("{\"type\":\"finished\",\"request\":%" G_GINT64_FORMAT ",\"exit_code\":%d}\n", id, success ? 0 : 1);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 static int fixture(const char *name)
 {
+    if (g_str_equal(name, "refresh-session")) return refresh_session_fixture();
     if (g_str_equal(name, "access-session")) {
         fputs("{\"type\":\"ready\"}\n", stdout); fflush(stdout);
         char line[8192];
@@ -986,7 +1026,8 @@ static void test_access_recovery_uses_session_and_retains_failure(void)
         g_autofree gchar *failure = gtk_text_buffer_get_text(test_app.access_failure_log, &start, &end, FALSE);
         g_assert_nonnull(strstr(failure, "Retained fixture error: nftables reload refused after partial changes."));
         g_autofree gchar *current_log = log_text();
-        g_assert_null(strstr(current_log, "Retained fixture error"));
+        if (i == 0) g_assert_nonnull(strstr(current_log, "Retained fixture error"));
+        else g_assert_null(strstr(current_log, "Retained fixture error"));
         g_assert_cmpint(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)), ==, i == 1 || i == 2);
     }
     /* Finish GTK dialog and text-scrolling transitions before unmapping the
@@ -1330,6 +1371,196 @@ static void test_private_data_rejection_and_queue(void)
     gtk_window_destroy(GTK_WINDOW(dialog));
 }
 
+static void refresh_test_drain(void)
+{
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while ((test_app.operation != NULL || test_app.private_refresh != 0 || test_app.private_refresh_idle != 0) &&
+           g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_null(test_app.operation);
+    g_assert_cmpuint(test_app.private_refresh, ==, 0);
+    g_assert_cmpuint(test_app.private_refresh_idle, ==, 0);
+}
+
+static Session *refresh_test_open(void)
+{
+    const char *const argv[] = {test_executable, "--fixture", "refresh-session", NULL};
+    g_autoptr(GError) error = NULL;
+    Session *session = g_new0(Session, 1);
+    session->app = &test_app;
+    session->process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+    g_assert_no_error(error);
+    session->input = g_subprocess_get_stdin_pipe(session->process);
+    session->output = g_subprocess_get_stdout_pipe(session->process);
+    session->line = g_byte_array_new();
+    test_app.session = session; test_app.auth_required = TRUE;
+    session_read_next(session);
+    g_subprocess_wait_async(session->process, NULL, session_waited, session);
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (!session->ready && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_true(session->ready);
+    return session;
+}
+
+static void refresh_test_close(void)
+{
+    session_revoke(&test_app, "Refresh regression lock");
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (test_app.session != NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_null(test_app.session);
+    g_assert_false(test_app.connections_loaded);
+    g_assert_false(test_app.access_loaded);
+    g_assert_cmpint(test_app.connections_checked_at, ==, 0);
+    test_app.auth_required = FALSE;
+    test_app.local_session_ready = FALSE;
+    update_actions(&test_app);
+}
+
+static void test_details_immediate_collapse(void)
+{
+    g_assert_null(test_app.operation);
+    for (guint pass = 0; pass < 4; pass++) {
+        gtk_expander_set_expanded(test_app.details, TRUE);
+        gint64 deadline = g_get_monotonic_time() + 2 * G_TIME_SPAN_SECOND;
+        while (!gtk_widget_get_mapped(GTK_WIDGET(test_app.log_view)) && g_get_monotonic_time() < deadline) {
+            g_main_context_iteration(NULL, FALSE); g_usleep(1000);
+        }
+        g_assert_true(gtk_widget_get_mapped(GTK_WIDGET(test_app.log_view)));
+        for (guint line = 0; line < 80; line++) append_log(&test_app, "Immediate-collapse output fixture");
+        /* No settling sleep: users can collapse immediately, too. */
+        gtk_expander_set_expanded(test_app.details, FALSE);
+        g_assert_false(gtk_expander_get_expanded(test_app.details));
+        while (g_main_context_iteration(NULL, FALSE)) { }
+    }
+    g_assert_null(test_app.operation);
+    g_autofree gchar *text = log_text();
+    g_assert_nonnull(strstr(text, "Immediate-collapse output fixture"));
+}
+
+static void test_refresh_navigation_and_failures(void)
+{
+    g_assert_null(test_app.operation);
+    test_app.auth_required = FALSE;
+    select_page(&test_app, "overview");
+    select_access_profile("office");
+    if (test_app.private_refresh_idle != 0) g_source_remove(test_app.private_refresh_idle);
+    test_app.private_refresh_idle = 0; test_app.private_refresh = 0; test_app.private_refresh_manual = 0;
+    test_app.access_loaded = FALSE; test_app.connections_loaded = FALSE;
+    test_app.access_checked_at = 0; test_app.connections_checked_at = 0;
+    gtk_text_buffer_set_text(test_app.log, "Previous reviewed Office operation", -1);
+    gtk_expander_set_expanded(test_app.details, FALSE);
+    Session *session = refresh_test_open();
+    select_page(&test_app, "privacy");
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (test_app.operation == NULL && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_nonnull(test_app.operation);
+    g_assert_cmpuint(test_app.operation->inspection, ==, 2U);
+    select_page(&test_app, "overview"); select_page(&test_app, "office"); select_page(&test_app, "privacy");
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 2);
+    g_assert_true(test_app.connections_loaded); g_assert_true(test_app.access_loaded);
+    for (guint i = 0; i < 4; i++) { select_page(&test_app, "office"); select_page(&test_app, "privacy"); }
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 2);
+    g_assert_false(gtk_expander_get_expanded(test_app.details));
+    g_autofree gchar *original = log_text();
+    g_assert_cmpstr(original, ==, "Previous reviewed Office operation");
+
+    connections_refresh_clicked(NULL, &test_app);
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 3);
+    g_assert_true(gtk_expander_get_expanded(test_app.details));
+    g_autofree gchar *manual = log_text();
+    g_assert_nonnull(strstr(manual, "Read-only inspection"));
+    gtk_expander_set_expanded(test_app.details, FALSE);
+    test_app.connections_checked_at = g_get_monotonic_time() - PRIVATE_INSPECTION_MAX_AGE - 1;
+    select_page(&test_app, "overview"); select_page(&test_app, "privacy");
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 4);
+    g_autofree gchar *automatic = log_text();
+    g_assert_cmpstr(automatic, ==, manual);
+    g_assert_false(gtk_expander_get_expanded(test_app.details));
+
+    /* The fifth response is malformed. A successful child exit cannot make
+     * it current, and a later page visit must retry rather than cache failure. */
+    test_app.connections_loaded = FALSE;
+    select_page(&test_app, "overview"); select_page(&test_app, "privacy");
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 5);
+    g_assert_false(test_app.connections_loaded);
+    g_assert_true(gtk_expander_get_expanded(test_app.details));
+    g_autofree gchar *failure = log_text();
+    g_assert_nonnull(strstr(failure, "could not be displayed safely"));
+    gtk_expander_set_expanded(test_app.details, FALSE);
+    select_page(&test_app, "overview"); select_page(&test_app, "privacy");
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 6);
+    g_assert_true(test_app.connections_loaded);
+    g_autofree gchar *retained = log_text();
+    g_assert_cmpstr(retained, ==, failure);
+
+    const char *const args[] = {"profile", "apply", "office", "network"};
+    start_action(&test_app, "A title unrelated to resource invalidation", NULL, TRUE, TRUE, G_N_ELEMENTS(args), args);
+    g_assert_false(test_app.connections_loaded);
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 8);
+    g_assert_true(test_app.connections_loaded);
+    g_autofree gchar *mutation = log_text();
+    g_assert_nonnull(strstr(mutation, "Fixture failed network change"));
+    refresh_test_close();
+
+    select_page(&test_app, "overview");
+    session = refresh_test_open();
+    select_page(&test_app, "office");
+    refresh_test_drain();
+    g_assert_cmpuint(session->next_request, ==, 2);
+    refresh_test_close();
+}
+
+static void test_refresh_resource_metadata(void)
+{
+    const struct { const char *args[6]; guint count; guint expected; } cases[] = {
+        {{"profile", "apply", "office"}, 3, 3U},
+        {{"profile", "restore"}, 2, 3U},
+        {{"profile", "apply", "office", "network"}, 4, 2U},
+        {{"profile", "restore", "network"}, 3, 2U},
+        {{"profile", "apply", "office", "firewall"}, 4, 1U},
+        {{"profile", "restore", "firewall"}, 3, 1U},
+        {{"profile", "set", "office", "network.autoconnect", "false"}, 5, 2U},
+        {{"connections", "reconcile"}, 2, 2U},
+        {{"connections", "reconnect", "11111111-1111-1111-1111-111111111111"}, 3, 2U},
+        {{"apply", "network"}, 2, 2U}, {{"office", "network", "uuid"}, 3, 2U},
+        {{"access", "revoke", "office", "g1-2-3"}, 4, 1U},
+        {{"profile", "apply", "office", "services"}, 4, 0U}
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(cases); i++)
+        g_assert_cmpuint(changed_private_resources(cases[i].count, cases[i].args), ==, cases[i].expected);
+}
+
+static void test_verified_access_without_original_restore(void)
+{
+    select_access_profile("office");
+    access_cancel_edit(NULL, &test_app);
+    g_autoptr(JsonObject) root = access_fixture("office", "ready", TRUE);
+    json_object_set_boolean_member(object_member(root, "recovery"), "can_restore", FALSE);
+    g_assert_true(show_access(&test_app, root));
+    gtk_drop_down_set_selected(test_app.access_preset, 2);
+    gtk_drop_down_set_selected(test_app.access_scope, 1);
+    gtk_editable_set_text(test_app.access_ports, "9003");
+    gtk_editable_set_text(test_app.access_source, "172.24.0.4");
+    gtk_editable_set_text(test_app.access_interface, "any");
+    gtk_drop_down_set_selected(test_app.access_protocol, 0);
+    gtk_drop_down_set_selected(test_app.access_duration, 3);
+    update_actions(&test_app);
+    g_assert_true(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_submit)));
+    g_assert_false(gtk_widget_get_sensitive(GTK_WIDGET(test_app.access_restore)));
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) args = access_arguments(&test_app, &error);
+    g_assert_no_error(error); g_assert_nonnull(args);
+    g_assert_cmpstr(args[2], ==, "office"); g_assert_cmpstr(args[3], ==, "9003");
+    g_assert_cmpstr(args[4], ==, "tcp"); g_assert_cmpstr(args[5], ==, "172.24.0.4");
+    g_assert_cmpstr(args[6], ==, "any"); g_assert_cmpstr(args[7], ==, "0");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && g_str_equal(argv[1], "--fixture"))
@@ -1381,6 +1612,10 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/process/failure-change-state", test_failure_change_state);
     g_test_add_func("/ui/process/bounded-oversized-event", test_oversize);
     g_test_add_func("/ui/process/correlated-prompts-and-visible-review", test_confirmations);
+    g_test_add_func("/ui/refresh/immediate-details-collapse-after-output", test_details_immediate_collapse);
+    g_test_add_func("/ui/refresh/navigation-inflight-manual-failure-and-session", test_refresh_navigation_and_failures);
+    g_test_add_func("/ui/refresh/resource-invalidation-metadata", test_refresh_resource_metadata);
+    g_test_add_func("/ui/refresh/verified-access-without-original-restore", test_verified_access_without_original_restore);
     int result = g_test_run();
     branding_clear(&test_app);
     gtk_window_destroy(test_app.window);
