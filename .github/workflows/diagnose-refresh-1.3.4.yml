@@ -6,23 +6,49 @@ on:
     paths: [.github/workflows/diagnose-refresh-1.3.4.yml]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   diagnose:
+    if: github.repository == 'octoleo/octoshield' && github.ref == 'refs/heads/fix/1.3.4-access-refresh-release'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+      - name: Include the current published package in upgrade validation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/ci.yml')
+          s = p.read_text()
+          old = "baseline: ['1.1.0', '1.2.0', '1.2.1', '1.3.1', '1.3.2']"
+          assert s.count(old) == 1
+          s = s.replace(old, "baseline: ['1.1.0', '1.2.0', '1.2.1', '1.3.1', '1.3.2', '1.3.3']")
+          anchor = '          esac\n'
+          start = s.index('1.3.2:24.04)')
+          pos = s.index(anchor, start)
+          cases = ('            1.3.3:24.04) expected=834a44e620643c24b4fb4d38d78b685ad59205395c8083b3a9fef9b26900602d ;;\n'
+                   '            1.3.3:26.04) expected=d2cdadb89a38ef92482f98271696e1a718654fe10e4454181c6b35f11f40a74a ;;\n')
+          s = s[:pos] + cases + s[pos:]
+          p.write_text(s)
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/ci.yml
+          git commit -m 'test: verify upgrades from the published 1.3.3 packages'
+          git push origin HEAD:fix/1.3.4-access-refresh-release
       - name: Install native debugging dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends build-essential gdb pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+          sudo apt-get update > /tmp/octoshield-apt.log 2>&1
+          sudo apt-get install --yes --no-install-recommends build-essential gdb pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common >> /tmp/octoshield-apt.log 2>&1 || { cat /tmp/octoshield-apt.log; exit 1; }
       - name: Compile production frontend tests with symbols
-        run: make CFLAGS='-O0 -g' build/test-ui-app
-      - name: Trace full suite transition
-        run: dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo gdb -batch -ex run -ex 'thread apply all bt' --args build/test-ui-app
-      - name: Run refresh regressions without earlier fixture state
-        run: dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo gdb -batch -ex run -ex 'thread apply all bt' --args build/test-ui-app -p /ui/refresh
+        run: make CFLAGS='-O2 -g' build/test-ui-app
+      - name: Trace mapped full suite transition
+        run: |
+          dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 gdb -batch -ex run -ex 'bt 40' --args build/test-ui-app > /tmp/octoshield-gdb.log 2>&1
+          tail -100 /tmp/octoshield-gdb.log
+      - name: Trace mapped refresh regressions independently
+        run: |
+          dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 gdb -batch -ex run -ex 'bt 40' --args build/test-ui-app -p /ui/refresh > /tmp/octoshield-refresh-gdb.log 2>&1
+          tail -100 /tmp/octoshield-refresh-gdb.log
