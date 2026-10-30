@@ -1,0 +1,44 @@
+name: Assemble and validate 1.3.4 fix branch
+
+on:
+  push:
+    branches: [fix/1.3.4-access-refresh-release]
+    paths:
+      - scripts/assemble-1.3.4.py
+      - .github/workflows/assemble-1.3.4.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: assemble-octoshield-1.3.4
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    if: github.repository == 'octoleo/octoshield' && github.ref == 'refs/heads/fix/1.3.4-access-refresh-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential shellcheck shfmt bats jq pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+      - name: Apply checked source edits and remove this one-use assembly machinery
+        run: |
+          python3 scripts/assemble-1.3.4.py
+          shfmt -i 4 -ci -w scripts/version.sh tests/version.bats tests/firewall-integration.sh
+          git diff --check
+          git rm scripts/assemble-1.3.4.py .github/workflows/assemble-1.3.4.yml
+          git add src/ui/octoshield-gtk.c src/octoshield src/lib/cli.sh scripts/version.sh debian/changelog data/io.vdm.OctoShield.metainfo.xml tests/ui-app-test.c tests/version.bats tests/firewall-integration.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: quiet and coalesce inspections, verify TCP 9003 access, prepare 1.3.4'
+          git push origin HEAD:fix/1.3.4-access-refresh-release
+      - name: Compile production frontend and native regression tests
+        run: make gui build/test-ui-app build/test-ui-lifecycle
+      - name: Run targeted backend and version regressions
+        run: bats tests/access-readiness.bats tests/access.bats tests/profile-controls.bats tests/version.bats
+      - name: Exercise actual GTK navigation and asynchronous transport
+        run: make ui-display-test
