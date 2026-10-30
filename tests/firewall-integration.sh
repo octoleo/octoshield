@@ -172,21 +172,23 @@ firewall_test::isolated() {
     ip netns exec octoother ip address add 192.168.77.3/32 dev peerother
     # These explicit return routes make both negative scope probes reachable
     # before UFW is enabled, including with reverse-path filtering in use.
+    ip netns exec octolan ip address add 172.24.0.4/32 dev peerlan
+    ip route add 172.24.0.4/32 dev octolan0
     ip route add 198.51.100.2/32 dev octolan0
     ip route add 192.168.77.3/32 dev octoother0
 
-    for port in 80 443 9000; do
+    for port in 80 443 9000 9003; do
         socat "TCP4-LISTEN:$port,reuseaddr,fork" EXEC:/bin/cat >"$temporary/listener-4-$port.log" 2>&1 &
         listener_pids+=("$!")
         socat "TCP6-LISTEN:$port,ipv6only=1,reuseaddr,fork" EXEC:/bin/cat >"$temporary/listener-6-$port.log" 2>&1 &
         listener_pids+=("$!")
     done
     for _attempt in {1..30}; do
-        [[ $(ss -H -ltn '( sport = :80 or sport = :443 or sport = :9000 )' | wc -l) == 6 ]] && break
+        [[ $(ss -H -ltn '( sport = :80 or sport = :443 or sport = :9000 or sport = :9003 )' | wc -l) == 8 ]] && break
         sleep 0.1
     done
-    [[ $(ss -H -ltn '( sport = :80 or sport = :443 or sport = :9000 )' | wc -l) == 6 ]] || firewall_test::fail 'Native TCP listeners did not start.'
-    for port in 80 443 9000; do
+    [[ $(ss -H -ltn '( sport = :80 or sport = :443 or sport = :9000 or sport = :9003 )' | wc -l) == 8 ]] || firewall_test::fail 'Native TCP listeners did not start.'
+    for port in 80 443 9000 9003; do
         firewall_test::probe allowed octolan 4 192.168.77.2 192.168.77.1 "$port"
         firewall_test::probe allowed octolan 4 198.51.100.2 192.168.77.1 "$port"
         firewall_test::probe allowed octoother 4 192.168.77.3 192.0.2.1 "$port"
@@ -219,6 +221,34 @@ firewall_test::isolated() {
     [[ $(firewall_test::baseline_hash) == "$baseline_before" ]] || firewall_test::fail 'Retry replaced the original baseline.'
     firewall_test::web_scope blocked
     printf 'PASS: real partial application is failed, Access is blocked, cancellation is read-only, and reviewed retry succeeds with forwarding off\n'
+
+    FIREWALL_TEST_CASE='verified Office permits scoped TCP 9003 without its original restore point'
+    directory=$(profile_controls::_directory)
+    mv "$directory/firewall-baseline" "$directory/retained-baseline-test"
+    saved_before=$(profile_controls::snapshot firewall)
+    document_before=$(profiles::state)
+    firewall_test::assert_ready
+    access::list office | jq --exit-status '.recovery.can_restore == false and .recovery.can_apply' >/dev/null
+    firewall_test::expect_failure firewall_test::change access::dispatch restore
+    [[ $(profile_controls::snapshot firewall) == "$saved_before" && $(profiles::state) == "$document_before" ]] || firewall_test::fail 'Unavailable original restoration changed policy.'
+    FIREWALL_TEST_CONSENT=no
+    firewall_test::expect_failure firewall_test::change access::dispatch allow office 9003 tcp 172.24.0.4 any 0
+    FIREWALL_TEST_CONSENT=yes
+    [[ $(profile_controls::snapshot firewall) == "$saved_before" && $(profiles::state) == "$document_before" ]] || firewall_test::fail 'Cancelled TCP 9003 review changed policy.'
+    firewall_test::change access::dispatch allow office 9003 tcp 172.24.0.4 any 0
+    firewall_test::assert_ready
+    firewall_test::probe allowed octolan 4 172.24.0.4 192.168.77.1 9003
+    firewall_test::probe blocked octolan 4 192.168.77.2 192.168.77.1 9003
+    firewall_test::probe blocked octolan 6 fd42:77::2 fd42:77::1 9003
+    web_group=$(access::list office | jq --exit-status --raw-output '.rules[] | select(.ports == "9003") | .id')
+    firewall_test::change access::dispatch revoke office "$web_group"
+    firewall_test::probe blocked octolan 4 172.24.0.4 192.168.77.1 9003
+    [[ ! -e $directory/firewall-baseline ]] || firewall_test::fail 'Access fabricated an original restore point.'
+    mv "$directory/retained-baseline-test" "$directory/firewall-baseline"
+    [[ $(firewall_test::baseline_hash) == "$baseline_before" ]] || firewall_test::fail 'TCP 9003 management changed retained original evidence.'
+    firewall_test::assert_ready
+    access::list office | jq --exit-status '.recovery.can_restore' >/dev/null
+    printf 'PASS: verified Office allows and revokes exact TCP 9003 source without an original restore point; cancellation and scope are enforced\n'
 
     FIREWALL_TEST_CASE='permanent scoped web access, reload and grouped revocation'
     firewall_test::change access::dispatch allow office 9000 tcp 192.168.77.0/24 octolan0 0

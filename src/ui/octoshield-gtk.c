@@ -33,12 +33,13 @@
 #define MAX_PROTOCOL_LINE (64U * 1024U)
 #define MAX_LOG_CHARACTERS 180000
 #define MAX_REVIEW_BYTES (256U * 1024U)
+#define PRIVATE_INSPECTION_MAX_AGE (30 * G_TIME_SPAN_SECOND)
 #define OCTOSHIELD_APPLICATION_ID "io.vdm.OctoShield"
 #define BRAND_RESOURCE_DARK "/io/vdm/OctoShield/branding/OctoShield-dark.png"
 #define BRAND_RESOURCE_LIGHT "/io/vdm/OctoShield/branding/OctoShield-light.png"
 
 #ifndef OCTOSHIELD_VERSION
-#define OCTOSHIELD_VERSION "1.3.3"
+#define OCTOSHIELD_VERSION "1.3.4"
 #endif
 
 typedef struct App App;
@@ -172,6 +173,7 @@ typedef struct {
     gchar *impact;
     GStrv argv;
     gboolean changes;
+    gboolean automatic;
 } Request;
 
 typedef struct {
@@ -213,6 +215,10 @@ struct Operation {
     gboolean structured_data;
     gboolean session_operation;
     gboolean firewall_change;
+    gboolean connection_change;
+    gboolean access_change;
+    gboolean automatic;
+    guint inspection;
     guint64 request_id;
 };
 
@@ -316,7 +322,10 @@ struct App {
     JsonObject *container_plan;
     GtkWidget *container_apply;
     guint private_refresh;
+    guint private_refresh_manual;
     guint private_refresh_idle;
+    gint64 access_checked_at;
+    gint64 connections_checked_at;
     gboolean access_loaded;
     gboolean connections_loaded;
     gboolean connections_incomplete;
@@ -474,6 +483,9 @@ static void append_log(App *app, const char *text)
             g_string_append(operation->review, "\n[Review output exceeded the display limit. Further approval is disabled; inspect the policy through the terminal interface.]\n");
         }
     }
+    /* Keep successful background reads out of the preceding user action.
+     * The bounded review buffer retains their diagnostics if they fail. */
+    if (app->operation != NULL && app->operation->automatic) return;
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(app->log, &end);
     gtk_text_buffer_insert(app->log, &end, text, -1);
@@ -533,8 +545,21 @@ static void close_answers(Operation *operation)
     }
 }
 
+static void operation_present_details(Operation *operation)
+{
+    if (!operation->automatic) return;
+    operation->automatic = FALSE;
+    App *app = operation->app;
+    g_autofree gchar *details = g_strdup(operation->review->str);
+    gtk_text_buffer_set_text(app->log, "", 0);
+    append_log(app, operation->title);
+    append_log(app, details);
+    gtk_expander_set_expanded(app->details, TRUE);
+}
+
 static void protocol_error(Operation *operation, const char *message)
 {
+    operation_present_details(operation);
     if (!operation->protocol_failed) {
         operation->protocol_failed = TRUE;
         append_log(operation->app, message);
@@ -613,6 +638,7 @@ static void confirmation_response(AdwMessageDialog *dialog, const char *response
 static void show_confirmation(Operation *operation, guint64 id, const char *text)
 {
     App *app = operation->app;
+    operation_present_details(operation);
     operation->waiting_confirmation = TRUE;
     operation->current_prompt_id = id;
     gtk_label_set_text(app->activity, "Review required — the helper is waiting for your decision");
@@ -775,11 +801,9 @@ static void operation_maybe_finish(Operation *operation)
     App *app = operation->app;
     gboolean success = operation->exit_success && operation->done_seen &&
                        operation->reported_success && !operation->protocol_failed;
-    gboolean changed_access = g_str_equal(operation->title, "Allow network access") ||
-        g_str_equal(operation->title, "Update network access") || g_str_equal(operation->title, "Revoke network access");
+    gboolean changed_access = operation->access_change;
     gboolean changed_firewall = operation->firewall_change;
-    gboolean changed_connection = g_str_equal(operation->title, "Save connection privacy") ||
-        g_str_equal(operation->title, "Reconnect selected network") || g_str_equal(operation->title, "Review external network changes");
+    gboolean changed_connection = operation->connection_change;
     gboolean changed_container = g_str_equal(operation->title, "Restrict container to this computer");
     if (!success) {
         app->private_refresh = 0;
@@ -794,6 +818,17 @@ static void operation_maybe_finish(Operation *operation)
         success = FALSE;
         app->private_refresh = 0;
     }
+    if (!success) {
+        app->private_refresh_manual = 0;
+        operation_present_details(operation);
+    } else {
+        /* A successful exit alone is not a valid inspection: data_seen above
+         * is set only after structured result validation and rendering. */
+        if (operation->inspection == 1U && app->access_loaded)
+            app->access_checked_at = g_get_monotonic_time();
+        if (operation->inspection == 2U && app->connections_loaded)
+            app->connections_checked_at = g_get_monotonic_time();
+    }
     operation->waiting_confirmation = FALSE;
     if (app->confirmation != NULL) {
         AdwMessageDialog *dialog = app->confirmation;
@@ -804,9 +839,11 @@ static void operation_maybe_finish(Operation *operation)
     if (!operation->done_seen)
         append_log(app, "No valid completion result was received. Authentication may have been cancelled, or the helper may have failed. Review the details before retrying.");
     if (success) {
-        gtk_label_set_text(app->activity, "Operation completed — review the details below");
-        append_log(app, "Operation completed successfully.");
-        toast(app, "Operation completed");
+        if (!operation->automatic) {
+            gtk_label_set_text(app->activity, "Operation completed — review the details below");
+            append_log(app, "Operation completed successfully.");
+            toast(app, "Operation completed");
+        }
     } else {
         if (operation->done_seen && !operation->reported_success &&
             !operation->protocol_failed && operation->change_started_known &&
@@ -841,7 +878,11 @@ static void operation_maybe_finish(Operation *operation)
         access_invalidate(app, "Inspecting the current firewall after this operation. Your permission draft is retained; recovery never submits it.");
         app->private_refresh |= 1U;
     }
-    if (changed_connection) app->private_refresh |= 2U;
+    if (changed_connection) {
+        app->connections_loaded = FALSE;
+        app->connections_checked_at = 0;
+        app->private_refresh |= 2U;
+    }
     if (changed_container && success) {
         gtk_label_set_text(app->diagnostics_summary, "This service's reviewed published host ports are now bound to localhost. Custom routing and firewall paths remain outside that verification. Keep the generated override in future deployments; the source files, recovery snapshot and command remain below.");
         if (app->container_apply != NULL) gtk_widget_set_sensitive(app->container_apply, FALSE);
@@ -862,6 +903,30 @@ static void request_free(Request *request)
     g_free(request->impact);
     g_strfreev(request->argv);
     g_free(request);
+}
+
+/* Resource invalidation follows allowlisted commands, never UI wording.
+ * Attempted mutations also invalidate on partial/uncertain failure. */
+static guint changed_private_resources(gsize count, const gchar *const *args)
+{
+    if (count < 2) return 0;
+    if (g_str_equal(args[0], "access")) return 1U;
+    if (g_str_equal(args[0], "connections")) return 2U;
+    if (g_str_equal(args[0], "apply") || g_str_equal(args[0], "office")) {
+        if (g_str_equal(args[1], "firewall")) return 1U;
+        if (g_str_equal(args[1], "network")) return 2U;
+    }
+    if (!g_str_equal(args[0], "profile")) return 0;
+    if (g_str_equal(args[1], "apply") || g_str_equal(args[1], "restore")) {
+        gsize control = g_str_equal(args[1], "apply") ? 3 : 2;
+        if (count == control) return 3U;
+        if (count > control && g_str_equal(args[control], "firewall")) return 1U;
+        if (count > control && g_str_equal(args[control], "network")) return 2U;
+    }
+    if (g_str_equal(args[1], "rule-add") || g_str_equal(args[1], "rule-remove")) return 1U;
+    if (g_str_equal(args[1], "set") && count >= 4 && g_str_has_prefix(args[3], "network.")) return 2U;
+    if (g_str_equal(args[1], "create") || g_str_equal(args[1], "delete")) return 3U;
+    return 0;
 }
 
 static void launch_request(Request *request)
@@ -893,15 +958,27 @@ static void launch_request(Request *request)
     operation->app = app;
     operation->process = process;
     operation->session_operation = session_operation;
-    if (privileged && request->changes) {
+    if (privileged) {
         const gchar *const *args = (const gchar *const *)&request->argv[2];
         gsize count = g_strv_length(request->argv) - 2;
-        operation->firewall_change = (count >= 2 && (g_str_equal(args[0], "access") ||
-            ((g_str_equal(args[0], "apply") || g_str_equal(args[0], "office")) && g_str_equal(args[1], "firewall")))) ||
-            (count >= 2 && g_str_equal(args[0], "profile") &&
-             ((g_str_equal(args[1], "apply") && (count == 3 || (count == 4 && g_str_equal(args[3], "firewall")))) ||
-              (g_str_equal(args[1], "restore") && (count == 2 || (count == 3 && g_str_equal(args[2], "firewall"))))));
+        if (request->changes) {
+            guint changed = changed_private_resources(count, args);
+            operation->firewall_change = (changed & 1U) != 0;
+            operation->connection_change = (changed & 2U) != 0;
+            operation->access_change = count >= 2 && g_str_equal(args[0], "access") &&
+                (g_str_equal(args[1], "allow") || g_str_equal(args[1], "update") || g_str_equal(args[1], "revoke"));
+            if (operation->connection_change) {
+                app->connections_loaded = FALSE;
+                app->connections_checked_at = 0;
+            }
+        } else if (count >= 2 && g_str_equal(args[1], "list")) {
+            if (g_str_equal(args[0], "access")) operation->inspection = 1U;
+            if (g_str_equal(args[0], "connections")) operation->inspection = 2U;
+        } else if (count == 3 && g_str_equal(args[0], "diagnostics") && g_str_equal(args[1], "show")) {
+            operation->inspection = 4U;
+        }
     }
+    operation->automatic = request->automatic && !request->changes && operation->inspection != 0;
     operation->answers = session_operation ? app->session->input : g_subprocess_get_stdin_pipe(process);
     operation->title = g_strdup(request->title);
     operation->review = g_string_new(NULL);
@@ -936,13 +1013,16 @@ static void launch_request(Request *request)
         gtk_label_set_text(app->profile_details, "Loading the selected profile configuration…");
         reset_profile_choices(app);
     }
-    gtk_text_buffer_set_text(app->log, "", 0);
-    append_log(app, request->title);
-    if (request->impact != NULL)
-        append_log(app, request->impact);
-    append_log(app, "Review this output and every requested confirmation. Closing this window does not interrupt a running system change.");
-    gtk_expander_set_expanded(app->details, TRUE);
-    gtk_label_set_text(app->activity, "Working — your administrator session is unlocked…");
+    if (!operation->automatic) {
+        gtk_text_buffer_set_text(app->log, "", 0);
+        append_log(app, request->title);
+        if (request->impact != NULL) append_log(app, request->impact);
+        append_log(app, request->changes ?
+            "Review this output and every requested confirmation. Closing this window does not interrupt a running system change." :
+            "Read-only inspection. This operation does not change protection settings.");
+        gtk_expander_set_expanded(app->details, TRUE);
+        gtk_label_set_text(app->activity, "Working — your administrator session is unlocked…");
+    }
     gtk_widget_set_visible(GTK_WIDGET(app->spinner), TRUE);
     gtk_spinner_start(app->spinner);
     update_actions(app);
@@ -1000,6 +1080,8 @@ static void session_revoke(App *app, const char *reason)
     }
     if (app->access_status != NULL) gtk_label_set_text(app->access_status, reason);
     app->access_loaded = FALSE; app->connections_loaded = FALSE; app->private_refresh = 0;
+    app->private_refresh_manual = 0;
+    app->access_checked_at = 0; app->connections_checked_at = 0;
     if (app->access_rules != NULL) clear_list(app->access_rules);
     if (app->access_editing != NULL) access_cancel_edit(NULL, app);
     g_clear_pointer(&app->container_plan, json_object_unref);
@@ -1381,8 +1463,8 @@ static void preview_response(AdwMessageDialog *dialog, const char *response, gpo
     update_actions(app);
 }
 
-static void start_action(App *app, const char *title, const char *impact, gboolean privileged,
-                         gboolean changes, gsize argc, const char *const *args)
+static void start_action_full(App *app, const char *title, const char *impact, gboolean privileged,
+                              gboolean changes, gsize argc, const char *const *args, gboolean automatic)
 {
     if (app->operation != NULL || app->preview != NULL || app->smoke_test) {
         toast(app, "Finish the current operation before starting another");
@@ -1400,6 +1482,7 @@ static void start_action(App *app, const char *title, const char *impact, gboole
     request->impact = g_strdup(impact);
     request->argv = argv;
     request->changes = changes;
+    request->automatic = automatic;
     if (!administrator_ready(app)) {
         if (app->pending_request != NULL) request_free(app->pending_request);
         app->pending_request = request;
@@ -1421,6 +1504,12 @@ static void start_action(App *app, const char *title, const char *impact, gboole
     g_signal_connect(dialog, "response", G_CALLBACK(preview_response), request);
     update_actions(app);
     gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void start_action(App *app, const char *title, const char *impact, gboolean privileged,
+                         gboolean changes, gsize argc, const char *const *args)
+{
+    start_action_full(app, title, impact, privileged, changes, argc, args, FALSE);
 }
 
 static void fixed_action_clicked(GtkButton *button, gpointer data)
@@ -2764,28 +2853,46 @@ static void select_page(App *app, const char *name)
     gtk_stack_set_visible_child_name(app->pages, name);
 }
 
+/* A cache only avoids redundant page reads. Every mutation still uses the
+ * helper's fresh locked assessment; this is never authority to change policy. */
+static gboolean private_inspection_current(App *app, guint resource)
+{
+    gint64 checked = resource == 1U ? app->access_checked_at : app->connections_checked_at;
+    gboolean loaded = resource == 1U ? access_current(app) : app->connections_loaded;
+    gint64 age = g_get_monotonic_time() - checked;
+    return checked > 0 && loaded && age >= 0 && age < PRIVATE_INSPECTION_MAX_AGE;
+}
+
 static gboolean refresh_private(gpointer data)
 {
     App *app = data;
     app->private_refresh_idle = 0;
     if (app->shutting_down || app->smoke_test || !administrator_ready(app)) {
         app->private_refresh = 0;
+        app->private_refresh_manual = 0;
         return G_SOURCE_REMOVE;
     }
     if (app->operation != NULL || app->preview != NULL || app->usb_prompt != NULL) return G_SOURCE_REMOVE;
-    if (app->private_refresh & 1U) {
-        app->private_refresh &= ~1U;
+    /* Recheck automatic requests at dispatch: a preceding operation may have
+     * already supplied the result while this request was queued. */
+    for (guint resource = 1U; resource <= 2U; resource <<= 1)
+        if (!(app->private_refresh_manual & resource) && private_inspection_current(app, resource))
+            app->private_refresh &= ~resource;
+    guint resource = (app->private_refresh & 1U) ? 1U : (app->private_refresh & 2U) ? 2U : (app->private_refresh & 4U);
+    if (resource == 0) return G_SOURCE_REMOVE;
+    gboolean automatic = !(app->private_refresh_manual & resource);
+    app->private_refresh &= ~resource;
+    app->private_refresh_manual &= ~resource;
+    if (resource == 1U) {
         const char *profile = app->access_profile_initialized ? selected_profile(app, app->access_profile) : NULL;
         const char *args[] = {"access", "list", profile};
-        start_action(app, "Refresh access permissions", NULL, TRUE, FALSE, profile != NULL ? 3 : 2, args);
-    } else if (app->private_refresh & 2U) {
-        app->private_refresh &= ~2U;
+        start_action_full(app, "Refresh access permissions", NULL, TRUE, FALSE, profile != NULL ? 3 : 2, args, automatic);
+    } else if (resource == 2U) {
         const char *args[] = {"connections", "list"};
-        start_action(app, "Refresh connections", NULL, TRUE, FALSE, G_N_ELEMENTS(args), args);
-    } else if (app->private_refresh & 4U) {
-        app->private_refresh &= ~4U;
+        start_action_full(app, "Refresh connections", NULL, TRUE, FALSE, G_N_ELEMENTS(args), args, automatic);
+    } else {
         const char *args[] = {"diagnostics", "show", "containers"};
-        start_action(app, "Review protection details", NULL, TRUE, FALSE, G_N_ELEMENTS(args), args);
+        start_action_full(app, "Review protection details", NULL, TRUE, FALSE, G_N_ELEMENTS(args), args, automatic);
     }
     return G_SOURCE_REMOVE;
 }
@@ -2793,13 +2900,28 @@ static gboolean refresh_private(gpointer data)
 static void queue_private_refresh(App *app, guint flags)
 {
     app->private_refresh |= flags;
+    app->private_refresh_manual |= flags;
     if (app->private_refresh_idle == 0) app->private_refresh_idle = g_idle_add(refresh_private, app);
+}
+
+static void ensure_private_refresh(App *app, guint flags)
+{
+    if (app->shutting_down || app->smoke_test || !administrator_ready(app)) return;
+    for (guint resource = 1U; resource <= 2U; resource <<= 1) {
+        if (!(flags & resource) || private_inspection_current(app, resource)) continue;
+        if (app->operation != NULL && app->operation->inspection == resource) continue;
+        app->private_refresh |= resource;
+    }
+    if (app->private_refresh != 0 && app->private_refresh_idle == 0)
+        app->private_refresh_idle = g_idle_add(refresh_private, app);
 }
 
 static void access_refresh_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
-    queue_private_refresh(data, 3U);
+    App *app = data;
+    queue_private_refresh(app, 1U);
+    ensure_private_refresh(app, 2U);
 }
 
 static void connections_refresh_clicked(GtkButton *button, gpointer data)
@@ -2818,7 +2940,8 @@ static void review_status_clicked(GtkButton *button, gpointer data)
         GtkAdjustment *scroll = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(page));
         gtk_adjustment_set_value(scroll, gtk_adjustment_get_lower(scroll));
         gtk_widget_grab_focus(GTK_WIDGET(app->access_inspect));
-        queue_private_refresh(app, 3U);
+        queue_private_refresh(app, 1U);
+        ensure_private_refresh(app, 2U);
         return;
     }
     if (g_strcmp0(topic, "network") == 0 && !g_object_get_data(G_OBJECT(button), "inspect-network")) { select_page(app, "privacy"); queue_private_refresh(app, 2U); return; }
@@ -3569,8 +3692,8 @@ static void navigation_selected(GtkListBox *list, GtkListBoxRow *row, gpointer d
         const char *page = g_object_get_data(G_OBJECT(row), "page-name");
         gtk_stack_set_visible_child_name(app->pages, page);
         if (app->auth_required && administrator_ready(app)) {
-            if (g_str_equal(page, "office")) queue_private_refresh(app, 3U);
-            else if (g_str_equal(page, "privacy")) queue_private_refresh(app, 2U);
+            if (g_str_equal(page, "office")) ensure_private_refresh(app, 3U);
+            else if (g_str_equal(page, "privacy")) ensure_private_refresh(app, 2U);
         }
     }
 }
