@@ -22,13 +22,17 @@ jobs:
           sudo apt-get install --yes --no-install-recommends build-essential gdb pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common >> /tmp/octoshield-apt.log 2>&1 || { cat /tmp/octoshield-apt.log; exit 1; }
       - name: Compile production frontend tests with symbols
         run: make CFLAGS='-O2 -g' build/test-ui-app
-      - name: Trace mapped full suite transition
+      - name: Repeat mapped normal-speed suite and trace any failure
         run: |
-          dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 gdb -batch -ex 'set pagination off' -ex run -ex bt --args build/test-ui-app > /tmp/full-trace.log 2>&1 || true
-          tail -n 110 /tmp/full-trace.log
-      - name: Trace mapped refresh regressions independently
-        run: |
-          dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 gdb -batch -ex 'set pagination off' -ex run -ex bt --args build/test-ui-app -p /ui/refresh > /tmp/refresh-trace.log 2>&1 || true
-          tail -n 80 /tmp/refresh-trace.log
-      - name: Require a normally exiting complete suite
-        run: grep -q 'exited normally' /tmp/full-trace.log && grep -q 'exited normally' /tmp/refresh-trace.log
+          ulimit -c unlimited
+          sudo sysctl -w kernel.core_pattern=/tmp/octoshield-test.core
+          for attempt in 1 2 3; do
+            if dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo OCTOSHIELD_TEST_SCREENSHOTS=1 build/test-ui-app > /tmp/full-trace.log 2>&1; then
+              tail -n 12 /tmp/full-trace.log
+              echo "Normal-speed suite $attempt passed"
+            else
+              tail -n 35 /tmp/full-trace.log
+              if test -f /tmp/octoshield-test.core; then gdb -batch -ex 'set pagination off' -ex bt build/test-ui-app /tmp/octoshield-test.core; fi
+              exit 1
+            fi
+          done
