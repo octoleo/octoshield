@@ -1415,6 +1415,27 @@ static void refresh_test_close(void)
     update_actions(&test_app);
 }
 
+static void test_details_immediate_collapse(void)
+{
+    g_assert_null(test_app.operation);
+    for (guint pass = 0; pass < 4; pass++) {
+        gtk_expander_set_expanded(test_app.details, TRUE);
+        gint64 deadline = g_get_monotonic_time() + 2 * G_TIME_SPAN_SECOND;
+        while (!gtk_widget_get_mapped(GTK_WIDGET(test_app.log_view)) && g_get_monotonic_time() < deadline) {
+            g_main_context_iteration(NULL, FALSE); g_usleep(1000);
+        }
+        g_assert_true(gtk_widget_get_mapped(GTK_WIDGET(test_app.log_view)));
+        for (guint line = 0; line < 80; line++) append_log(&test_app, "Immediate-collapse output fixture");
+        /* No settling sleep: users can collapse immediately, too. */
+        gtk_expander_set_expanded(test_app.details, FALSE);
+        g_assert_false(gtk_expander_get_expanded(test_app.details));
+        while (g_main_context_iteration(NULL, FALSE)) { }
+    }
+    g_assert_null(test_app.operation);
+    g_autofree gchar *text = log_text();
+    g_assert_nonnull(strstr(text, "Immediate-collapse output fixture"));
+}
+
 static void test_refresh_navigation_and_failures(void)
 {
     g_assert_null(test_app.operation);
@@ -1591,6 +1612,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ui/process/failure-change-state", test_failure_change_state);
     g_test_add_func("/ui/process/bounded-oversized-event", test_oversize);
     g_test_add_func("/ui/process/correlated-prompts-and-visible-review", test_confirmations);
+    g_test_add_func("/ui/refresh/immediate-details-collapse-after-output", test_details_immediate_collapse);
     g_test_add_func("/ui/refresh/navigation-inflight-manual-failure-and-session", test_refresh_navigation_and_failures);
     g_test_add_func("/ui/refresh/resource-invalidation-metadata", test_refresh_resource_metadata);
     g_test_add_func("/ui/refresh/verified-access-without-original-restore", test_verified_access_without_original_restore);

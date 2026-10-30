@@ -470,6 +470,24 @@ static void toast(App *app, const char *message)
     adw_toast_overlay_add_toast(app->toasts, adw_toast_new(message));
 }
 
+/* Follow the output without scheduling a text-view scroll animation. GTK
+ * 4.14 can disconnect an uninitialised adjustment animation when an
+ * expander unmaps the view immediately after output arrives. Following
+ * changed bounds also handles layout occurring after a buffer append. */
+static void log_bounds_changed(GtkAdjustment *adjustment, gpointer data)
+{
+    if (!gtk_widget_get_mapped(GTK_WIDGET(data))) return;
+    gtk_adjustment_set_value(adjustment,
+        MAX(gtk_adjustment_get_lower(adjustment),
+            gtk_adjustment_get_upper(adjustment) - gtk_adjustment_get_page_size(adjustment)));
+}
+
+static void log_view_mapped(GtkWidget *view, gpointer data)
+{
+    (void)data;
+    log_bounds_changed(gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(view)), view);
+}
+
 static void append_log(App *app, const char *text)
 {
     if (app->operation != NULL && app->operation->review != NULL) {
@@ -501,8 +519,7 @@ static void append_log(App *app, const char *text)
         gtk_text_buffer_get_start_iter(app->log, &start);
         gtk_text_buffer_insert(app->log, &start, "[Older output removed to keep this view responsive.]\n", -1);
     }
-    gtk_text_buffer_get_end_iter(app->log, &end);
-    gtk_text_view_scroll_to_iter(app->log_view, &end, 0.0, FALSE, 0.0, 1.0);
+    log_bounds_changed(gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(app->log_view)), app->log_view);
 }
 
 static void show_error(App *app, const char *title, const char *message)
@@ -3808,6 +3825,9 @@ static GtkWidget *build_activity(App *app)
     app->log = gtk_text_view_get_buffer(app->log_view);
     gtk_text_buffer_set_text(app->log, "Operation output will appear here. No protection has been applied by opening this app.", -1);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(app->log_view));
+    g_signal_connect_object(gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(app->log_view)),
+        "changed", G_CALLBACK(log_bounds_changed), app->log_view, 0);
+    g_signal_connect(app->log_view, "map", G_CALLBACK(log_view_mapped), NULL);
     gtk_widget_add_css_class(scroll, "card");
     gtk_box_append(GTK_BOX(content), scroll);
     GtkWidget *copy = gtk_button_new_with_label("Copy details");
