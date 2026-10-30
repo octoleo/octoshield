@@ -42,7 +42,7 @@ access::default_profile() {
 # Only an explicitly reviewed Apply/Restore completes that failed operation.
 access::_assessment() {
     local profile=$1 active=$2 document=$3 saved='' current='' desired result message transaction='' directory
-    local ready=false can_apply=false can_restore=false can_reconcile=false matches=false narrowed=false
+    local ready=false can_apply=false can_restore=false can_reconcile=false matches=false narrowed=false baseline_available=false
     local reason=unavailable summary='Firewall state or recovery evidence could not be read. Inspect the last change before retrying.' observed
     result=$(jq -r '.results.firewall.status//"unmanaged"' <<<"$document") || return 1
     message=$(jq -r '.results.firewall.message//"No previous firewall operation is recorded."' <<<"$document") || return 1
@@ -56,10 +56,23 @@ access::_assessment() {
         observed='{"state":"unknown","summary":"Current native firewall policy could not be inspected."}'
     directory=$(profile_controls::_directory) || return 1
     if saved=$(profile_controls::_read firewall 2>/dev/null); then
-        if profile_controls::firewall_baseline_available 2>/dev/null && current=$(profile_controls::snapshot firewall 2>/dev/null); then
+        if profile_controls::firewall_baseline_available 2>/dev/null; then baseline_available=true; fi
+        if current=$(profile_controls::snapshot firewall 2>/dev/null); then
             [[ $(profile_controls::_hash <<<"$current") != "$(jq -r .expected <<<"$saved")" ]] || matches=true
             if [[ $matches == false ]] && profile_controls::_runtime_narrowed "$saved" "$current" >/dev/null 2>&1; then narrowed=true; fi
-            if [[ $matches == false && $narrowed == false ]]; then
+            desired=$(jq -c --arg p "$profile" '.profiles[$p].firewall' <<<"$document" | profile_controls::_hash) || return 1
+            # Restoring the pre-adoption firewall is not the rollback path for
+            # a permission change on an already verified managed profile. That
+            # path reapplies the previous profile. Do not let a missing original
+            # restore point invalidate independently matching current evidence.
+            if [[ $baseline_available == false && $matches == true && $active == "$profile" &&
+                $result == applied && $(jq -r .desired <<<"$saved") == "$desired" &&
+                $(jq -r .state <<<"$observed") == active ]]; then
+                reason=ready ready=true can_apply=true
+                summary='The selected firewall profile is verified. Review a permission to allow, update or revoke access. The original firewall restore point could not be verified; Restore original firewall is unavailable. The retained recovery evidence has not been changed.'
+            elif [[ $baseline_available == false ]]; then
+                summary='The original firewall restore point could not be verified, and the selected current policy is not fully verified. Inspect the last change before recovery; no firewall or recovery records were changed.'
+            elif [[ $matches == false && $narrowed == false ]]; then
                 reason=drift
                 summary='The native firewall differs from the recorded state. Review external changes here before applying a saved profile or restoring the original settings.'
                 if profile_controls::firewall_reconcile_safe >/dev/null 2>&1; then can_reconcile=true; fi
@@ -68,7 +81,6 @@ access::_assessment() {
                 fi
             else
                 can_apply=true can_restore=true
-                desired=$(jq -c --arg p "$profile" '.profiles[$p].firewall' <<<"$document" | profile_controls::_hash) || return 1
                 if [[ $active != unmanaged && $active != "$profile" ]]; then
                     reason=different-profile
                     summary="Firewall currently uses $active. Select that profile for a permission change, or review and apply the selected $profile firewall profile here."
@@ -86,6 +98,8 @@ access::_assessment() {
                     summary='The selected firewall profile is verified. Review a permission to allow, update or revoke access.'
                 fi
             fi
+        else
+            summary='The current native firewall snapshot could not be read. Inspect and refresh before changing permissions; the last applied result alone does not verify current policy.'
         fi
     elif [[ $active == unmanaged && $result != failed && $result != applying &&
         ! -e $directory/firewall.json && ! -L $directory/firewall.json &&
