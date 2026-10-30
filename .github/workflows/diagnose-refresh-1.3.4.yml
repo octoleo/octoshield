@@ -1,0 +1,28 @@
+name: Diagnose native refresh transition
+
+on:
+  push:
+    branches: [fix/1.3.4-access-refresh-release]
+    paths: [.github/workflows/diagnose-refresh-1.3.4.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install native debugging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential gdb pkg-config libgtk-4-dev libadwaita-1-dev libjson-glib-dev xvfb xauth dbus-daemon adwaita-icon-theme librsvg2-common
+      - name: Compile production frontend tests with symbols
+        run: make CFLAGS='-O0 -g' build/test-ui-app
+      - name: Trace full suite transition
+        run: dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo gdb -batch -ex run -ex 'thread apply all bt' --args build/test-ui-app
+      - name: Run refresh regressions without earlier fixture state
+        run: dbus-run-session -- xvfb-run -a env GTK_A11Y=none GSK_RENDERER=cairo gdb -batch -ex run -ex 'thread apply all bt' --args build/test-ui-app -p /ui/refresh
